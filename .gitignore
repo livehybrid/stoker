@@ -12,4 +12,6 @@ ui/dist/
 *.sock
 .coverage
 data/
+*.db
+*.sqlite
 .DS_Store

@@ -1,0 +1,19 @@
+# Stoker control plane runtime dependencies (Python 3.12).
+# The DB is Postgres in prod (psycopg driver), SQLite for local/dev/test.
+fastapi
+uvicorn[standard]
+sqlalchemy>=2
+pydantic>=2
+httpx
+pyjwt
+cryptography
+python-multipart
+
+# Postgres driver for prod DATABASE_URL (postgresql+psycopg://...).
+# Optional locally: SQLite needs no driver. Kept here so the image can talk
+# to Postgres; pip resolves a wheel on 3.12.
+psycopg[binary]
+
+# Test dependencies (installed in the same venv for CI/local).
+pytest
+pytest-timeout

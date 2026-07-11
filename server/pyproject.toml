@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stoker-control-plane"
+version = "0.1.0"
+description = "Stoker control plane: server-owned lifecycle for the load-generation fleet"
+readme = { text = "Stoker control plane. The buildable contract lives in server/CONTROL-PLANE.md; the agent wire protocol it serves lives in docs/WORKER-CONTRACT.md at the repository root.", content-type = "text/markdown" }
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "sqlalchemy>=2",
+    "pydantic>=2",
+    "httpx",
+    "pyjwt",
+    "cryptography",
+    "python-multipart",
+]
+
+[project.optional-dependencies]
+postgres = ["psycopg[binary]"]
+test = [
+    "pytest",
+    "pytest-timeout",
+]
+
+[tool.setuptools.packages.find]
+# Discover the `server` package (this file lives inside server/, so the search
+# root is server/ and the package is found as top-level subpackages).
+where = ["."]
+include = ["*"]
+namespaces = false
+
+[tool.pytest.ini_options]
+# rootdir for this config is server/, so "tests" resolves to server/tests.
+# Running `pytest server/tests` from the repo root picks this file up and
+# applies the timeout; testpaths covers a bare `pytest` from inside server/.
+testpaths = ["tests"]
+timeout = 60
+addopts = "-ra"
+filterwarnings = [
+    # Starlette's TestClient warns about httpx vs httpx2; not actionable here.
+    "ignore::DeprecationWarning:starlette.testclient",
+]
