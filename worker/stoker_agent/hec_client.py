@@ -127,6 +127,16 @@ class HecClient(object):
             except queue.Full:
                 continue
 
+    def begin_stop(self):
+        # type: () -> None
+        """Signal producers and senders to stop, without waiting.
+
+        Sets the stopping flag so a producer parked in put() on a full queue
+        is released promptly (put() raises), letting the drain join it without
+        burning a timeout. Idempotent; flush_and_stop() sets the same flag.
+        """
+        self._stopping.set()
+
     def flush_and_stop(self, timeout_s):
         # type: (float) -> bool
         """Stop accepting, drain queue and in-flight batches, join senders.

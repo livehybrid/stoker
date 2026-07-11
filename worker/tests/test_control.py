@@ -249,6 +249,25 @@ class TestFinal:
         assert client.final(2, {}, []) is False
         assert len(plane.requests) == 3  # bounded attempts
 
+    def test_final_makes_no_attempt_past_deadline(self, plane):
+        # Regression (concurrency#4): a deadline already in the past means the
+        # final POST is skipped entirely, so a dead control plane cannot push
+        # the drain over the SIGTERM budget.
+        plane.script("final", [(500, {})] * 5)
+        clock = FakeClock().with_log()
+        client, _ = make_client(plane, clock=clock)
+        assert client.final(2, {}, [], deadline=clock.t - 1) is False
+        assert len(plane.requests) == 0
+
+    def test_final_deadline_bounds_attempts(self, plane):
+        # A small budget allows the first attempt; the post-failure backoff
+        # advances the clock past the deadline so no further attempt is made.
+        plane.script("final", [(500, {})] * 5)
+        clock = FakeClock().with_log()
+        client, _ = make_client(plane, clock=clock)
+        assert client.final(2, {}, [], deadline=clock.t + 0.3) is False
+        assert len(plane.requests) == 1
+
 
 class TestStandaloneControl:
     def test_first_heartbeat_releases_at_now_plus_2s(self):

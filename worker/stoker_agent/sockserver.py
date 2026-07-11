@@ -79,9 +79,13 @@ class SocketServer(object):
         self._listener = listener
         self._thread.start()
 
-    def stop(self):
+    def stop(self, join_timeout_s=5.0):
+        # type: (float) -> None
         """Stop reading: pending unreleased socket data is intentionally
-        dropped on drain (only the HEC queue is flushed, per contract)."""
+        dropped on drain (only the HEC queue is flushed, per contract).
+
+        join_timeout_s bounds the reader join so the caller's drain deadline is
+        honoured (the agent clamps it against the remaining drain budget)."""
         self._stop.set()
         with self._conn_lock:
             conn = self._conn
@@ -96,7 +100,7 @@ class SocketServer(object):
             except OSError:
                 pass
         if self._thread.is_alive():
-            self._thread.join(5.0)
+            self._thread.join(join_timeout_s)
         if os.path.exists(self._path):
             try:
                 os.unlink(self._path)

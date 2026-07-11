@@ -48,12 +48,17 @@ def build_command(conf_path, env=None):
 
 class EngineRunner(object):
     def __init__(self, conf_path, socket_path, engine_root=None,
-                 extra_env=None, ring_size=DEFAULT_RING_SIZE):
-        # type: (str, str, Optional[str], Optional[Dict[str, str]], int) -> None
+                 extra_env=None, ring_size=DEFAULT_RING_SIZE, cwd=None):
+        # type: (str, str, Optional[str], Optional[Dict[str, str]], int, Optional[str]) -> None
         self._conf_path = conf_path
         self._socket_path = socket_path
         self._engine_root = engine_root or DEFAULT_ENGINE_ROOT
         self._extra_env = dict(extra_env or {})
+        # Working directory for the engine subprocess. eventgen resolves
+        # relative file-token replacement paths against it; rooting it at the
+        # pack makes `samples/foo.sample` resolve correctly. None inherits the
+        # agent's cwd (the pre-fix behaviour).
+        self._cwd = cwd
         self._ring = collections.deque(maxlen=ring_size)
         self._ring_lock = threading.Lock()
         self._proc = None    # type: Optional[subprocess.Popen]
@@ -92,6 +97,7 @@ class EngineRunner(object):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 env=self._build_env(),
+                cwd=self._cwd,
                 text=True,
                 bufsize=1,
                 start_new_session=True,  # our SIGTERM must not hit the engine

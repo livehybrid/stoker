@@ -21,7 +21,7 @@ from . import confrewrite
 from .config import Config
 from .control import (ControlClient, DeadManError, StandaloneControl,
                       SupersededError)
-from .engine import EngineError, EngineRunner
+from .engine import STOP_GRACE_S, EngineError, EngineRunner
 from .metrics import CpuTracker, Metrics, read_rss_mb
 from .pacing import TokenBucket
 from .slice import SliceError, SpecSlice, parse_iso8601
@@ -49,8 +49,8 @@ def _default_hec_factory(url, token, gzip_enabled, verify_tls, ack):
                      verify_tls=verify_tls, ack=ack)
 
 
-def _default_engine_factory(conf_path, socket_path):
-    return EngineRunner(conf_path, socket_path)
+def _default_engine_factory(conf_path, socket_path, cwd=None):
+    return EngineRunner(conf_path, socket_path, cwd=cwd)
 
 
 class Agent(object):
@@ -126,8 +126,12 @@ class Agent(object):
                                           self._bucket, make_filler(sl),
                                           gated=gated)
                 self._sock.start()
+                # cwd rooted at the pack so eventgen resolves relative
+                # file-token replacement paths (e.g. samples/foo.sample)
+                # against the pack, not the container working directory.
                 self._engine = self._engine_factory(conf_path,
-                                                    cfg.output_socket)
+                                                    cfg.output_socket,
+                                                    pack.pack_dir)
                 if gated:
                     # warm the engine; the paused bucket holds output back
                     self._engine.start()
@@ -216,6 +220,15 @@ class Agent(object):
                 if command == "drain":
                     self.request_drain("control-drain")
                     return None
+            # Dead-man also applies before T0: heartbeat() swallows transport
+            # failures to None, so a control plane that dies after ready() but
+            # before releasing us would otherwise hang here forever (only
+            # SIGTERM would break it). Self-evict after the dead-man window so
+            # the fleet slot is released. StandaloneControl never expires.
+            if control.deadman_expired():
+                self._exit_code = EXIT_DEADMAN
+                self.request_drain("dead-man")
+                return None
             self._drain_event.wait(sl.telemetry_interval_s)
         return None
 
@@ -389,18 +402,34 @@ class Agent(object):
         self._state = "draining"
         reason = self._drain_reason or "complete"
         log.info("draining (%s)", reason)
+        # Every stage below is clamped against one global deadline so the whole
+        # drain stays within the SIGTERM budget even when both the HEC and the
+        # control plane are unreachable (their per-stage timeouts would
+        # otherwise sum well past it).
+        drain_deadline = time.monotonic() + self._cfg.drain_budget_s
+
+        def remaining():
+            # type: () -> float
+            return max(0.0, drain_deadline - time.monotonic())
+
         # Stop intake first so pacing stays exact: unreleased socket data is
         # dropped by design; only the HEC queue is flushed.
         if self._bucket is not None:
             self._bucket.close()
+        # Signal the HEC client to stop before joining the socket reader: a
+        # reader parked inside hec.put() on a full queue (degraded HEC) is only
+        # released by this, not by bucket.close(), so without it the socket
+        # join would burn its whole timeout for nothing.
+        if self._hec is not None:
+            self._hec.begin_stop()
         if self._sock is not None:
-            self._sock.stop()
+            self._sock.stop(join_timeout_s=min(5.0, remaining()))
         if self._engine is not None and self._engine_started:
-            self._engine.stop()
+            self._engine.stop(grace_s=min(STOP_GRACE_S, remaining()))
         flushed = True
         summary = {}  # type: Dict[str, Any]
         if self._hec is not None:
-            flushed = self._hec.flush_and_stop(FLUSH_TIMEOUT_S)
+            flushed = self._hec.flush_and_stop(min(FLUSH_TIMEOUT_S, remaining()))
             summary = self._hec.snapshot()
             if self._cfg.standalone and summary.get("auth_failed"):
                 self._exit_code = EXIT_AUTH_STANDALONE
@@ -414,5 +443,5 @@ class Agent(object):
             summary["discarded_s"] = round(self._bucket.discarded_s, 3)
         log_tail = self._engine.log_tail() if self._engine is not None else []
         if control is not None and sl is not None:
-            control.final(sl.slot, summary, log_tail)
+            control.final(sl.slot, summary, log_tail, deadline=drain_deadline)
         log.info("drain complete: %s", summary)

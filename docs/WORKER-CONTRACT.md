@@ -42,7 +42,7 @@ Standalone mode (Phase 0 exit test, no control plane): `STOKER_STANDALONE=1` plu
 
 In standalone mode the agent synthesises a spec slice identical to a claim response, sets `T0 = now + 2 s`, logs heartbeat lines to stdout instead of POSTing, and ignores fencing/dead-man (there is no control plane to lose). Everything else (pacing, HEC, drain, SIGTERM) behaves identically.
 
-Common tuning (defaults in brackets): `STOKER_OUTPUT_SOCKET` (`/tmp/stoker-output.sock`), `STOKER_HEARTBEAT_S` (5), `STOKER_OVERDRIVE` (1.15), `STOKER_CATCHUP_S` (5), `STOKER_METRICS_PORT` (9100, prometheus_client; 0 disables).
+Common tuning (defaults in brackets): `STOKER_OUTPUT_SOCKET` (`/tmp/stoker-output.sock`), `STOKER_HEARTBEAT_S` (5), `STOKER_OVERDRIVE` (1.15), `STOKER_CATCHUP_S` (5), `STOKER_METRICS_PORT` (9100, prometheus_client; 0 disables), `STOKER_DRAIN_BUDGET_S` (40; whole-drain deadline, kept under the 45 s SIGTERM budget), `STOKER_DEADMAN_S` (600; drivers set 1800 for eks fleets).
 
 ## Spec slice (claim response / standalone synthesis)
 
@@ -71,7 +71,7 @@ All under `{CONTROL_URL}/api/agent/runs/{run_id}/`, `Authorization: Bearer {STOK
 2. Fetch bundle, verify sha256, unpack, rewrite conf (below), warm engine, `POST ready {slot, lease_id}`.
 3. Poll heartbeat until response carries `{"command":"release","t0":"<iso8601>"}`. Start generating at exactly T0 (absolute wall clock).
 4. `POST heartbeat` every `telemetry.interval_s` with `{slot, lease_id, protocol_version, events_total, bytes_total, eps, hec_2xx, hec_4xx, hec_5xx, hec_timeouts, retries, queue_depth, lag_s, rss_mb, cpu_pct, state}`. Response commands: `continue` | `release {t0}` | `retarget {share}` | `drain`. Response may carry `jwt` (rolling refresh): replace the bearer.
-5. On drain/duration end/SIGTERM: stop engine, flush HEC queue (bounded 20 s), `POST final {slot, summary, log_tail}` with the last 50 engine log lines, exit 0.
+5. On drain/duration end/SIGTERM: stop engine, flush HEC queue (bounded 20 s), `POST final {slot, summary, log_tail}` with the last 50 engine log lines, exit 0. The whole drain is clamped to `STOKER_DRAIN_BUDGET_S` (40 s): every stage (socket join, engine grace, HEC flush, final POST) is bounded against a single deadline so an unreachable HEC and control plane cannot together push the drain past the SIGTERM budget. The dead-man also applies while waiting for release, so a control plane that dies before T0 self-evicts rather than hanging.
 
 **Fencing:** a successful heartbeat ack is the lease renewal. After 30 s without one, pause generation (stop releasing tokens; the engine backpressures). Resume only when a heartbeat succeeds and confirms this `lease_id` is still the holder. A `superseded` response is a fatal drain-and-exit. **Dead-man:** no successful heartbeat for `STOKER_DEADMAN_S` (600; drivers set 1800 for eks fleets) → drain and exit. **Effective T0:** on a re-issued lease the claim response's `effective_t0` (claim time) replaces the run T0 as the pacing anchor, so replacements start with zero backlog.
 
@@ -122,6 +122,7 @@ Stream socket at `STOKER_OUTPUT_SOCKET`. One NDJSON envelope per event, one line
 - `worker/engines/eventgen/` holds the vendored `splunk_eventgen` 7.2.1 tree: `eventgen_api_server/`, `splunk_app/`, controller/Redis paths and their imports **deleted**; upstream LICENSE and a `VENDOR.md` (exact tag, deletions, patches) kept.
 - Dependency pins patched to installable-on-py3.9 versions in `worker/requirements.txt` (single source; Dockerfile installs it). No Flask, no Redis, no ujson unless the generate path genuinely imports them.
 - `stoker.py` lives inside the vendored plugin directory (`lib/plugins/output/`), registered exactly like the stock output plugins. The registry key is `output.<filename stem>`, so `outputMode = stoker` requires this exact file name (amended from `stoker_output.py`, which would register as plugin `stoker_output`).
+- The engine subprocess runs with its working directory rooted at the pack, so eventgen resolves relative file-token replacement paths (e.g. `token.N.replacement = samples/foo.sample`) against the pack rather than the container working directory.
 
 ## Constraints
 

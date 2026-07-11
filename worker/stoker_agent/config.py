@@ -22,6 +22,9 @@ DEFAULT_OVERDRIVE = 1.15
 DEFAULT_CATCHUP_S = 5.0
 DEFAULT_METRICS_PORT = 9100
 DEFAULT_DEADMAN_S = 600.0
+# Whole-drain budget; the contract requires SIGTERM to exit within 45 s, so the
+# default leaves margin. Every drain stage is clamped against this.
+DEFAULT_DRAIN_BUDGET_S = 40.0
 
 
 class ConfigError(Exception):
@@ -61,6 +64,7 @@ class Config:
     catchup_s: float
     metrics_port: int
     deadman_s: float
+    drain_budget_s: float
     hec_verify_tls: bool
 
 
@@ -138,6 +142,10 @@ def load_config(env=None):
     deadman_s = _as_float("STOKER_DEADMAN_S",
                           _get(env, "STOKER_DEADMAN_S") or str(DEFAULT_DEADMAN_S),
                           minimum=1.0)
+    drain_budget_s = _as_float("STOKER_DRAIN_BUDGET_S",
+                               _get(env, "STOKER_DRAIN_BUDGET_S")
+                               or str(DEFAULT_DRAIN_BUDGET_S),
+                               minimum=1.0)
     hec_verify_tls = _as_bool("STOKER_HEC_VERIFY_TLS",
                               _get(env, "STOKER_HEC_VERIFY_TLS") or "1")
 
@@ -203,6 +211,7 @@ def load_config(env=None):
             catchup_s=catchup_s,
             metrics_port=metrics_port,
             deadman_s=deadman_s,
+            drain_budget_s=drain_budget_s,
             hec_verify_tls=hec_verify_tls,
         )
 
@@ -240,5 +249,6 @@ def load_config(env=None):
         catchup_s=catchup_s,
         metrics_port=metrics_port,
         deadman_s=deadman_s,
+        drain_budget_s=drain_budget_s,
         hec_verify_tls=hec_verify_tls,
     )

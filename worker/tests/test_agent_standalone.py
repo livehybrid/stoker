@@ -12,9 +12,10 @@ import time
 
 import pytest
 
-from stoker_agent.agent import Agent
+from stoker_agent.agent import EXIT_DEADMAN, Agent
 from stoker_agent.config import load_config
 from stoker_agent.engine import EngineRunner
+from stoker_agent.slice import SpecSlice
 
 STUB_SCRIPT = r"""
 import json, os, socket, sys, time
@@ -77,6 +78,9 @@ class FakeHec(object):
             "dropped_invalid": 0, "queue_depth": 0, "auth_failed": False,
         }
 
+    def begin_stop(self):
+        self.stopped = True
+
     def flush_and_stop(self, timeout_s):
         self.flush_timeout = timeout_s
         self.stopped = True
@@ -107,7 +111,7 @@ def make_pack(tmp_path):
     return str(pack)
 
 
-def make_agent(tmp_path, rate=100, duration="4"):
+def make_agent(tmp_path, rate=100, duration="4", extra_env=None):
     env = {
         "STOKER_STANDALONE": "1",
         "STOKER_BUNDLE": make_pack(tmp_path),
@@ -121,6 +125,8 @@ def make_agent(tmp_path, rate=100, duration="4"):
         "STOKER_METRICS_PORT": "0",
         "STOKER_HEARTBEAT_S": "1",
     }
+    if extra_env:
+        env.update(extra_env)
     cfg = load_config(env)
     sinks = []
 
@@ -131,7 +137,8 @@ def make_agent(tmp_path, rate=100, duration="4"):
 
     agent = Agent(cfg,
                   hec_factory=hec_factory,
-                  engine_factory=lambda conf, sock: StubEngine(conf, sock))
+                  engine_factory=lambda conf, sock, cwd=None:
+                  StubEngine(conf, sock, cwd=cwd))
     return agent, sinks
 
 
@@ -220,5 +227,60 @@ def test_standalone_hec_auth_failure_exits_3(tmp_path):
     }
     agent = Agent(load_config(env),
                   hec_factory=AuthFailingHec,
-                  engine_factory=lambda conf, sock: StubEngine(conf, sock))
+                  engine_factory=lambda conf, sock, cwd=None:
+                  StubEngine(conf, sock, cwd=cwd))
     assert agent.run() == 3
+
+
+class _DeadControl(object):
+    """Managed control plane that is up for claim/ready then dies: every
+    heartbeat misses and the dead-man window has elapsed."""
+
+    def heartbeat(self, payload):
+        return None
+
+    def deadman_expired(self):
+        return True
+
+    def should_pause(self):
+        return False
+
+    def seconds_since_ack(self):
+        return 9999.0
+
+
+def test_await_release_self_evicts_on_deadman():
+    """Regression (protocol_security#1): a control plane that dies after
+    ready() but before release must not hang the worker pre-T0. The dead-man
+    guard in _await_release drains and sets exit code 4 instead of looping."""
+    env = {
+        "STOKER_RUN_ID": "1",
+        "STOKER_CONTROL_URL": "http://ctl.invalid",
+        "STOKER_RUN_JWT": "jwt",
+        "STOKER_TOTAL_WORKERS": "1",
+        "STOKER_HEC_TOKEN": "tok",
+        "STOKER_METRICS_PORT": "0",
+    }
+    agent = Agent(load_config(env))  # bucket/hec unset: fencing early-returns
+    sl = SpecSlice.from_claim({
+        "run_id": 1, "slot": 0, "total_workers": 1, "lease_id": "le",
+        "engine": "eventgen",
+        "bundle": {"url": "/tmp/pack"}, "share": {"eps": 100},
+        "hec": {"url": "http://h:8088", "index": "loadtest"},
+        "telemetry": {"interval_s": 0.01}, "released": False,
+    })
+    t0 = agent._await_release(_DeadControl(), sl)
+    assert t0 is None
+    assert agent._exit_code == EXIT_DEADMAN
+    assert agent._drain_event.is_set()
+
+
+@pytest.mark.timeout(60)
+def test_small_drain_budget_clamps_flush_timeout(tmp_path):
+    """Regression (concurrency#4): the HEC flush timeout is clamped to the
+    remaining global drain budget, so the whole drain stays bounded."""
+    agent, sinks = make_agent(tmp_path, rate=100, duration="2",
+                              extra_env={"STOKER_DRAIN_BUDGET_S": "5"})
+    assert agent.run() == 0
+    assert sinks[0].flush_timeout is not None
+    assert sinks[0].flush_timeout <= 5.0

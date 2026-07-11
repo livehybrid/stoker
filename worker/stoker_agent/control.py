@@ -72,14 +72,14 @@ class ControlClient(object):
 
     # -- transport -------------------------------------------------------
 
-    def _post(self, path, body):
-        # type: (str, Dict[str, Any]) -> Dict[str, Any]
+    def _post(self, path, body, timeout=None):
+        # type: (str, Dict[str, Any], Optional[float]) -> Dict[str, Any]
         """One attempt. Raises requests exceptions / ControlError on failure."""
         with self._lock:
             headers = {"Authorization": "Bearer " + self._jwt}
         resp = self._session.post(
             self._base + "/" + path, json=body, headers=headers,
-            timeout=self._timeout,
+            timeout=self._timeout if timeout is None else timeout,
         )
         if resp.status_code >= 400:
             raise ControlError("control %s returned HTTP %d" % (path, resp.status_code))
@@ -154,16 +154,30 @@ class ControlClient(object):
         self._record_ack()
         return doc
 
-    def final(self, slot, summary, log_tail):
-        # type: (int, Dict[str, Any], list) -> bool
-        """Best-effort final POST; never blocks exit for long."""
+    def final(self, slot, summary, log_tail, deadline=None):
+        # type: (int, Dict[str, Any], list, Optional[float]) -> bool
+        """Best-effort final POST; never blocks exit past `deadline`.
+
+        `deadline` is a monotonic-clock instant (the agent's drain deadline);
+        each attempt's request timeout is clamped to the time left and no
+        attempt starts once it has passed, so a dead control plane cannot push
+        the drain over the SIGTERM budget.
+        """
         body = {"slot": slot, "summary": summary, "log_tail": log_tail}
         for attempt in range(3):
+            timeout = self._timeout
+            if deadline is not None:
+                left = deadline - self._clock()
+                if left <= 0:
+                    break
+                timeout = min(self._timeout, left)
             try:
-                self._post("final", body)
+                self._post("final", body, timeout=timeout)
                 return True
             except (requests.exceptions.RequestException, ControlError) as exc:
                 log.warning("final POST attempt %d failed: %s", attempt + 1, exc)
+                if deadline is not None and self._clock() >= deadline:
+                    break
                 self._sleep(min(2.0, BACKOFF_BASE_S * (2 ** attempt)))
         return False
 
@@ -223,8 +237,8 @@ class StandaloneControl(object):
             return {"command": "release", "t0": format_iso8601(t0)}
         return {"command": "continue"}
 
-    def final(self, slot, summary, log_tail):
-        # type: (int, Dict[str, Any], list) -> bool
+    def final(self, slot, summary, log_tail, deadline=None):
+        # type: (int, Dict[str, Any], list, Optional[float]) -> bool
         self._out.write("[stoker] final %s\n"
                         % json.dumps({"slot": slot, "summary": summary},
                                      sort_keys=True, default=str))
