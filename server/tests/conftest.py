@@ -43,6 +43,8 @@ def settings(tmp_path, monkeypatch):
     db_path = tmp_path / "stoker-test.db"
     bundle_dir = tmp_path / "bundles"
     bundle_dir.mkdir()
+    repo_clone_dir = tmp_path / "repos"
+    repo_clone_dir.mkdir()
     test_settings = Settings(
         database_url="sqlite:///%s" % db_path,
         master_key=generate_master_key(),
@@ -54,6 +56,7 @@ def settings(tmp_path, monkeypatch):
         portainer_token=None,
         portainer_endpoint=6,
         bundle_dir=str(bundle_dir),
+        repo_clone_dir=str(repo_clone_dir),
         dogfood_hec_url=None,
         dogfood_hec_token=None,
         port=8080,

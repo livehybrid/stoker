@@ -74,8 +74,46 @@ class Target(Base):
     specs: Mapped[list["Spec"]] = relationship(back_populates="target")
 
 
+class Repo(Base):
+    """A git repository containing one or more sample packs.
+
+    ``secret_encrypted`` holds Fernet ciphertext of the credential (a PAT or an
+    SSH deploy key) and is never serialised into any response. ``webhook_secret``
+    is the shared secret the GitHub push webhook is HMAC-verified against.
+    ``trusted_code`` gates the custom-code default-deny: only a repo an admin has
+    explicitly flagged trusted keeps ``bin/`` and ``generator =`` stanzas; every
+    other repo has them stripped/rejected at index time.
+    """
+
+    __tablename__ = "repos"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    url: Mapped[str] = mapped_column(String(1024), nullable=False)
+    # none | pat | deploy_key
+    auth_kind: Mapped[str] = mapped_column(String(16), nullable=False, default="none")
+    # Secret: Fernet ciphertext of the PAT / deploy key. Write-only, never echoed.
+    secret_encrypted: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    default_ref: Mapped[str] = mapped_column(String(255), nullable=False, default="main")
+    head_sha: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    last_synced_at: Mapped[Optional[datetime.datetime]] = _ts_column(nullable=True)
+    sync_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Shared secret for the GitHub push webhook HMAC. Generated on create.
+    webhook_secret: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    trusted_code: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime.datetime] = _ts_column(nullable=False, default=utcnow)
+
+    packs: Mapped[list["Pack"]] = relationship(back_populates="repo")
+
+
 class Pack(Base):
-    """A registered local eventgen pack directory plus lint metadata."""
+    """A registered eventgen pack (a local directory, or one indexed from a repo).
+
+    A pack registered via ``POST /api/packs`` has a local ``source_path`` and a
+    null ``repo_id``. A pack discovered by the git-sync engine carries the
+    ``repo_id`` of the repo it came from and ``indexed_sha`` = the repo head SHA
+    it was indexed at; its ``source_path`` is the pack's directory inside the
+    repo clone at that point.
+    """
 
     __tablename__ = "packs"
 
@@ -93,12 +131,15 @@ class Pack(Base):
     # ok | error | unknown
     lint_status: Mapped[str] = mapped_column(String(16), nullable=False, default="unknown")
     lint_errors_json: Mapped[Optional[Any]] = mapped_column(JSON_VARIANT, nullable=True)
-    # null this stage (git indexing arrives with gitsync).
+    # Repo this pack was indexed from (null for a locally-registered pack).
+    repo_id: Mapped[Optional[int]] = mapped_column(ForeignKey("repos.id"), nullable=True)
+    # The repo head SHA this pack was last indexed at (null for a local pack).
     indexed_sha: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime.datetime] = _ts_column(nullable=False, default=utcnow)
 
     bundles: Mapped[list["Bundle"]] = relationship(back_populates="pack")
     specs: Mapped[list["Spec"]] = relationship(back_populates="pack")
+    repo: Mapped[Optional["Repo"]] = relationship(back_populates="packs")
 
 
 class Bundle(Base):
@@ -268,6 +309,7 @@ class Fleet(Base):
 __all__ = [
     "utcnow",
     "Target",
+    "Repo",
     "Pack",
     "Bundle",
     "Spec",

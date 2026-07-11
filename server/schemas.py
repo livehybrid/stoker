@@ -13,9 +13,15 @@ expects exactly; do not rename them without updating the worker.
 from __future__ import annotations
 
 import datetime
+import re
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+# Git repo url/ref allowlists (defence against option-injection into git argv).
+_ALLOWED_URL_SCHEMES = ("https://", "ssh://", "git://", "file://")
+_SCP_URL_RE = re.compile(r"^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+:")
+_SAFE_REF_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 
 # --------------------------------------------------------------------------- #
 # Shared config: allow ORM attribute reads for response models.
@@ -66,6 +72,95 @@ class TargetTestResult(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
+# Repos (git repo sync for sample packs)
+# --------------------------------------------------------------------------- #
+
+class RepoCreate(BaseModel):
+    """Register a git repo. ``secret`` is a PAT or deploy key: write-only, never
+    echoed. ``auth_kind`` selects how it is applied (none | pat | deploy_key)."""
+
+    url: str
+    auth_kind: str = "none"  # none | pat | deploy_key
+    secret: Optional[str] = Field(default=None, repr=False)  # write-only credential
+    default_ref: str = "main"
+    trusted_code: bool = False
+
+    @field_validator("url")
+    @classmethod
+    def _validate_url(cls, v):
+        # type: (str) -> str
+        # An unvalidated url reaches `git clone <url>` as a positional; a value
+        # beginning with '-' would be parsed as an option and the ext:: transport
+        # runs arbitrary commands. Allowlist real transports and reject a leading
+        # dash. (GIT_ALLOW_PROTOCOL and a '--' argv guard back this up in sync.py.)
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("url is required")
+        if v.startswith("-"):
+            raise ValueError("url must not start with '-'")
+        if not (v.startswith(_ALLOWED_URL_SCHEMES) or _SCP_URL_RE.match(v)):
+            raise ValueError(
+                "url must be https://, ssh://, git://, file:// or scp-style "
+                "user@host:path")
+        return v
+
+    @field_validator("default_ref")
+    @classmethod
+    def _validate_default_ref(cls, v):
+        # type: (str) -> str
+        v = (v or "").strip() or "main"
+        if v.startswith("-") or not _SAFE_REF_RE.match(v):
+            raise ValueError(
+                "default_ref may contain only letters, digits, '.', '_', '/', "
+                "'-' and must not start with '-'")
+        return v
+
+    @field_validator("auth_kind")
+    @classmethod
+    def _validate_auth_kind(cls, v):
+        # type: (str) -> str
+        v = (v or "none").strip()
+        if v not in ("none", "pat", "deploy_key"):
+            raise ValueError("auth_kind must be none, pat or deploy_key")
+        return v
+
+
+class RepoOut(BaseModel):
+    """Repo view. No credential field exists here by construction; ``has_secret``
+    reports only whether a credential is stored, never its value.
+    ``webhook_secret`` is returned once on create so the operator can configure
+    the GitHub webhook; it is not a target/HEC secret."""
+
+    model_config = _ORM
+
+    id: int
+    url: str
+    auth_kind: str
+    has_secret: bool
+    default_ref: str
+    head_sha: Optional[str] = None
+    last_synced_at: Optional[datetime.datetime] = None
+    sync_error: Optional[str] = None
+    trusted_code: bool
+    created_at: datetime.datetime
+
+
+class RepoCreated(RepoOut):
+    """Create response: adds the webhook secret once (so it can be configured on
+    the GitHub side). Subsequent GETs never include it."""
+
+    webhook_secret: Optional[str] = None
+
+
+class RepoSyncResult(BaseModel):
+    """Result of a sync (manual or webhook-triggered)."""
+
+    head_sha: Optional[str] = None
+    packs_indexed: int
+    lint_failures: int
+
+
+# --------------------------------------------------------------------------- #
 # Packs
 # --------------------------------------------------------------------------- #
 
@@ -91,6 +186,7 @@ class PackOut(BaseModel):
     verified: bool
     lint_status: str
     lint_errors_json: Optional[Any] = None
+    repo_id: Optional[int] = None
     indexed_sha: Optional[str] = None
     created_at: datetime.datetime
 
@@ -412,6 +508,8 @@ class Empty(BaseModel):
 __all__ = [
     # targets
     "TargetCreate", "TargetOut", "TargetTestResult",
+    # repos
+    "RepoCreate", "RepoOut", "RepoCreated", "RepoSyncResult",
     # packs
     "PackCreate", "PackOut", "PackPreview",
     # specs

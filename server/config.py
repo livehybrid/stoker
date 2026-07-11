@@ -22,6 +22,7 @@ DEFAULT_DATABASE_URL = "sqlite:///./stoker.db"
 DEFAULT_JWT_TTL_S = 3600
 DEFAULT_PORTAINER_ENDPOINT = 6
 DEFAULT_BUNDLE_DIR = "/data/bundles"
+DEFAULT_REPO_CLONE_DIR = "/data/repos"
 DEFAULT_PORT = 8080
 # Local default image tag; prod pins ghcr.io/livehybrid/stoker-worker@sha256:...
 DEFAULT_WORKER_IMAGE = "ghcr.io/livehybrid/stoker-worker:latest"
@@ -52,6 +53,9 @@ class Settings:
     port: int
     # True when master_key was auto-generated (dev) rather than supplied.
     master_key_generated: bool = False
+    # Where repo clones live in the control-plane volume (git-sync, stage 3).
+    # Defaulted and last so existing Settings(...) call sites stay valid.
+    repo_clone_dir: str = DEFAULT_REPO_CLONE_DIR
 
     @property
     def is_sqlite(self):
@@ -133,6 +137,7 @@ def load_settings(env=None):
         portainer_token=_get(env, "PORTAINER_TOKEN"),
         portainer_endpoint=_get_int(env, "PORTAINER_ENDPOINT", DEFAULT_PORTAINER_ENDPOINT),
         bundle_dir=_get(env, "BUNDLE_DIR", DEFAULT_BUNDLE_DIR) or DEFAULT_BUNDLE_DIR,
+        repo_clone_dir=_get(env, "REPO_CLONE_DIR", DEFAULT_REPO_CLONE_DIR) or DEFAULT_REPO_CLONE_DIR,
         dogfood_hec_url=_get(env, "DOGFOOD_HEC_URL"),
         dogfood_hec_token=_get(env, "DOGFOOD_HEC_TOKEN"),
         port=_get_int(env, "PORT", DEFAULT_PORT),

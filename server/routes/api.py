@@ -14,28 +14,45 @@ run is provisioned; it is never serialised and never logged.
 from __future__ import annotations
 
 import configparser
+import hashlib
+import hmac
 import logging
 import os
+import secrets
 import time
 from typing import Any, Dict, List, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .. import bundles, crypto, lifecycle
+from .. import bundles, crypto, gitsync, lifecycle
 from ..db import get_db
 from ..drivers import get_driver
 from ..drivers.base import DriverError
 from ..engines import ceilings
-from ..models import MetricSample, Pack, Run, RunEvent, Spec, Target, WorkerLease, utcnow
+from ..models import (
+    MetricSample,
+    Pack,
+    Repo,
+    Run,
+    RunEvent,
+    Spec,
+    Target,
+    WorkerLease,
+    utcnow,
+)
 from ..schemas import (
     MetricSampleOut,
     MetricsOut,
     PackCreate,
     PackOut,
     PackPreview,
+    RepoCreate,
+    RepoCreated,
+    RepoOut,
+    RepoSyncResult,
     RescaleRequest,
     RunCreated,
     RunDetail,
@@ -165,6 +182,169 @@ def delete_target(target_id: int, db: Session = Depends(get_db)):
 
 
 # --------------------------------------------------------------------------- #
+# Repos (git repo sync for sample packs)
+# --------------------------------------------------------------------------- #
+
+_REPO_AUTH_KINDS = ("none", "pat", "deploy_key")
+
+
+@router.post("/repos", response_model=RepoCreated, status_code=201)
+def create_repo(body: RepoCreate, db: Session = Depends(get_db)):
+    # type: (...) -> Any
+    """Register a git repo; the credential is Fernet-encrypted, never echoed.
+
+    ``auth_kind`` selects how the credential is applied (none | pat | deploy_key).
+    A per-repo ``webhook_secret`` is generated and returned once so the operator
+    can configure the GitHub push webhook; it is not returned on later GETs.
+    """
+    if body.auth_kind not in _REPO_AUTH_KINDS:
+        raise HTTPException(
+            status_code=422,
+            detail="auth_kind must be one of %s" % ", ".join(_REPO_AUTH_KINDS))
+    if body.auth_kind in ("pat", "deploy_key") and not body.secret:
+        raise HTTPException(
+            status_code=422,
+            detail="auth_kind %r requires a secret (write-only credential)" % body.auth_kind)
+
+    secret_ct = None  # type: Optional[str]
+    if body.secret:
+        try:
+            secret_ct = crypto.encrypt(body.secret)
+        except crypto.CryptoError as exc:
+            # Never surface the secret; only that encryption failed.
+            raise HTTPException(
+                status_code=500, detail="could not encrypt repo credential: %s" % exc)
+
+    webhook_secret = secrets.token_hex(32)
+    repo = Repo(
+        url=body.url.strip(),
+        auth_kind=body.auth_kind,
+        secret_encrypted=secret_ct,
+        default_ref=(body.default_ref or "main").strip() or "main",
+        webhook_secret=webhook_secret,
+        trusted_code=bool(body.trusted_code),
+    )
+    db.add(repo)
+    db.commit()
+    db.refresh(repo)
+    log.info("registered repo %s (id=%s) auth=%s trusted_code=%s",
+             repo.url, repo.id, repo.auth_kind, repo.trusted_code)
+    out = _repo_view(repo, RepoCreated)
+    out.webhook_secret = webhook_secret
+    return out
+
+
+@router.get("/repos", response_model=List[RepoOut])
+def list_repos(db: Session = Depends(get_db)):
+    # type: (...) -> Any
+    """List repos (no credential fields by construction)."""
+    repos = list(db.execute(select(Repo).order_by(Repo.id)).scalars().all())
+    return [_repo_view(r, RepoOut) for r in repos]
+
+
+@router.get("/repos/{repo_id}", response_model=RepoOut)
+def get_repo(repo_id: int, db: Session = Depends(get_db)):
+    # type: (...) -> Any
+    repo = db.get(Repo, repo_id)
+    if repo is None:
+        raise HTTPException(status_code=404, detail="unknown repo")
+    return _repo_view(repo, RepoOut)
+
+
+@router.delete("/repos/{repo_id}", status_code=204)
+def delete_repo(repo_id: int, db: Session = Depends(get_db)):
+    # type: (...) -> Any
+    """Delete a repo (guarded when a pack it indexed is referenced by a spec).
+
+    Packs indexed from the repo are removed with it, but only if none of them is
+    referenced by a spec; otherwise the delete is refused so a running/defined
+    job never loses its pack out from under it.
+    """
+    repo = db.get(Repo, repo_id)
+    if repo is None:
+        raise HTTPException(status_code=404, detail="unknown repo")
+
+    pack_ids = list(db.execute(
+        select(Pack.id).where(Pack.repo_id == repo_id)).scalars().all())
+    if pack_ids:
+        ref = db.execute(
+            select(Spec.id).where(Spec.pack_id.in_(pack_ids)).limit(1)
+        ).scalars().first()
+        if ref is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "repo %s has packs referenced by one or more specs; delete "
+                    "those specs first" % repo_id),
+            )
+        for pack in db.execute(
+                select(Pack).where(Pack.id.in_(pack_ids))).scalars().all():
+            db.delete(pack)
+    db.delete(repo)
+    db.commit()
+    return Response(status_code=204)
+
+
+@router.post("/repos/{repo_id}/sync", response_model=RepoSyncResult)
+def sync_repo_endpoint(repo_id: int, db: Session = Depends(get_db)):
+    # type: (...) -> Any
+    """Clone/fetch the repo and index its packs; returns the sync counts.
+
+    Rejections: ``404`` unknown repo, ``502 sync_failed`` when git or indexing
+    fails (the secret-free reason is stored on ``repo.sync_error`` and returned).
+    """
+    repo = db.get(Repo, repo_id)
+    if repo is None:
+        raise HTTPException(status_code=404, detail="unknown repo")
+    try:
+        result = gitsync.sync_repo(db, repo)
+    except gitsync.GitSyncError as exc:
+        db.commit()  # persist repo.sync_error recorded by sync_repo
+        raise HTTPException(
+            status_code=502,
+            detail={"error": "sync_failed", "detail": str(exc)})
+    db.commit()
+    return RepoSyncResult(**result)
+
+
+@router.post("/hooks/github")
+async def github_webhook(request: Request, db: Session = Depends(get_db)):
+    # type: (...) -> Any
+    """GitHub push webhook: HMAC-verified, then resync the matching repo.
+
+    Unauthenticated (no forward-auth): GitHub cannot present a LAN credential, so
+    trust rests entirely on the per-repo HMAC signature over the raw body. The
+    matching repo is found by ``webhook_secret`` (each repo has its own), and its
+    delivery must carry a valid ``X-Hub-Signature-256``. A ``push`` event triggers
+    a resync; other events are acknowledged and ignored. Never reveals whether a
+    given secret exists (constant-time compare, uniform responses).
+    """
+    raw = await request.body()
+    sig = request.headers.get("X-Hub-Signature-256", "")
+    event = request.headers.get("X-GitHub-Event", "")
+
+    repo = _match_webhook_repo(db, raw, sig)
+    if repo is None:
+        # Uniform 401 regardless of whether the signature was malformed or just
+        # matched no repo: no oracle for probing secrets.
+        raise HTTPException(status_code=401, detail="invalid or unrecognised signature")
+
+    if event and event != "push":
+        return {"ok": True, "ignored": event}
+
+    try:
+        result = gitsync.sync_repo(db, repo)
+    except gitsync.GitSyncError as exc:
+        db.commit()
+        # 200 with an error field: the webhook was authentic; the sync failed.
+        return {"ok": False, "repo_id": repo.id, "error": str(exc)}
+    db.commit()
+    log.info("webhook resynced repo %s at %s (%d packs)",
+             repo.id, (result.get("head_sha") or "")[:12], result.get("packs_indexed", 0))
+    return {"ok": True, "repo_id": repo.id, **result}
+
+
+# --------------------------------------------------------------------------- #
 # Packs
 # --------------------------------------------------------------------------- #
 
@@ -197,9 +377,23 @@ def register_pack(body: PackCreate, db: Session = Depends(get_db)):
 
 
 @router.get("/packs", response_model=List[PackOut])
-def list_packs(db: Session = Depends(get_db)):
+def list_packs(
+    repo: Optional[int] = Query(default=None, description="filter to packs indexed from this repo id"),
+    repo_id: Optional[int] = Query(default=None, description="alias of 'repo'"),
+    db: Session = Depends(get_db),
+):
     # type: (...) -> Any
-    return list(db.execute(select(Pack).order_by(Pack.id)).scalars().all())
+    """List packs, optionally filtered to those indexed from a given repo.
+
+    The filter accepts either ``?repo=<id>`` or its alias ``?repo_id=<id>``
+    (``repo`` wins when both are supplied).
+    """
+    filter_repo = repo if repo is not None else repo_id
+    stmt = select(Pack)
+    if filter_repo is not None:
+        stmt = stmt.where(Pack.repo_id == filter_repo)
+    stmt = stmt.order_by(Pack.id)
+    return list(db.execute(stmt).scalars().all())
 
 
 @router.get("/packs/{pack_id}", response_model=PackOut)
@@ -589,6 +783,54 @@ def rescale_run_endpoint(run_id: int, body: RescaleRequest, db: Session = Depend
 # --------------------------------------------------------------------------- #
 # Helpers (module-private; no secret material is ever logged or returned).
 # --------------------------------------------------------------------------- #
+
+def _repo_view(repo, model):
+    # type: (Repo, Any) -> Any
+    """Build a repo response model with the computed ``has_secret`` flag.
+
+    The credential ciphertext is never read back out; only its presence is
+    reported. ``webhook_secret`` is left unset here (the create route sets it
+    once on the response).
+    """
+    return model(
+        id=repo.id,
+        url=repo.url,
+        auth_kind=repo.auth_kind,
+        has_secret=bool(repo.secret_encrypted),
+        default_ref=repo.default_ref,
+        head_sha=repo.head_sha,
+        last_synced_at=repo.last_synced_at,
+        sync_error=repo.sync_error,
+        trusted_code=repo.trusted_code,
+        created_at=repo.created_at,
+    )
+
+
+def _match_webhook_repo(db, raw_body, signature_header):
+    # type: (Session, bytes, str) -> Optional[Repo]
+    """Return the repo whose webhook secret validates ``signature_header``.
+
+    ``signature_header`` is GitHub's ``sha256=<hex>``. Each repo has its own
+    secret, so we compute the expected HMAC per repo and compare in constant
+    time. Returns the first match, or ``None`` when the header is malformed or no
+    repo matches (the caller returns a uniform 401, giving no probing oracle).
+    """
+    if not signature_header or not signature_header.startswith("sha256="):
+        return None
+    provided = signature_header.split("=", 1)[1].strip()
+    if not provided:
+        return None
+    repos = db.execute(
+        select(Repo).where(Repo.webhook_secret.is_not(None))
+    ).scalars().all()
+    for repo in repos:
+        secret = repo.webhook_secret or ""
+        expected = hmac.new(
+            secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+        if hmac.compare_digest(expected, provided):
+            return repo
+    return None
+
 
 def _require_pack(db, pack_id):
     # type: (Session, int) -> Pack
