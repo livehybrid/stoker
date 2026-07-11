@@ -1,0 +1,13 @@
+# Stoker worker runtime dependencies (py3.9). Single source of truth: the
+# Dockerfile installs exactly this file. Test-only deps live in CI config.
+
+# Agent (worker/agent)
+requests==2.32.5
+prometheus-client==0.25.0
+
+# Vendored eventgen generate path (worker/engines/eventgen), see VENDOR.md.
+# jinja2 2.10.3 upstream pin replaced by 3.x with compat patches applied to
+# the vendored tree; MarkupSafe pinned for reproducibility.
+jinja2==3.1.6
+MarkupSafe==2.1.5
+python-dateutil==2.9.0.post0

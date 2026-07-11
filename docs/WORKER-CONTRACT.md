@@ -9,7 +9,7 @@ One container, two processes:
 1. **Agent** (`worker/agent/`, entrypoint `python -m stoker_agent`): owns the control-plane conversation, the pacing token bucket, the HEC client and all counters. Starts first, listens on a unix socket, then spawns the engine.
 2. **Engine** (eventgen subprocess): `python -m splunk_eventgen generate <rewritten.conf>` from the vendored tree. Generates events and hands every one to the agent through the output plugin over the unix socket. Knows nothing about HEC, JWTs or the control plane.
 
-Data path: engine → `stoker_output` plugin → unix socket (NDJSON) → agent reader → token bucket → HEC batch queue → gzip POST to Splunk. Backpressure: when the token bucket or HEC queue is full the agent stops reading the socket, the plugin's blocking send stalls and the engine slows. Bounded memory by construction.
+Data path: engine → `stoker` output plugin → unix socket (NDJSON) → agent reader → token bucket → HEC batch queue → gzip POST to Splunk. Backpressure: when the token bucket or HEC queue is full the agent stops reading the socket, the plugin's blocking send stalls and the engine slows. Bounded memory by construction.
 
 ## Environment contract
 
@@ -121,7 +121,7 @@ Stream socket at `STOKER_OUTPUT_SOCKET`. One NDJSON envelope per event, one line
 
 - `worker/engines/eventgen/` holds the vendored `splunk_eventgen` 7.2.1 tree: `eventgen_api_server/`, `splunk_app/`, controller/Redis paths and their imports **deleted**; upstream LICENSE and a `VENDOR.md` (exact tag, deletions, patches) kept.
 - Dependency pins patched to installable-on-py3.9 versions in `worker/requirements.txt` (single source; Dockerfile installs it). No Flask, no Redis, no ujson unless the generate path genuinely imports them.
-- `stoker_output.py` lives inside the vendored plugin directory (`lib/plugins/output/`), registered exactly like the stock output plugins.
+- `stoker.py` lives inside the vendored plugin directory (`lib/plugins/output/`), registered exactly like the stock output plugins. The registry key is `output.<filename stem>`, so `outputMode = stoker` requires this exact file name (amended from `stoker_output.py`, which would register as plugin `stoker_output`).
 
 ## Constraints
 

@@ -1,0 +1,1 @@
+"""Stoker worker agent package."""

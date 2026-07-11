@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stoker-agent"
+version = "0.1.0"
+description = "Stoker worker agent: paced synthetic event generation into Splunk HEC"
+readme = { text = "Stoker worker agent. The buildable contract lives in docs/WORKER-CONTRACT.md at the repository root. The container image copies source directly; this file exists for metadata, editable installs and pytest configuration.", content-type = "text/markdown" }
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "requests",
+    "prometheus_client",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "pytest-timeout",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["stoker_agent*"]
+
+[tool.pytest.ini_options]
+# rootdir for this config is worker/, so "tests" is worker/tests. Running
+# `pytest worker/tests` from the repo root picks this file up and applies
+# the timeout; testpaths covers a bare `pytest` run from inside worker/.
+testpaths = ["tests"]
+timeout = 60
+addopts = "-ra"
