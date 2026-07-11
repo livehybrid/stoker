@@ -24,6 +24,14 @@ OUTPUT_KEYS_EXACT = frozenset((
 ))
 OUTPUT_KEY_PREFIXES = ("httpevent",)
 
+# Diurnal shaping maps. eps mode is a flat instantaneous rate, so these are
+# stripped there (a shaped engine would under-produce and starve the flat
+# token bucket, breaching +/-1%); per_day_gb and count_interval preserve them.
+RATE_MAP_KEYS = frozenset((
+    "hourOfDayRate", "dayOfWeekRate", "minuteOfHourRate",
+    "dayOfMonthRate", "monthOfYearRate",
+))
+
 # Sections that configure the engine rather than describe a sample.
 GLOBAL_SECTIONS = frozenset(("global", "default"))
 
@@ -108,6 +116,20 @@ def _strip_output_keys(parser):
                 parser.remove_option(section, key)
 
 
+def _strip_rate_maps(parser):
+    # type: (configparser.RawConfigParser) -> None
+    """Remove diurnal shaping maps so eps mode paces a flat rate. Replay
+    stanzas are left untouched (rule 6); their pacing is engine-driven."""
+    for key in list(parser.defaults().keys()):
+        if key in RATE_MAP_KEYS:
+            del parser.defaults()[key]
+    for section in parser.sections():
+        if _is_replay(parser, section):
+            continue
+        for key in RATE_MAP_KEYS:
+            parser.remove_option(section, key)
+
+
 def declared_eps_weights(parser, sections):
     # type: (configparser.RawConfigParser, List[str]) -> List[float]
     """Per-stanza EPS estimates from declared count/interval.
@@ -164,6 +186,9 @@ def rewrite(parser, rate_mode, share_value, overdrive, sample_dir,
     if rate_mode == "eps":
         if share_value is None or share_value <= 0:
             raise ConfRewriteError("eps mode requires share_value > 0")
+        # eps is a flat instantaneous rate: strip shaping maps so the engine
+        # supplies a steady stream the token bucket paces to the exact share.
+        _strip_rate_maps(parser)
         if paced:
             _rewrite_eps(parser, paced, share_value, overdrive, weights)
     elif rate_mode == "per_day_gb":

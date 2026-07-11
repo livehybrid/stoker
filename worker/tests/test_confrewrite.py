@@ -130,11 +130,13 @@ class TestEpsMode:
         conf = rewritten(tmp_path, "eps", 100)
         assert not conf.has_option("sample1.csv", "randomizeCount")
 
-    def test_hour_and_day_rates_preserved(self, tmp_path):
+    def test_rate_maps_stripped_in_eps(self, tmp_path):
+        # eps is a flat instantaneous rate: shaping maps would make the engine
+        # under-produce during low-rate hours and starve the flat token
+        # bucket, so they are removed (contract rule 5).
         conf = rewritten(tmp_path, "eps", 100)
-        assert conf.get("sample1.csv", "hourOfDayRate") == \
-            '{"0": 0.3, "1": 0.2}'
-        assert conf.get("sample1.csv", "dayOfWeekRate") == '{"0": 0.9}'
+        assert not conf.has_option("sample1.csv", "hourOfDayRate")
+        assert not conf.has_option("sample1.csv", "dayOfWeekRate")
 
     def test_replay_untouched(self, tmp_path):
         conf = rewritten(tmp_path, "eps", 100)
@@ -255,3 +257,46 @@ class TestParserContract:
         src = write_base_conf(tmp_path)
         with pytest.raises(ConfRewriteError):
             rewrite(load_conf(src), "warp", 1, 1.15, "/s")
+
+
+class TestRateMaps:
+    """Rule 5: eps strips shaping maps (flat rate); other modes preserve."""
+
+    def test_per_day_gb_preserves_rate_maps(self, tmp_path):
+        conf = rewritten(tmp_path, "per_day_gb", 1.0)
+        assert conf.get("sample1.csv", "hourOfDayRate") == \
+            '{"0": 0.3, "1": 0.2}'
+        assert conf.get("sample1.csv", "dayOfWeekRate") == '{"0": 0.9}'
+
+    def test_count_interval_preserves_rate_maps(self, tmp_path):
+        conf = rewritten(tmp_path, "count_interval", None)
+        assert conf.get("sample1.csv", "hourOfDayRate") == \
+            '{"0": 0.3, "1": 0.2}'
+        assert conf.get("sample1.csv", "dayOfWeekRate") == '{"0": 0.9}'
+
+    def test_eps_strips_rate_maps_from_global(self, tmp_path):
+        text = textwrap.dedent("""\
+            [global]
+            hourOfDayRate = {"0": 0.1}
+            minuteOfHourRate = {"0": 0.5}
+
+            [s.csv]
+            count = 10
+            interval = 10
+            dayOfWeekRate = {"0": 0.9}
+            """)
+        conf = rewritten(tmp_path, "eps", 100, text=text)
+        assert not conf.has_option("global", "hourOfDayRate")
+        assert not conf.has_option("global", "minuteOfHourRate")
+        assert not conf.has_option("s.csv", "dayOfWeekRate")
+
+    def test_eps_leaves_replay_rate_maps_untouched(self, tmp_path):
+        # rule 6: replay stanzas are never modified, even in eps mode
+        text = textwrap.dedent("""\
+            [r.csv]
+            mode = replay
+            timeMultiple = 2
+            hourOfDayRate = {"0": 0.3}
+            """)
+        conf = rewritten(tmp_path, "eps", 100, text=text)
+        assert conf.get("r.csv", "hourOfDayRate") == '{"0": 0.3}'

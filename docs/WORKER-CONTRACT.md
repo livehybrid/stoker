@@ -89,10 +89,10 @@ All under `{CONTROL_URL}/api/agent/runs/{run_id}/`, `Authorization: Bearer {STOK
 Input: the bundle's `default/eventgen.conf` (RawConfigParser, `optionxform = str`, case preserved). Output: a private copy in the workdir.
 
 1. Strip every `outputMode`, `httpevent*`, `splunkHost`, `splunkPort`, `splunkMethod`, `index`, `sourcetype`, `source`, `host` output-side key from every stanza; set `outputMode = stoker`. Metadata is stamped by the agent from slice overrides, never by the engine.
-2. `eps` mode: per stanza `interval = 1`, `count = max(1, round(stanza_share × overdrive))`, `randomizeCount` removed. The worker's EPS share is apportioned across stanzas proportionally to declared per-stanza estimates, equally when undeclared (largest-remainder so integer counts sum exactly).
+2. `eps` mode: per stanza `interval = 1`, `count = max(1, round(stanza_share × overdrive))`, `randomizeCount` and the `*Rate` shaping maps removed (see rule 5). The worker's EPS share is apportioned across stanzas proportionally to declared per-stanza estimates, equally when undeclared (largest-remainder so integer counts sum exactly).
 3. `per_day_gb` mode: scale each stanza's `perDayVolume` proportionally so the sum equals `share × overdrive`; stanzas without `perDayVolume` get the equal-split remainder.
 4. `count_interval` mode: `count` split across workers by largest-remainder; `interval` untouched; everything else untouched.
-5. `hourOfDayRate` / `dayOfWeekRate` are preserved verbatim in all modes.
+5. `hourOfDayRate` / `dayOfWeekRate` (and the other `*Rate` shaping maps: `minuteOfHourRate`, `dayOfMonthRate`, `monthOfYearRate`) are preserved verbatim in `per_day_gb` and `count_interval` modes. In `eps` mode they are stripped from every non-replay stanza (and the global/default sections): `eps` is a flat instantaneous rate, and a diurnal map makes the engine under-produce during low-rate hours, starving the flat token bucket and breaching ±1%. Shaped volume belongs in `per_day_gb` mode. Replay stanzas are never touched (rule 6).
 6. Never touch `mode = replay` stanzas' pacing keys (`timeMultiple` etc.); replay is engine-paced and the control plane guarantees workers = 1.
 
 ## Unix socket protocol (plugin → agent)
