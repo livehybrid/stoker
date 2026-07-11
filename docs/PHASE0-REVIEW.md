@@ -4,6 +4,11 @@
 > dimension reviewers, each finding independently refuted-or-confirmed, then
 > synthesis. 10 findings filed, 4 confirmed real (3 medium, 1 low), 6 refuted,
 > 0 uncertain. No critical or high findings survived verification.
+>
+> **Status: all four confirmed findings resolved.** protocol_security#1,
+> concurrency#4 and confrewrite#2 fixed in `d1d6d0c`; pacing#1 resolved in
+> `402036a` (option A: eps mode strips the shaping maps). Kept here as the
+> audit record.
 
 ## Verdict
 
