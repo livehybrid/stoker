@@ -127,10 +127,14 @@ def create_all():
 
 def init_db():
     # type: () -> None
-    """Ensure the engine exists and the schema is present.
+    """Ensure the engine exists and the schema is at head.
 
-    This stage has no Alembic migrations; ``create_all`` is the baseline. A
-    real migration chain arrives with the first schema change post-skeleton.
+    Schema is managed by Alembic (:mod:`server.migrate`): an unmanaged DB (fresh
+    or a legacy ``create_all`` schema, including the live Postgres) is
+    ``create_all``'d and stamped at head; a managed DB is upgraded. ``create_all``
+    remains the direct path for the test suite's isolated SQLite DBs.
     """
     configure()
-    create_all()
+    from .migrate import run_migrations
+
+    run_migrations()
