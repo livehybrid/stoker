@@ -1,0 +1,90 @@
+# Stoker control-plane swarm stack (deploy via deploy.py -> Portainer).
+#
+# - stoker:    the FastAPI control plane + built UI (unpinned; state lives in
+#              Postgres and /mnt/aios, so any node runs it).
+# - db:        Postgres 16, pinned to hpelite, data on a local bind (off gluster).
+# - db-backup: tiredofit/db-backup (timestamped dumps + retention), house pattern.
+#
+# The master key is a swarm secret (file mount, never env). The DB password,
+# Portainer token and dogfood HEC token are injected as env by deploy.py from
+# this dir's .env. Access this stage: the published port on the LAN (:8091) and,
+# once DNS for the host exists, the Traefik router.
+version: "3.8"
+
+services:
+  stoker:
+    image: ghcr.io/livehybrid/stoker:latest
+    networks: [traefik_default, stoker_internal]
+    ports:
+      - "8091:8080"        # LAN access this stage (a public host needs DNS + auth)
+    volumes:
+      - /mnt/aios/stoker/bundles:/data/bundles   # immutable tarballs (safe on gluster)
+      - /mnt/aios/stoker/repos:/data/repos       # git clones
+    secrets:
+      - stoker_master_key
+    environment:
+      - DATABASE_URL=postgresql+psycopg://stoker:${STOKER_DB_PASSWORD}@db:5432/stoker
+      - STOKER_MASTER_KEY_FILE=/run/secrets/stoker_master_key
+      - PUBLIC_BASE_URL=${STOKER_PUBLIC_BASE_URL}
+      - WORKER_IMAGE=${STOKER_WORKER_IMAGE}
+      - PORTAINER_HOST=${PORTAINER_HOST}
+      - PORTAINER_TOKEN=${PORTAINER_TOKEN}       # tier-0, accepted env exposure
+      - PORTAINER_ENDPOINT=6
+      - BUNDLE_DIR=/data/bundles
+      - REPO_CLONE_DIR=/data/repos
+      - DOGFOOD_HEC_URL=${DOGFOOD_HEC_URL}
+      - DOGFOOD_HEC_TOKEN=${DOGFOOD_HEC_TOKEN}
+    stop_grace_period: 45s
+    deploy:
+      replicas: 1
+      restart_policy: {condition: on-failure}
+      labels:
+        # Enable once DNS for the host exists. Router split per the design: the
+        # UI/ops behind auth, /api/agent + /api/hooks bypass it (per-run JWT /
+        # HMAC). Until authentik lands, a Traefik IP-allowlist to the LAN stands
+        # in; the published port above is the interim access path.
+        - traefik.enable=true
+        - traefik.http.routers.stoker.entrypoints=websecure
+        - traefik.http.routers.stoker.tls=true
+        - traefik.http.routers.stoker.rule=Host(`stoker.cloud.livehybrid.com`)
+        - traefik.http.routers.stoker-agent.entrypoints=websecure
+        - traefik.http.routers.stoker-agent.tls=true
+        - traefik.http.routers.stoker-agent.priority=100
+        - traefik.http.routers.stoker-agent.rule=Host(`stoker.cloud.livehybrid.com`) && (PathPrefix(`/api/agent`) || PathPrefix(`/api/hooks`))
+        - traefik.http.services.stoker.loadbalancer.server.port=8080
+
+  db:
+    image: postgres:16
+    networks: [stoker_internal]
+    environment:
+      - POSTGRES_DB=stoker
+      - POSTGRES_USER=stoker
+      - POSTGRES_PASSWORD=${STOKER_DB_PASSWORD}
+    volumes:
+      - /home/rancher/stoker-pg:/var/lib/postgresql/data   # local bind, off gluster
+    deploy:
+      replicas: 1
+      placement: {constraints: ["node.hostname == hpelite"]}   # the one pinned service
+
+  db-backup:
+    image: tiredofit/db-backup
+    networks: [stoker_internal]
+    environment:
+      - DB01_TYPE=pgsql
+      - DB01_HOST=db
+      - DB01_NAME=stoker
+      - DB01_USER=stoker
+      - DB01_PASS=${STOKER_DB_PASSWORD}
+      - DB01_PORT=5432
+    volumes:
+      - /mnt/aios/stoker-backups/db:/backup
+    deploy:
+      replicas: 1
+
+secrets:
+  stoker_master_key:
+    external: true          # created by deploy.py (ensure_master_key_secret)
+
+networks:
+  traefik_default: {external: true}
+  stoker_internal: {driver: overlay}

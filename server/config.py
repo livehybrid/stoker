@@ -115,7 +115,19 @@ def load_settings(env=None):
 
     database_url = _get(env, "DATABASE_URL", DEFAULT_DATABASE_URL) or DEFAULT_DATABASE_URL
 
+    # The master key protects every Fernet-encrypted secret (target tokens, repo
+    # credentials). Prefer a file mount (STOKER_MASTER_KEY_FILE, e.g. a swarm
+    # secret at /run/secrets/...) over an env var; fall back to the env var, then
+    # to a generated dev key (with a loud warning).
     master_key = _get(env, "STOKER_MASTER_KEY")
+    key_file = _get(env, "STOKER_MASTER_KEY_FILE")
+    if master_key is None and key_file:
+        try:
+            with open(key_file, "r", encoding="utf-8") as fh:
+                master_key = fh.read().strip() or None
+        except OSError as exc:
+            raise ConfigError("STOKER_MASTER_KEY_FILE %r unreadable: %s"
+                              % (key_file, exc))
     master_key_generated = master_key is None
     if master_key is None:
         master_key = _generate_master_key()

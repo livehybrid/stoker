@@ -4,9 +4,9 @@ node_modules/
 # Build artefact (the control-plane image builds ui/dist in CI)
 dist/
 
-# The router plugin regenerates this on every build; not source of truth
-# (kept out of git so a stale tree never fights the generator).
-src/routeTree.gen.ts
+# NOTE: src/routeTree.gen.ts IS committed. `npm run build` runs tsc before the
+# vite plugin regenerates the tree, so tsc needs it present in a fresh checkout
+# (CI). The plugin overwrites it on every build/dev, so it stays in sync.
 
 # Vite / editor cruft
 .vite/
