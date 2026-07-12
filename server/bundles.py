@@ -77,23 +77,87 @@ def _make_parser():
 
 def _read_pack_yaml(pack_dir):
     # type: (str) -> Dict[str, Any]
-    """Read pack.yaml via the worker's tiny subset parser (shared semantics)."""
+    """Read pack.yaml with a self-contained flat two-level subset parser.
+
+    The control-plane image does NOT ship the worker package, so this must not
+    depend on stoker_agent; the parser here mirrors the worker's pack.yaml subset
+    (top-level `key: value` and one indented level under a bare `key:`), so the
+    control plane and worker agree on the format.
+    """
     path = os.path.join(pack_dir, "pack.yaml")
     if not os.path.isfile(path):
         return {}
-    # Reuse the worker's parser so the control plane and worker agree on the
-    # pack.yaml subset. Imported lazily to avoid a hard worker dependency at
-    # module import time.
-    try:
-        from stoker_agent.bundle import parse_pack_yaml
-    except Exception:  # pragma: no cover - worker not importable
-        log.info("stoker_agent not importable; skipping pack.yaml parse")
-        return {}
     try:
         with open(path, "r", encoding="utf-8") as fh:
-            return parse_pack_yaml(fh.read())
+            return _parse_pack_yaml(fh.read())
     except OSError as exc:
         raise BundleError("cannot read pack.yaml in %r: %s" % (pack_dir, exc))
+
+
+def _pack_yaml_strip_comment(line):
+    # type: (str) -> str
+    out, quote = [], None
+    for ch in line:
+        if quote:
+            out.append(ch)
+            if ch == quote:
+                quote = None
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            out.append(ch)
+            continue
+        if ch == "#":
+            break
+        out.append(ch)
+    return "".join(out).rstrip()
+
+
+def _pack_yaml_scalar(text):
+    # type: (str) -> Any
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+        return text[1:-1]
+    low = text.lower()
+    if low in ("true", "yes", "on"):
+        return True
+    if low in ("false", "no", "off"):
+        return False
+    if low in ("null", "~", ""):
+        return None
+    for cast in (int, float):
+        try:
+            return cast(text)
+        except ValueError:
+            pass
+    return text
+
+
+def _parse_pack_yaml(text):
+    # type: (str) -> Dict[str, Any]
+    """Flat two-level scalar subset (mirrors stoker_agent.bundle.parse_pack_yaml)."""
+    result = {}     # type: Dict[str, Any]
+    section = None  # type: Optional[str]
+    for raw in text.splitlines():
+        line = _pack_yaml_strip_comment(raw)
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        stripped = line.strip()
+        if stripped.startswith("- ") or ":" not in stripped:
+            continue
+        key, _, value = stripped.partition(":")
+        key, value = key.strip(), value.strip()
+        if indent == 0:
+            if value == "":
+                section = key
+                result[key] = {}
+            else:
+                section = None
+                result[key] = _pack_yaml_scalar(value)
+        elif section is not None and value != "":
+            if isinstance(result.get(section), dict):
+                result[section][key] = _pack_yaml_scalar(value)
+    return result
 
 
 def lint_pack(pack_dir):
@@ -169,6 +233,11 @@ def lint_pack(pack_dir):
         errors.append("no sample stanzas found in %s" % CONF_RELPATH)
 
     pack_yaml = _read_pack_yaml(pack_dir)
+    # The sourcetype usually lives in pack.yaml defaults (output-side keys are
+    # stripped from the conf), so read it there too, not only from the stanza.
+    defaults = pack_yaml.get("defaults") if isinstance(pack_yaml, dict) else {}
+    if isinstance(defaults, dict) and defaults.get("sourcetype"):
+        sourcetypes.append(str(defaults["sourcetype"]))
     engines = _collect_engines(pack_yaml, parser)
     estimates = pack_yaml.get("estimates") if isinstance(pack_yaml, dict) else {}
     estimates = estimates if isinstance(estimates, dict) else {}
