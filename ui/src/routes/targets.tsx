@@ -33,6 +33,10 @@ function Targets() {
   >({});
   // The target currently awaiting a delete confirmation (two-step guard).
   const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
+  // The target currently being edited (id), or null. Its form pre-fills from the
+  // row; the HEC token starts blank (write-only) and capacity is editable.
+  const [editing, setEditing] = useState<number | null>(null);
+  const editingTarget = editing != null ? q.data?.find((t) => t.id === editing) : undefined;
 
   const test = useMutation({
     mutationFn: (id: number) => api.targets.test(id),
@@ -143,6 +147,9 @@ function Targets() {
             >
               {testing ? "Testing…" : "Test connection"}
             </Button>
+            <Button variant="ghost" onClick={() => setEditing(t.id)}>
+              Edit
+            </Button>
             {isConfirming ? (
               <>
                 <Button
@@ -177,6 +184,16 @@ function Targets() {
         title="Targets"
         subtitle="HEC destinations for load. Tokens are write-only and never shown."
       />
+
+      {editingTarget && (
+        <Card title={`Edit target: ${editingTarget.name}`}>
+          <NewTargetForm
+            key={editingTarget.id}
+            target={editingTarget}
+            onDone={() => setEditing(null)}
+          />
+        </Card>
+      )}
 
       <Card title="Registered targets">
         {q.isPending ? (

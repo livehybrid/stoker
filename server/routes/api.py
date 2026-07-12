@@ -70,6 +70,7 @@ from ..schemas import (
     TargetCreate,
     TargetOut,
     TargetTestResult,
+    TargetUpdate,
 )
 
 log = logging.getLogger("stoker.routes.api")
@@ -134,6 +135,62 @@ def get_target(target_id: int, db: Session = Depends(get_db)):
     target = db.get(Target, target_id)
     if target is None:
         raise HTTPException(status_code=404, detail="unknown target")
+    return target
+
+
+@router.patch("/targets/{target_id}", response_model=TargetOut)
+def update_target(target_id: int, body: TargetUpdate, db: Session = Depends(get_db)):
+    # type: (...) -> Any
+    """Partially update a target. Only fields present in the body change. The HEC
+    token is re-encrypted when a non-empty value is supplied (write-only, never
+    echoed); an omitted or empty token keeps the stored one. Changing the
+    endpoint, token or TLS setting resets health to ``unknown`` (re-run /test)."""
+    target = db.get(Target, target_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="unknown target")
+
+    fields = body.model_dump(exclude_unset=True)
+    if not fields:
+        return target
+
+    new_name = fields.get("name")
+    if new_name is not None and new_name != target.name:
+        clash = db.execute(
+            select(Target).where(Target.name == new_name, Target.id != target_id)
+        ).scalars().first()
+        if clash is not None:
+            raise HTTPException(
+                status_code=409, detail="a target named %r already exists" % new_name)
+        target.name = new_name
+
+    conn_changed = False
+    if fields.get("hec_url"):
+        target.hec_url = fields["hec_url"].rstrip("/")
+        conn_changed = True
+    if "token" in fields and fields["token"]:  # non-empty -> rotate; empty -> keep
+        try:
+            target.token_encrypted = crypto.encrypt(fields["token"])
+        except crypto.CryptoError as exc:
+            raise HTTPException(
+                status_code=500, detail="could not encrypt target token: %s" % exc)
+        conn_changed = True
+    if "default_index" in fields:
+        target.default_index = fields["default_index"]
+    if fields.get("env_tag"):
+        target.env_tag = fields["env_tag"]
+    if "max_concurrent_gb_day" in fields:
+        target.max_concurrent_gb_day = fields["max_concurrent_gb_day"]
+    if "verify_tls" in fields and fields["verify_tls"] is not None:
+        target.verify_tls = fields["verify_tls"]
+        conn_changed = True
+
+    if conn_changed:
+        target.health_state = "unknown"
+        target.health_detail = None
+
+    db.commit()
+    db.refresh(target)
+    log.info("updated target %s (id=%s)", target.name, target.id)
     return target
 
 

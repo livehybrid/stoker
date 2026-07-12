@@ -140,6 +140,59 @@ def test_created_target_absent_from_get_bodies(client):
     assert SECRET_TOKEN not in client.get("/api/targets/%d" % resp.json()["id"]).text
 
 
+def _make_target(client, name="t-edit", index="loadtest"):
+    resp = client.post("/api/targets", json={
+        "name": name, "hec_url": "http://127.0.0.1:18088", "token": SECRET_TOKEN,
+        "default_index": index, "env_tag": "lab", "verify_tls": False,
+        "max_concurrent_gb_day": 100,
+    })
+    assert resp.status_code == 201, _body_text(resp)
+    return resp.json()["id"]
+
+
+def test_update_target_changes_fields_and_resets_health(client, db_session):
+    tid = _make_target(client)
+    # Force a health state so we can prove a connection-affecting edit resets it.
+    row = db_session.get(Target, tid)
+    row.health_state = "green"
+    db_session.commit()
+
+    resp = client.patch("/api/targets/%d" % tid, json={
+        "hec_url": "https://new-hec.example:8088/", "max_concurrent_gb_day": 250,
+        "default_index": "prod",
+    })
+    assert resp.status_code == 200, _body_text(resp)
+    body = resp.json()
+    assert body["hec_url"] == "https://new-hec.example:8088"  # trailing slash trimmed
+    assert body["max_concurrent_gb_day"] == 250
+    assert body["default_index"] == "prod"
+    assert body["health_state"] == "unknown"  # endpoint changed -> re-test needed
+
+
+def test_update_target_rotates_token_write_only(client, db_session, settings):
+    tid = _make_target(client, name="t-rotate")
+    new_secret = "rotated-hec-token-xyz"  # noqa: S105
+
+    resp = client.patch("/api/targets/%d" % tid, json={"token": new_secret})
+    assert resp.status_code == 200, _body_text(resp)
+    assert new_secret not in _body_text(resp)
+    assert "token" not in resp.json()
+    row = db_session.get(Target, tid)
+    db_session.refresh(row)
+    assert crypto.decrypt(row.token_encrypted, settings=settings) == new_secret
+
+    # An omitted / empty token keeps the stored one (a capacity-only edit).
+    resp2 = client.patch("/api/targets/%d" % tid, json={"max_concurrent_gb_day": None})
+    assert resp2.status_code == 200, _body_text(resp2)
+    assert resp2.json()["max_concurrent_gb_day"] is None  # cap cleared
+    db_session.refresh(row)
+    assert crypto.decrypt(row.token_encrypted, settings=settings) == new_secret  # unchanged
+
+
+def test_update_unknown_target_404(client):
+    assert client.patch("/api/targets/999999", json={"env_tag": "prod"}).status_code == 404
+
+
 # --------------------------------------------------------------------------- #
 # Packs + specs (Operator builder).
 # --------------------------------------------------------------------------- #

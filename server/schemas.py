@@ -49,6 +49,21 @@ class TargetCreate(BaseModel):
     verify_tls: bool = True
 
 
+class TargetUpdate(BaseModel):
+    """Partial target update (PATCH). Every field is optional; only the fields
+    present in the request body are changed. ``token`` is write-only: send a new
+    value to rotate the HEC token, or omit it (or send an empty string) to keep
+    the stored one. ``max_concurrent_gb_day`` sent as null clears the cap."""
+
+    name: Optional[str] = None
+    hec_url: Optional[str] = None
+    token: Optional[str] = Field(default=None, repr=False)
+    default_index: Optional[str] = None
+    env_tag: Optional[str] = None
+    max_concurrent_gb_day: Optional[float] = None
+    verify_tls: Optional[bool] = None
+
+
 class TargetOut(BaseModel):
     """Target view. No token field exists here by construction."""
 

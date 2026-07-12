@@ -18,6 +18,18 @@ export interface TargetCreate {
   verify_tls?: boolean; // default true
 }
 
+// Partial update (PATCH). Only the fields present are changed; omit `token`
+// (or send "") to keep the stored HEC token, send a new value to rotate it.
+export interface TargetUpdate {
+  name?: string;
+  hec_url?: string;
+  token?: string;
+  default_index?: string | null;
+  env_tag?: string;
+  max_concurrent_gb_day?: number | null;
+  verify_tls?: boolean;
+}
+
 export interface TargetOut {
   id: number;
   name: string;

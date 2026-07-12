@@ -36,6 +36,7 @@ import type {
   SpecUpdate,
   StopRequest,
   TargetCreate,
+  TargetUpdate,
   TargetOut,
   TargetTestResult,
   UserCreate,
@@ -186,6 +187,8 @@ export const targets = {
   get: (id: number) => request<TargetOut>("GET", `/targets/${id}`),
   create: (body: TargetCreate) =>
     request<TargetOut>("POST", "/targets", { body }),
+  update: (id: number, body: TargetUpdate) =>
+    request<TargetOut>("PATCH", `/targets/${id}`, { body }),
   delete: (id: number) => request<void>("DELETE", `/targets/${id}`),
   test: (id: number) =>
     request<TargetTestResult>("POST", `/targets/${id}/test`),

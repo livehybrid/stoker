@@ -57,12 +57,32 @@ def service_name(run_id):
     return "stoker-run-%s" % run_id
 
 
+def _portainer_base_url(host):
+    # type: (Optional[str]) -> str
+    """Normalise ``PORTAINER_HOST`` into a full base URL for the API client.
+
+    A bare host (no scheme — e.g. ``192.168.0.112``) becomes
+    ``https://<host>:9443`` (Portainer's HTTPS default), matching
+    ``infra/stacks/stoker/deploy.py``'s ``portainer_base`` so the control-plane
+    driver and the deployer agree. A value that already carries a scheme is used
+    as-is, so an operator can point at a custom scheme/port with
+    ``PORTAINER_HOST=https://host:port``. Without this, httpx rejects a
+    scheme-less URL ("Request URL is missing an http:// or https://").
+    """
+    host = (host or "").strip().rstrip("/")
+    if not host:
+        return ""
+    if host.startswith("http://") or host.startswith("https://"):
+        return host
+    return "https://%s:9443" % host
+
+
 class SwarmDriver(object):
     """Portainer-backed execution driver (Docker Swarm services)."""
 
     def __init__(self, host, token, endpoint=6, verify_tls=False, timeout_s=10.0):
         # type: (Optional[str], Optional[str], int, bool, float) -> None
-        self._host = (host or "").rstrip("/")
+        self._host = _portainer_base_url(host)
         # Secret: never logged.
         self._token = token
         self._endpoint = int(endpoint)
