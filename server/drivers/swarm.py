@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import httpx
 
@@ -222,6 +222,36 @@ class SwarmDriver(object):
             return ""
         return _decode_logs(resp.content)
 
+    # -- discovery (optional 7th method) ---------------------------------- #
+
+    def list_run_ids(self):
+        # type: () -> Set[int]
+        """Return every run id this swarm owns, by the ``stoker.run`` label.
+
+        ``GET /services?filters={"label":["stoker.run"]}`` returns all services
+        carrying the label (Docker's presence-only label filter); each service's
+        ``Spec.Labels['stoker.run']`` (or its ``stoker-run-<id>`` name as a
+        fallback) parses to the run id. Boot reconciliation uses this to spot
+        strays (a labelled service with no live DB run).
+
+        A backend failure raises :class:`DriverError` (the caller skips the sweep
+        rather than mistaking a hiccup for "no strays" -> destroy everything);
+        services whose label does not parse to an int are skipped, not guessed.
+        """
+        filters = json.dumps({"label": ["stoker.run"]})
+        resp = self._request("GET", "/services", params={"filters": filters})
+        body = _json(resp)
+        if not isinstance(body, list):
+            # A malformed non-list response is a backend fault, not "no services";
+            # raise so the sweep is skipped rather than treated as an empty estate.
+            raise DriverError("swarm /services returned non-list body")
+        run_ids = set()  # type: Set[int]
+        for service in body:
+            run_id = _service_run_id(service)
+            if run_id is not None:
+                run_ids.add(run_id)
+        return run_ids
+
     # -- update mechanics ------------------------------------------------- #
 
     def _update_replicas(self, ref, replicas):
@@ -362,6 +392,33 @@ def _env_list(env):
             continue
         items.append("%s=%s" % (key, value))
     return items
+
+
+def _service_run_id(service):
+    # type: (Any) -> Optional[int]
+    """Parse a swarm service doc to its ``stoker.run`` run id, or None.
+
+    Prefers the ``Spec.Labels['stoker.run']`` label (the authoritative marker the
+    driver stamps on create); falls back to the ``stoker-run-<id>`` service name
+    suffix when the label is missing. A value that is not an integer yields None
+    (skip it — the sweep must never destroy on a guessed id).
+    """
+    if not isinstance(service, dict):
+        return None
+    spec = service.get("Spec") or {}
+    labels = spec.get("Labels") or {}
+    raw = labels.get("stoker.run") if isinstance(labels, dict) else None
+    if raw is None:
+        # Fall back to the service name (stoker-run-<id>).
+        name = spec.get("Name") or service.get("Name") or ""
+        if isinstance(name, str) and name.startswith("stoker-run-"):
+            raw = name[len("stoker-run-"):]
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def _task_view(task):

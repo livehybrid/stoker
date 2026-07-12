@@ -200,6 +200,16 @@ class PackPreview(BaseModel):
     lint_errors: List[str] = Field(default_factory=list)
 
 
+class PackPreviewRun(BaseModel):
+    """Rendered preview events from a pack (no fleet, no HEC target).
+
+    A lightweight in-process render of ``n`` events by cycling the pack's sample
+    lines and applying the common token replacements (timestamp / ipv4 /
+    integer). For pack authoring and the new-job wizard; not a load path."""
+
+    events: List[str] = Field(default_factory=list)
+
+
 # --------------------------------------------------------------------------- #
 # Specs (Appendix A JobSpec)
 # --------------------------------------------------------------------------- #
@@ -659,7 +669,7 @@ __all__ = [
     # repos
     "RepoCreate", "RepoOut", "RepoCreated", "RepoSyncResult",
     # packs
-    "PackCreate", "PackOut", "PackPreview",
+    "PackCreate", "PackOut", "PackPreview", "PackPreviewRun",
     # specs
     "SpecCreate", "SpecUpdate", "SpecOut", "SpecEstimate",
     # runs

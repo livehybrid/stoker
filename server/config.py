@@ -34,6 +34,20 @@ DEFAULT_WORKER_IMAGE = "ghcr.io/livehybrid/stoker-worker:latest"
 DEFAULT_SESSION_TTL_S = 43200  # 12 hours
 DEFAULT_AUTH_HEADER = "X-Forwarded-User"
 DEFAULT_PROXY_ROLE = "operator"
+
+# Metric-sample maintenance windows (roll-up + prune). A long soak at many
+# workers appends metric_samples every ~5 s; the maintenance loop down-samples
+# fine-grained rows older than the roll-up window to one row per slot per 60 s
+# bucket, then deletes anything older than the prune window entirely.
+DEFAULT_METRIC_ROLLUP_AFTER_H = 48    # down-sample rows older than 48 h
+DEFAULT_METRIC_PRUNE_AFTER_D = 30     # delete rows older than 30 days
+DEFAULT_METRIC_ROLLUP_BUCKET_S = 60   # target bucket width for the roll-up
+DEFAULT_METRIC_MAINTENANCE_INTERVAL_S = 3600.0  # run the slow loop ~hourly
+DEFAULT_METRIC_DELETE_CHUNK = 5000    # rows per delete batch (never one huge txn)
+
+# Dogfood telemetry cadence: the per-active-run aggregate emitter ships a
+# stoker:metrics event this often when dogfood is enabled.
+DEFAULT_DOGFOOD_METRICS_INTERVAL_S = 30.0
 # The three authorisation roles, most to least privileged. ``admin`` gates user
 # management; validated here so a bad STOKER_PROXY_DEFAULT_ROLE fails at boot.
 VALID_ROLES = ("viewer", "operator", "admin")
@@ -85,6 +99,20 @@ class Settings:
     # Kill switch for local dev: skip auth entirely (with a loud warning).
     auth_disabled: bool = False
 
+    # --- Metric-sample maintenance (roll-up + prune) ------------------------ #
+    # All defaulted so existing Settings(...) call sites (incl. tests) stay valid.
+    metric_rollup_after_h: int = DEFAULT_METRIC_ROLLUP_AFTER_H
+    metric_prune_after_d: int = DEFAULT_METRIC_PRUNE_AFTER_D
+    metric_rollup_bucket_s: int = DEFAULT_METRIC_ROLLUP_BUCKET_S
+    metric_maintenance_interval_s: float = DEFAULT_METRIC_MAINTENANCE_INTERVAL_S
+    metric_delete_chunk: int = DEFAULT_METRIC_DELETE_CHUNK
+
+    # --- Dogfood telemetry -------------------------------------------------- #
+    # Cadence of the periodic per-run stoker:metrics aggregate (dogfood only).
+    dogfood_metrics_interval_s: float = DEFAULT_DOGFOOD_METRICS_INTERVAL_S
+    # Gzip the HEC event batch body (best-effort; the collector accepts either).
+    dogfood_gzip: bool = True
+
     @property
     def is_sqlite(self):
         # type: () -> bool
@@ -124,6 +152,17 @@ def _get_int(env, key, default):
         return int(raw)
     except ValueError:
         raise ConfigError("%s must be an integer, got %r" % (key, raw))
+
+
+def _get_float(env, key, default):
+    # type: (Mapping[str, str], str, float) -> float
+    raw = _get(env, key)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        raise ConfigError("%s must be a number, got %r" % (key, raw))
 
 
 def _get_bool(env, key, default=False):
@@ -243,6 +282,21 @@ def load_settings(env=None):
         auth_header=auth_header,
         proxy_default_role=proxy_default_role,
         auth_disabled=_get_bool(env, "STOKER_AUTH_DISABLED", False),
+        metric_rollup_after_h=_get_int(env, "METRIC_ROLLUP_AFTER_H",
+                                       DEFAULT_METRIC_ROLLUP_AFTER_H),
+        metric_prune_after_d=_get_int(env, "METRIC_PRUNE_AFTER_D",
+                                      DEFAULT_METRIC_PRUNE_AFTER_D),
+        metric_rollup_bucket_s=_get_int(env, "METRIC_ROLLUP_BUCKET_S",
+                                        DEFAULT_METRIC_ROLLUP_BUCKET_S),
+        metric_maintenance_interval_s=_get_float(
+            env, "METRIC_MAINTENANCE_INTERVAL_S",
+            DEFAULT_METRIC_MAINTENANCE_INTERVAL_S),
+        metric_delete_chunk=_get_int(env, "METRIC_DELETE_CHUNK",
+                                     DEFAULT_METRIC_DELETE_CHUNK),
+        dogfood_metrics_interval_s=_get_float(
+            env, "DOGFOOD_METRICS_INTERVAL_S",
+            DEFAULT_DOGFOOD_METRICS_INTERVAL_S),
+        dogfood_gzip=_get_bool(env, "DOGFOOD_GZIP", True),
     )
 
 

@@ -85,6 +85,8 @@ class _FakePortainer:
 
         if route == "/services/create" and method == "POST":
             return self._create(parsed)
+        if route == "/services" and method == "GET":
+            return self._list_services(dict(request.url.params))
         if route == "/tasks" and method == "GET":
             return self._tasks(dict(request.url.params))
         if route.startswith("/services/"):
@@ -143,6 +145,25 @@ class _FakePortainer:
             return httpx.Response(200, json={})
         return httpx.Response(404, json={"message": "service %s not found" % sid})
 
+    def _list_services(self, params):
+        # type: (Dict[str, Any]) -> httpx.Response
+        """List services, honouring a ``{"label": [...]}`` filter (presence-only).
+
+        Mirrors Docker's ``GET /services?filters={"label":["stoker.run"]}``: a
+        bare ``key`` matches any service carrying that label; a ``key=value``
+        matches exactly. Returns the full service docs (id, spec) the driver
+        parses for the ``stoker.run`` label.
+        """
+        filters = json.loads(params.get("filters", "{}"))
+        wanted_labels = list(filters.get("label", []))
+        out = []  # type: List[Dict[str, Any]]
+        for svc in self.services.values():
+            labels = svc["Spec"].get("Labels", {}) or {}
+            if wanted_labels and not _labels_match(labels, wanted_labels):
+                continue
+            out.append(svc)
+        return httpx.Response(200, json=out)
+
     def _tasks(self, params):
         # type: (Dict[str, Any]) -> httpx.Response
         filters = json.loads(params.get("filters", "{}"))
@@ -176,6 +197,19 @@ class _FakePortainer:
         for line in (b"boot slot 0\n", b"boot slot 1\n"):
             frames += struct.pack(">BxxxL", 1, len(line)) + line
         return httpx.Response(200, content=frames)
+
+
+def _labels_match(labels, wanted):
+    # type: (Dict[str, Any], List[str]) -> bool
+    """Docker label-filter semantics: bare ``key`` = presence, ``key=value`` = eq."""
+    for want in wanted:
+        if "=" in want:
+            key, value = want.split("=", 1)
+            if str(labels.get(key)) != value:
+                return False
+        elif want not in labels:
+            return False
+    return True
 
 
 def _swarm_with_fake(portainer):
@@ -307,6 +341,96 @@ def test_conformance_status_after_create_reports_tasks(driver_case):
             assert set(task.keys()) >= {"slot", "holder", "node", "state"}
     finally:
         driver.destroy(ref)
+
+
+# --------------------------------------------------------------------------- #
+# list_run_ids: the optional 7th (discovery-only) method used by the boot sweep.
+# --------------------------------------------------------------------------- #
+
+def test_conformance_list_run_ids_reports_owned_runs(driver_case):
+    """Every enumerable driver reports the run ids of the workloads it owns."""
+    name, driver = driver_case
+    base = 990100 if name == "swarm-live" else 700
+    r1, r2 = base + 1, base + 2
+    ref1 = driver.create(_snapshot(run_id=r1, workers=2), 2)
+    ref2 = driver.create(_snapshot(run_id=r2, workers=1), 1)
+    try:
+        owned = driver.list_run_ids()
+        assert isinstance(owned, set)
+        assert {r1, r2} <= owned
+        # Destroying one drops it from the enumeration; the other remains.
+        driver.destroy(ref1)
+        owned_after = driver.list_run_ids()
+        assert r1 not in owned_after
+        assert r2 in owned_after
+    finally:
+        driver.destroy(ref1)
+        driver.destroy(ref2)
+
+
+def test_conformance_list_run_ids_empty_when_no_workloads(driver_case):
+    """A driver owning nothing returns an empty set (never raises here)."""
+    name, driver = driver_case
+    if name == "swarm-live":
+        pytest.skip("a live swarm may host unrelated stoker services")
+    assert driver.list_run_ids() == set()
+
+
+def test_fake_list_run_ids_excludes_destroyed():
+    driver = FakeDriver()
+    a = driver.create(_snapshot(run_id=41, workers=1), 1)
+    driver.create(_snapshot(run_id=42, workers=1), 1)
+    assert driver.list_run_ids() == {41, 42}
+    driver.destroy(a)
+    assert driver.list_run_ids() == {42}
+
+
+def test_swarm_list_run_ids_filters_by_label_and_parses_id():
+    """list_run_ids GETs /services with the stoker.run label filter and parses ids."""
+    portainer = _FakePortainer()
+    driver = _swarm_with_fake(portainer)
+    driver.create(_snapshot(run_id=812, workers=2), 2)
+    driver.create(_snapshot(run_id=99, workers=1), 1)
+
+    portainer.calls.clear()
+    owned = driver.list_run_ids()
+    assert owned == {812, 99}
+
+    call = [c for c in portainer.calls if c["path"].endswith("/services")][-1]
+    assert call["method"] == "GET"
+    filters = json.loads(call["params"]["filters"])
+    assert filters == {"label": ["stoker.run"]}
+
+
+def test_swarm_list_run_ids_ignores_unlabelled_and_unparseable_services():
+    """A service with no/bad stoker.run label is skipped, not guessed."""
+    portainer = _FakePortainer()
+    driver = _swarm_with_fake(portainer)
+    driver.create(_snapshot(run_id=812, workers=1), 1)
+    # Inject a foreign service (not ours) and one with a non-integer label.
+    portainer.services["svc-foreign"] = {
+        "ID": "svc-foreign", "Version": {"Index": 1},
+        "Spec": {"Name": "unrelated", "Labels": {"app": "other"}},
+    }
+    portainer.services["svc-bad"] = {
+        "ID": "svc-bad", "Version": {"Index": 1},
+        "Spec": {"Name": "stoker-run-x", "Labels": {"stoker.run": "not-an-int"}},
+    }
+    owned = driver.list_run_ids()
+    # Only the well-formed stoker service is reported (the foreign one is filtered
+    # out by the label; the bad-id one is filtered by the int parse).
+    assert owned == {812}
+
+
+def test_swarm_list_run_ids_raises_on_backend_error_not_empty():
+    """A backend failure raises DriverError (never a silent empty == all-strays)."""
+    def handler(request):
+        return httpx.Response(500, json={"message": "boom"})
+
+    driver = SwarmDriver(host="https://p:9443", token="t", endpoint=6)
+    driver._transport = httpx.MockTransport(handler)
+    with pytest.raises(DriverError):
+        driver.list_run_ids()
 
 
 # --------------------------------------------------------------------------- #

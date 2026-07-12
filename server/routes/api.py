@@ -27,7 +27,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .. import bundles, crypto, gitsync, lifecycle
+from .. import bundles, crypto, gitsync, lifecycle, preview
 from ..db import get_db
 from ..drivers import get_driver
 from ..drivers.base import DriverError
@@ -49,6 +49,7 @@ from ..schemas import (
     PackCreate,
     PackOut,
     PackPreview,
+    PackPreviewRun,
     RepoCreate,
     RepoCreated,
     RepoOut,
@@ -420,6 +421,28 @@ def preview_pack(pack_id: int, db: Session = Depends(get_db)):
         lint_status="ok" if lint.ok else "error",
         lint_errors=lint.errors,
     )
+
+
+@router.get("/packs/{pack_id}/preview_run", response_model=PackPreviewRun)
+def preview_run_pack(
+    pack_id: int,
+    n: int = Query(default=preview.PREVIEW_N_DEFAULT, description="events to render"),
+    db: Session = Depends(get_db),
+):
+    # type: (...) -> Any
+    """Render ``n`` sample events from a pack in-process (no fleet, no HEC).
+
+    A lightweight preview for pack authoring and the wizard: cycles the pack's
+    sample lines and applies the common token replacements (timestamp / ipv4 /
+    integer) the worker's engine would. Side-effect-free (no network, no
+    subprocess); ``n`` is clamped to a sane maximum. Reads only inside the pack
+    directory (a sample/mvfile token that would escape the pack root is refused).
+    """
+    pack = db.get(Pack, pack_id)
+    if pack is None:
+        raise HTTPException(status_code=404, detail="unknown pack")
+    events = preview.preview_pack(pack.source_path, n=n)
+    return PackPreviewRun(events=events)
 
 
 # --------------------------------------------------------------------------- #
@@ -1076,8 +1099,11 @@ def _preview_sample_lines(pack_dir, stanzas, limit=10):
         sample_name = sample_name or section
         lines = []  # type: List[str]
         for base in (samples_dir, pack_dir):
-            path = os.path.join(base, sample_name)
-            if os.path.isfile(path):
+            # Contain the sample path inside the pack root: a pack's conf is
+            # attacker-influenced (operator source_path / git-synced repos), so a
+            # sampleFile of /etc/passwd or ../../secret must never be read.
+            path = preview._safe_join(pack_dir, base, sample_name)
+            if path is not None and os.path.isfile(path):
                 lines = _read_first_lines(path, limit)
                 break
         out[section] = lines

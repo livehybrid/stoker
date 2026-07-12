@@ -13,7 +13,7 @@ The types below are plain dataclasses so they serialise cleanly into
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, Dict, List, Optional, Protocol, Set, runtime_checkable
 
 
 @dataclasses.dataclass
@@ -90,7 +90,16 @@ class NotFound(DriverError):
 
 @runtime_checkable
 class ExecutionDriver(Protocol):
-    """The six-method fleet control surface. All calls are synchronous."""
+    """The six-method fleet control surface. All calls are synchronous.
+
+    A seventh method, :meth:`list_run_ids`, is **discovery-only and optional**:
+    it is not part of the six-method conformance contract (create / scale / stop
+    / destroy / status / logs), and a driver that cannot enumerate its estate
+    raises :class:`NotImplementedError` so callers skip it. It exists purely so
+    boot reconciliation can sweep *stray* labelled workloads that have no live DB
+    run (a control-plane crash that missed a snapshot); it is never on the
+    per-run control path.
+    """
 
     def create(self, run: RunSnapshot, workers: int) -> DriverRef:
         """Create the fleet at ``workers`` replicas; return its handle."""
@@ -116,11 +125,30 @@ class ExecutionDriver(Protocol):
         """Return up to ``tail`` recent log lines (whole fleet if slot None)."""
         ...
 
+    def list_run_ids(self) -> Set[int]:
+        """Return the run ids of every workload this driver owns (discovery only).
+
+        Ownership is discovered by the ``stoker.run`` label the driver stamps on
+        every workload it creates; the label value parses to the run id. This is
+        the enumeration boot reconciliation needs to find *stray* fleets (a
+        labelled workload with no live DB run) and destroy them.
+
+        **Optional 7th method**, deliberately outside the six-method conformance
+        contract: a driver that cannot enumerate its estate raises
+        :class:`NotImplementedError`, and reconciliation skips the stray sweep
+        for that driver rather than treating "cannot list" as "no strays". An
+        enumeration *error* (a backend failure) must raise :class:`DriverError`,
+        never return an empty set, so a hiccup is never mistaken for "everything
+        is a stray".
+        """
+        raise NotImplementedError("driver does not support workload enumeration")
+
 
 __all__ = [
     "RunSnapshot",
     "DriverRef",
     "DriverStatus",
     "DriverError",
+    "NotFound",
     "ExecutionDriver",
 ]

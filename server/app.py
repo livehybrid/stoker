@@ -134,6 +134,74 @@ def _run_tick(drivers, boot_time):
         db.commit()
 
 
+async def _maintenance_loop(app):
+    # type: (FastAPI) -> None
+    """Slow background loop: roll up + prune metric_samples ~hourly.
+
+    Runs alongside the fast supervisor but on its own cadence
+    (``metric_maintenance_interval_s``, ~1 h). The roll-up/prune runs in a worker
+    thread (synchronous SQLAlchemy) and chunks + commits its own deletes, so a
+    huge prune never blocks the supervisor. Any error is logged and the loop
+    continues; the loop exits cleanly on cancellation.
+    """
+    settings = get_settings()
+    interval = max(1.0, float(settings.metric_maintenance_interval_s))
+    while True:
+        # Sleep first: give the app a moment to settle before the initial pass,
+        # and avoid a burst of work at every boot.
+        try:
+            await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            break
+        try:
+            await asyncio.to_thread(_run_maintenance)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning("metric maintenance error: %s", exc)
+
+
+def _run_maintenance():
+    # type: () -> None
+    from . import metrics_lifecycle
+
+    with SessionLocal() as db:
+        metrics_lifecycle.roll_up_and_prune(db, get_settings())
+
+
+async def _dogfood_metrics_loop(app):
+    # type: (FastAPI) -> None
+    """Periodic dogfood metrics loop: a stoker:metrics aggregate per active run.
+
+    Only meaningful when ``dogfood_enabled``; when disabled the emit is a no-op
+    so the loop simply idles at its cadence (``dogfood_metrics_interval_s``,
+    ~30 s). Best-effort and failure-isolated (the emitter swallows HEC errors and
+    never logs the token). Exits cleanly on cancellation.
+    """
+    settings = get_settings()
+    if not settings.dogfood_enabled:
+        # Nothing to ship: don't spin a loop that can only no-op.
+        log.debug("dogfood disabled; metrics loop not started")
+        return
+    interval = max(1.0, float(settings.dogfood_metrics_interval_s))
+    log.info("dogfood telemetry enabled; metrics loop running (%.0fs cadence)", interval)
+    while True:
+        try:
+            await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            break
+        try:
+            await asyncio.to_thread(_run_dogfood_metrics)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning("dogfood metrics tick error: %s", exc)
+
+
+def _run_dogfood_metrics():
+    # type: () -> None
+    from . import metrics_lifecycle
+
+    with SessionLocal() as db:
+        metrics_lifecycle.emit_active_run_metrics(db, get_settings())
+
+
 def _run_reconcile(drivers):
     # type: (Dict[str, ExecutionDriver]) -> None
     with SessionLocal() as db:
@@ -155,15 +223,26 @@ async def _lifespan(app):
     app.state.drivers = _build_drivers_map()
     task = asyncio.create_task(_supervisor_loop(app), name="stoker-supervisor")
     app.state.supervisor_task = task
+    # Slow background loops running alongside the supervisor: metric_samples
+    # roll-up/prune (~hourly) and, when dogfood is on, the per-run metrics
+    # aggregate (~30 s). Each is self-contained and failure-isolated.
+    maintenance_task = asyncio.create_task(
+        _maintenance_loop(app), name="stoker-metric-maintenance")
+    app.state.maintenance_task = maintenance_task
+    dogfood_task = asyncio.create_task(
+        _dogfood_metrics_loop(app), name="stoker-dogfood-metrics")
+    app.state.dogfood_task = dogfood_task
     log.info("control plane started; supervisor loop running (%.0fs cadence)",
              SUPERVISOR_INTERVAL_S)
     try:
         yield
     finally:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
-        log.info("control plane stopped; supervisor loop cancelled")
+        for bg in (task, maintenance_task, dogfood_task):
+            bg.cancel()
+        for bg in (task, maintenance_task, dogfood_task):
+            with contextlib.suppress(asyncio.CancelledError):
+                await bg
+        log.info("control plane stopped; background loops cancelled")
 
 
 def _is_auth_exempt(path):

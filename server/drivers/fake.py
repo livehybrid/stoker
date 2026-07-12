@@ -22,7 +22,7 @@ import os
 import subprocess
 import sys
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from .base import DriverError, DriverRef, DriverStatus, RunSnapshot
 
@@ -125,7 +125,7 @@ class FakeDriver(object):
         # type: (DriverRef) -> None
         # Idempotent: destroying an unknown/already-gone fleet is a no-op.
         with self._lock:
-            state = self._fleets.get(ref.id)
+            state = self._resolve_state(ref)
             if state is None:
                 log.info("fake driver destroy: fleet %s already gone", ref.id)
                 return
@@ -133,7 +133,7 @@ class FakeDriver(object):
             state.desired = 0
         if self._spawn and state is not None:
             self._terminate_procs(state, grace_s=1)
-        log.info("fake driver destroyed fleet %s", ref.id)
+        log.info("fake driver destroyed fleet %s (run %s)", ref.id, state.run_id)
 
     def status(self, ref):
         # type: (DriverRef) -> DriverStatus
@@ -163,6 +163,23 @@ class FakeDriver(object):
             lines = state.log_lines[-tail:] if tail else state.log_lines
             return "\n".join(lines)
 
+    # -- discovery (optional 7th method) ---------------------------------- #
+
+    def list_run_ids(self):
+        # type: () -> Set[int]
+        """Return the run ids of every live (non-destroyed) in-memory fleet.
+
+        The boot stray-sweep analogue for the in-process driver: a fleet whose
+        state has been destroyed is gone (its workload no longer exists), so it
+        is excluded, mirroring what a swarm/k8s backend would no longer list.
+        """
+        with self._lock:
+            return {
+                state.run_id
+                for state in self._fleets.values()
+                if not state.destroyed
+            }
+
     # -- test-log injection ----------------------------------------------
 
     def append_log(self, ref, line):
@@ -181,6 +198,28 @@ class FakeDriver(object):
         if state is None or state.destroyed:
             raise DriverError("unknown fleet %r" % ref.id)
         return state
+
+    def _resolve_state(self, ref):
+        # type: (DriverRef) -> Optional[_FleetState]
+        """Find a fleet by its native id, else by ``raw['run_id']`` (caller holds
+        the lock).
+
+        The native fleet id is opaque (``fake-run-<run>-<n>``) and cannot be
+        reconstructed from a run id alone, so the boot stray-sweep synthesises a
+        destroy ref carrying only ``raw={'run_id': <id>}``. Falling back to a
+        run-id match lets that synthesised ref destroy the right in-memory fleet,
+        mirroring how swarm/k8s address a stray by its ``stoker-run-<id>`` name.
+        """
+        state = self._fleets.get(ref.id)
+        if state is not None:
+            return state
+        run_id = (ref.raw or {}).get("run_id")
+        if run_id is None:
+            return None
+        for candidate in self._fleets.values():
+            if candidate.run_id == run_id and not candidate.destroyed:
+                return candidate
+        return None
 
     def _spawn_workers(self, state, workers):
         # type: (_FleetState, int) -> None

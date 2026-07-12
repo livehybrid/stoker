@@ -115,6 +115,10 @@ export interface PackPreview {
   lint_errors: string[];
 }
 
+export interface PackPreviewRun {
+  events: string[];
+}
+
 // --------------------------------------------------------------------------- //
 // Specs
 // --------------------------------------------------------------------------- //

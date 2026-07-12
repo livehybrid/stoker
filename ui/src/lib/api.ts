@@ -16,6 +16,7 @@ import type {
   MetricsOut,
   PackOut,
   PackPreview,
+  PackPreviewRun,
   RepoCreate,
   RepoCreated,
   RepoOut,
@@ -214,6 +215,12 @@ export const packs = {
   get: (id: number) => request<PackOut>("GET", `/packs/${id}`),
   preview: (id: number) =>
     request<PackPreview>("GET", `/packs/${id}/preview`),
+  // Render a few sample events in-process (no fleet, no HEC target). `n` is
+  // clamped server-side to a sane maximum.
+  previewRun: (id: number, n = 10) =>
+    request<PackPreviewRun>("GET", `/packs/${id}/preview_run`, {
+      query: { n },
+    }),
 };
 
 // --------------------------------------------------------------------------- //

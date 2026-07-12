@@ -678,8 +678,12 @@ class _FakeK8s:
         name = body["metadata"]["name"]
         self._uid += 1
         uid = "uid-%d" % self._uid
+        # Preserve the stoker.run label the driver stamps on create, so the
+        # list_run_ids enumeration parses it from the label (its primary path)
+        # rather than only the name fallback.
+        labels = dict(body["metadata"].get("labels") or {})
         self.jobs[name] = {
-            "metadata": {"name": name, "uid": uid},
+            "metadata": {"name": name, "uid": uid, "labels": labels},
             "spec": {
                 "parallelism": body["spec"]["parallelism"],
                 "completions": body["spec"]["completions"],
@@ -714,6 +718,12 @@ class _FakeK8s:
             raise _ApiException(status=404, reason="Not Found")
         del self.jobs[name]
         return _obj({"status": "Success"})
+
+    def list_namespaced_job(self, namespace, label_selector=None, **kw):
+        # type: (str, Optional[str], Any) -> Any
+        # Presence-only selector "stoker.run": every job stored here carries the
+        # label (the driver stamps it on create), so return them all.
+        return _obj({"items": [_obj(job) for job in self.jobs.values()]})
 
     # CoreV1Api ----------------------------------------------------------- #
 
@@ -851,6 +861,52 @@ def test_k8s_conformance_logs_returns_pod_output(k8s_conformance_driver):
         assert "stoker-run-814-0" not in one
     finally:
         driver.destroy(ref)
+
+
+# =========================================================================== #
+# list_run_ids(): the optional 7th (discovery-only) method for the boot sweep.
+# =========================================================================== #
+
+def test_k8s_conformance_list_run_ids(k8s_conformance_driver):
+    """The fake-cluster driver reports owned run ids and drops destroyed ones."""
+    driver = k8s_conformance_driver
+    r1 = driver.create(_snapshot(run_id=815, workers=2), 2)
+    driver.create(_snapshot(run_id=816, workers=1), 1)
+    owned = driver.list_run_ids()
+    assert isinstance(owned, set)
+    assert owned == {815, 816}
+    driver.destroy(r1)
+    assert driver.list_run_ids() == {816}
+
+
+def test_k8s_list_run_ids_lists_jobs_by_label_and_parses_id():
+    """list_run_ids lists Jobs with the stoker.run selector and parses the id."""
+    batch, core = _mock_apis()
+    driver = _driver(batch, core)
+    batch.list_namespaced_job.return_value = _obj({"items": [
+        _obj({"metadata": {"name": "stoker-run-3", "labels": {"stoker.run": "3"}}}),
+        _obj({"metadata": {"name": "stoker-run-77", "labels": {"stoker.run": "77"}}}),
+        # No label -> parsed from the stoker-run-<id> name fallback.
+        _obj({"metadata": {"name": "stoker-run-9"}}),
+        # Unparseable id -> skipped, never guessed.
+        _obj({"metadata": {"name": "weird", "labels": {"stoker.run": "nope"}}}),
+    ]})
+
+    owned = driver.list_run_ids()
+    assert owned == {3, 77, 9}
+
+    kwargs = batch.list_namespaced_job.call_args.kwargs
+    assert kwargs["namespace"] == "stoker"
+    assert kwargs["label_selector"] == "stoker.run"
+
+
+def test_k8s_list_run_ids_raises_on_backend_error_not_empty():
+    """A 5xx during enumeration raises DriverError (never silent empty)."""
+    batch, core = _mock_apis()
+    batch.list_namespaced_job.side_effect = _ApiException(status=500, reason="boom")
+    driver = _driver(batch, core)
+    with pytest.raises(DriverError):
+        driver.list_run_ids()
 
 
 def test_k8s_orphaned_secret_deleted_when_job_create_fails():

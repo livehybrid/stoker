@@ -38,7 +38,7 @@ the token never appears in the Job's pod-spec env (only in the Secret).
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from .base import DriverError, DriverRef, DriverStatus, NotFound, RunSnapshot
 from ..config import get_settings
@@ -293,6 +293,33 @@ class K8sDriver(object):
                 chunks.append(text if isinstance(text, str) else str(text))
         return "\n".join(chunks)
 
+    # -- discovery (optional 7th method) ---------------------------------- #
+
+    def list_run_ids(self):
+        # type: () -> Set[int]
+        """Return every run id this namespace owns, by the ``stoker.run`` label.
+
+        Lists ``batch/v1`` Jobs in the driver's namespace with label selector
+        ``stoker.run`` (presence-only: matches any Job carrying the label,
+        whatever its value); each Job's ``metadata.labels['stoker.run']`` (or its
+        ``stoker-run-<id>`` name as a fallback) parses to the run id. Boot
+        reconciliation uses this to spot strays (a labelled Job with no live DB
+        run).
+
+        A backend failure propagates from :meth:`_call` as :class:`DriverError`
+        (the caller skips the sweep rather than mistaking a hiccup for "no
+        strays"); Jobs whose label does not parse to an int are skipped.
+        """
+        listing = self._call(self._batch_api().list_namespaced_job,
+                             namespace=self._namespace,
+                             label_selector="stoker.run")
+        run_ids = set()  # type: Set[int]
+        for job in _items_of(listing):
+            run_id = _job_run_id(job)
+            if run_id is not None:
+                run_ids.add(run_id)
+        return run_ids
+
     # -- ownerReference adoption ------------------------------------------ #
 
     def _adopt_secret(self, ns, s_name, j_name, job_uid):
@@ -518,6 +545,30 @@ def _run_label(ref):
     # Fall back to the Job name suffix (stoker-run-<id>).
     name = raw.get("name") or ref.id or ""
     return name.rsplit("-", 1)[-1] if name else ""
+
+
+def _job_run_id(job):
+    # type: (Any) -> Optional[int]
+    """Parse a k8s Job object/dict to its ``stoker.run`` run id, or None.
+
+    Prefers ``metadata.labels['stoker.run']`` (the authoritative marker the
+    driver stamps on create); falls back to the ``stoker-run-<id>`` Job-name
+    suffix when the label is missing. A non-integer value yields None (skip it —
+    the sweep must never destroy on a guessed id).
+    """
+    meta = _attr(job, "metadata")
+    labels = _attr(meta, "labels") or {}
+    raw = labels.get("stoker.run") if isinstance(labels, dict) else None
+    if raw is None:
+        name = _attr(meta, "name") or ""
+        if isinstance(name, str) and name.startswith("stoker-run-"):
+            raw = name[len("stoker-run-"):]
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def _active_deadline(run):

@@ -672,17 +672,24 @@ def reconcile_on_boot(db, drivers):
     # type: (Session, Mapping[str, ExecutionDriver]) -> None
     """Reconcile DB runs against live driver workloads at startup.
 
-    List each driver's workloads labelled ``stoker.run``; adopt those matching
-    live (non-terminal) runs, destroy strays the control plane owns, and fail
-    orphaned DB runs whose workload is gone. Writes a run_event per action.
+    Two phases, in order:
 
-    Reconciliation is driven from the DB (the source of truth) against each
-    run's stored :class:`DriverRef` via ``driver.status``: a live run whose
-    workload is still present is adopted (left running); a live run whose
-    workload has vanished (or that never got a ``DriverRef``) is failed as
-    orphaned. Enumerating and destroying *stray* workloads with no DB run needs
-    a driver-side listing beyond the six-method interface; that is left to the
-    SwarmDriver's own boot sweep (documented, not silently dropped).
+    1. **DB-driven adopt/fail** (the source of truth): for each non-terminal DB
+       run, probe its stored :class:`DriverRef` via ``driver.status``. A run whose
+       workload is still present is adopted (left running); a run whose workload
+       has vanished (or that never got a ``DriverRef``) is failed as orphaned.
+
+    2. **Stray fleet sweep**: for each fleet driver that supports enumeration
+       (:meth:`~server.drivers.base.ExecutionDriver.list_run_ids`, the optional
+       7th method), list every labelled workload it owns and destroy any whose
+       run id is **not** a live (non-terminal) DB run — an orphan fleet left
+       blasting a target after a control-plane crash that missed a snapshot. A
+       workload mapping to a live run is never touched. A driver that cannot
+       enumerate (``NotImplementedError``) or whose enumeration errors is skipped
+       for the sweep — an enumeration failure is treated as "skip", never as "all
+       strays" (which would destroy the estate).
+
+    Writes a ``run_event`` (or a loud audit log for a run-less stray) per action.
     """
     active_states = (
         STATE_PROVISIONING, STATE_RELEASING, STATE_RUNNING, STATE_DRAINING,
@@ -722,6 +729,143 @@ def reconcile_on_boot(db, drivers):
                          {"desired": status.desired, "running": status.running})
             log.info("boot: adopted run %s (desired=%d running=%d)",
                      run.id, status.desired, status.running)
+
+    # Phase 2: sweep stray workloads with no live DB run. Runs after phase 1 so a
+    # run just failed/adopted above is reflected in the live set.
+    _sweep_stray_fleets(db, drivers)
+
+
+def _live_run_ids(db):
+    # type: (Session) -> set
+    """The run ids of every non-terminal (live) run — the stray-sweep whitelist.
+
+    A workload whose run id is in this set maps to a run the control plane still
+    owns and must never be destroyed as a stray. Read after phase 1's flush so a
+    run failed this boot (its workload legitimately gone) is already excluded.
+    """
+    db.flush()
+    stmt = select(Run.id).where(Run.state.notin_(tuple(TERMINAL_STATES)))
+    return {row for row in db.execute(stmt).scalars().all()}
+
+
+def _sweep_stray_fleets(db, drivers):
+    # type: (Session, Mapping[str, ExecutionDriver]) -> None
+    """Destroy labelled workloads whose run id is not a live DB run.
+
+    For each distinct fleet driver, enumerate its owned workloads via
+    :meth:`~server.drivers.base.ExecutionDriver.list_run_ids`; any run id absent
+    from :func:`_live_run_ids` is a stray and is destroyed on a synthesised ref.
+
+    Safety invariants:
+
+    * a driver that cannot enumerate (``NotImplementedError``) is skipped;
+    * an enumeration **error** (``DriverError``/any exception) is skipped and
+      logged — never coerced into "everything is a stray";
+    * a workload mapping to a live run is never destroyed;
+    * a per-stray destroy failure is logged and the sweep continues.
+    """
+    if not drivers:
+        return
+    live = _live_run_ids(db)
+    # One enumeration per distinct driver instance (a fleet map may point several
+    # names at the same driver; id() de-dupes so we do not list an estate twice).
+    seen = set()  # type: set
+    for fleet_name, driver in drivers.items():
+        if driver is None or id(driver) in seen:
+            continue
+        seen.add(id(driver))
+        try:
+            owned = driver.list_run_ids()
+        except NotImplementedError:
+            log.info("boot sweep: driver for fleet %s cannot enumerate; skipping",
+                     fleet_name)
+            continue
+        except Exception as exc:  # DriverError, transport blip, etc.
+            # Never treat "could not list" as "no workloads == all strays".
+            log.warning("boot sweep: enumeration for fleet %s failed (%s); "
+                        "skipping sweep for this driver", fleet_name, exc)
+            continue
+        strays = {rid for rid in owned if rid not in live}
+        if not strays:
+            log.info("boot sweep: fleet %s clean (%d owned, 0 stray)",
+                     fleet_name, len(owned))
+            continue
+        for run_id in sorted(strays):
+            _destroy_stray(db, driver, fleet_name, run_id)
+
+
+def _destroy_stray(db, driver, fleet_name, run_id):
+    # type: (Session, ExecutionDriver, str, int) -> None
+    """Destroy one stray workload (run id has no live DB run) on a synthesised ref.
+
+    The ref is reconstructed from the driver's own naming scheme (the workload
+    was created with ``stoker.run=<id>`` and named ``stoker-run-<id>``), so
+    ``driver.destroy`` addresses exactly the labelled workload the sweep found.
+    Loud by design: this is a fleet the control plane lost track of, so it is
+    recorded on both the failed run's audit trail (when the row still exists) and
+    the log. A destroy failure is logged, never raised (one wedged stray must not
+    stall boot).
+    """
+    ref = _synthesise_stray_ref(driver, run_id)
+    log.warning("boot sweep: STRAY fleet run=%s on fleet %s (no live DB run) -> "
+                "destroying", run_id, fleet_name)
+    try:
+        driver.destroy(ref)
+    except Exception as exc:
+        log.warning("boot sweep: destroy of stray run=%s (fleet %s) failed: %s",
+                    run_id, fleet_name, exc)
+        _audit_stray(db, run_id, {"fleet": fleet_name, "action": "destroy_failed",
+                                  "error": str(exc)})
+        return
+    _audit_stray(db, run_id, {"fleet": fleet_name, "action": "destroyed"})
+
+
+def _synthesise_stray_ref(driver, run_id):
+    # type: (ExecutionDriver, int) -> DriverRef
+    """Build a destroyable :class:`DriverRef` for a stray, per the driver's kind.
+
+    Enumeration yields only a run id; ``driver.destroy`` needs a ref. Every driver
+    names a run's workload deterministically from its id (``stoker-run-<id>`` for
+    swarm services and k8s Jobs), so the ref is reconstructed rather than stored.
+    The driver ``kind`` is read off the instance (``_KIND``); ``raw`` always
+    carries ``run_id`` so the FakeDriver — whose native fleet id is opaque — can
+    still resolve the target by run id.
+    """
+    kind = getattr(driver, "_KIND", None) or _driver_kind(driver)
+    name = "stoker-run-%s" % run_id
+    raw = {"run_id": run_id, "name": name}  # type: Dict[str, Any]
+    if kind == "k8s":
+        # k8s destroy addresses the Job by name within a namespace.
+        raw["namespace"] = getattr(driver, "_namespace", None) or "stoker"
+    return DriverRef(kind=kind or "", id=name, raw=raw)
+
+
+def _driver_kind(driver):
+    # type: (ExecutionDriver) -> str
+    """Best-effort driver-kind label from the class name (fallback for _KIND)."""
+    cls = driver.__class__.__name__.lower()
+    if "swarm" in cls:
+        return "swarm"
+    if "k8s" in cls or "kube" in cls:
+        return "k8s"
+    if "fake" in cls:
+        return "fake"
+    return ""
+
+
+def _audit_stray(db, run_id, detail):
+    # type: (Session, int, Dict[str, Any]) -> None
+    """Record a stray-sweep action on the run's audit trail when the row exists.
+
+    A stray usually has a terminal (failed/orphaned) run row it belonged to; the
+    event lands there for traceability. When no row exists at all (the snapshot
+    that would have created it was lost — the very crash this sweep guards
+    against) the action is captured in the log only, since ``run_events.run_id``
+    is a foreign key and cannot reference a nonexistent run.
+    """
+    run = db.get(Run, run_id)
+    if run is not None:
+        append_event(db, run, "stray_destroyed", detail)
 
 
 # --------------------------------------------------------------------------- #
@@ -1211,6 +1355,25 @@ def transition_run(db, run, new_state, detail=None, actor="system", end_reason=N
     append_event(db, run, "state", payload, actor=actor)
     log.info("run %s: %s -> %s%s", run.id, old_state, new_state,
              (" (%s)" % end_reason) if end_reason else "")
+    # Dogfood: ship a stoker:job event for this transition when enabled. Entirely
+    # optional and failure-isolated — a HEC hiccup must never break a transition.
+    _emit_dogfood_transition(run, old_state, new_state)
+
+
+def _emit_dogfood_transition(run, old_state, new_state):
+    # type: (Run, str, str) -> None
+    """Best-effort dogfood job-event emit for a state change (never raises).
+
+    Delegates to :mod:`server.metrics_lifecycle`, which no-ops when dogfood is
+    disabled and swallows any HEC error. Imported lazily to avoid a module import
+    cycle and wrapped so a telemetry fault can never disturb the lifecycle.
+    """
+    try:
+        from . import metrics_lifecycle
+
+        metrics_lifecycle.emit_run_transition_event(run, old_state, new_state)
+    except Exception as exc:  # pragma: no cover - defensive; telemetry is optional
+        log.debug("dogfood transition emit skipped: %s", type(exc).__name__)
 
 
 def new_lease_id():
