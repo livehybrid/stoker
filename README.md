@@ -159,4 +159,6 @@ tools/     hec_sink test collector + smoke scripts
 
 ## Licence
 
-Apache-2.0. Vendors [splunk/eventgen](https://github.com/splunk/eventgen) 7.2.1 (Apache-2.0); see `worker/engines/eventgen/VENDOR.md`.
+Stoker is licensed under the **Apache License 2.0** — see [`LICENSE`](LICENSE) and the attribution [`NOTICE`](NOTICE).
+
+It vendors [splunk/eventgen](https://github.com/splunk/eventgen) 7.2.1 (Apache-2.0; see `worker/engines/eventgen/VENDOR.md`) and redistributes third-party open-source dependencies in its container images. Those components, their versions and licences are inventoried in [`licenses/THIRD-PARTY-LICENSES.md`](licenses/THIRD-PARTY-LICENSES.md), with the full licence texts under [`licenses/`](licenses/).
