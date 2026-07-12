@@ -340,6 +340,47 @@ class User(Base):
     last_login_at: Mapped[Optional[datetime.datetime]] = _ts_column(nullable=True)
 
 
+class ApiToken(Base):
+    """A non-interactive API token for CI/CD and machine callers.
+
+    A token is a bearer credential presented as ``Authorization: Bearer stk_...``
+    so an automated caller can drive the operator API without a browser session.
+    The secret (``stk_`` + url-safe random) is shown exactly once, at create time;
+    only its ``token_hash`` (sha256 hex) is stored, so the plaintext can never be
+    recovered from the row and is never serialised or logged. Lookup is by the
+    indexed hash column, which is inherently constant-time (no string compare of
+    the raw secret).
+
+    ``role`` (viewer | operator | admin) is the sole authorisation input, exactly
+    like a :class:`User`: a token authenticates as a **transient** principal with
+    that role; it is never a persisted user and holds no session. ``token_prefix``
+    (the first ~12 chars, e.g. ``stk_ab12cd34``) is safe to display so the operator
+    can tell tokens apart in the list. ``revoked_at`` is a soft-revoke: setting it
+    disables the token while keeping the audit row (``created_by`` / ``created_at``
+    / ``last_used_at``) intact. ``expires_at`` is an optional hard expiry.
+    """
+
+    __tablename__ = "api_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    # sha256 hex of the secret. The only representation of the token we keep;
+    # indexed for the auth-time lookup. Never the plaintext.
+    token_hash: Mapped[str] = mapped_column(
+        String(64), unique=True, index=True, nullable=False)
+    # First ~12 chars of the secret (e.g. "stk_ab12cd34"): display-only, not a
+    # credential (far too short to guess the rest of the entropy).
+    token_prefix: Mapped[str] = mapped_column(String(16), nullable=False)
+    # viewer | operator | admin
+    role: Mapped[str] = mapped_column(String(16), nullable=False, default="viewer")
+    created_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime.datetime] = _ts_column(nullable=False, default=utcnow)
+    expires_at: Mapped[Optional[datetime.datetime]] = _ts_column(nullable=True)
+    last_used_at: Mapped[Optional[datetime.datetime]] = _ts_column(nullable=True)
+    # Soft-revoke: set to disable the token while keeping the audit row.
+    revoked_at: Mapped[Optional[datetime.datetime]] = _ts_column(nullable=True)
+
+
 __all__ = [
     "utcnow",
     "Target",
@@ -353,4 +394,5 @@ __all__ = [
     "RunEvent",
     "Fleet",
     "User",
+    "ApiToken",
 ]

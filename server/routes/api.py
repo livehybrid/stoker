@@ -557,8 +557,16 @@ def delete_spec(spec_id: int, db: Session = Depends(get_db)):
     return Response(status_code=204)
 
 
+def _actor(request):
+    # type: (Request) -> str
+    """The resolved caller for the audit trail (a username or 'token:<name>',
+    stashed by the auth middleware). Falls back to 'operator' when absent (the
+    bootstrap window or STOKER_AUTH_DISABLED), so attribution degrades safely."""
+    return getattr(request.state, "actor", None) or "operator"
+
+
 @router.post("/specs/{spec_id}/run", response_model=RunCreated, status_code=201)
-def run_spec(spec_id: int, body: RunLaunch, db: Session = Depends(get_db)):
+def run_spec(spec_id: int, body: RunLaunch, request: Request, db: Session = Depends(get_db)):
     # type: (...) -> Any
     """Validate + snapshot + bundle + apportion + provision a spec into a run.
 
@@ -673,7 +681,7 @@ def run_spec(spec_id: int, body: RunLaunch, db: Session = Depends(get_db)):
     driver = get_driver(spec.fleet)
     try:
         run = lifecycle.provision_run(
-            db, spec, driver, overrides=body.overrides, started_by="operator")
+            db, spec, driver, overrides=body.overrides, started_by=_actor(request))
     except DriverError as exc:
         # The fleet could not be materialised (e.g. Portainer unreachable / a
         # swarm fleet with no PORTAINER_HOST). Fail loudly, never hang.
@@ -774,13 +782,13 @@ def run_events(run_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/runs/{run_id}/stop", response_model=RunOut)
-def stop_run_endpoint(run_id: int, body: StopRequest, db: Session = Depends(get_db)):
+def stop_run_endpoint(run_id: int, body: StopRequest, request: Request, db: Session = Depends(get_db)):
     # type: (...) -> Any
     """Drain a run (``force`` destroys immediately)."""
     run = _load_active_run(db, run_id)
     driver = _run_driver(db, run)
     try:
-        run = lifecycle.stop_run(db, run, driver, force=body.force)
+        run = lifecycle.stop_run(db, run, driver, force=body.force, actor=_actor(request))
     except DriverError as exc:
         db.rollback()
         raise HTTPException(status_code=502, detail={"error": "stop_failed", "detail": str(exc)})
@@ -790,7 +798,7 @@ def stop_run_endpoint(run_id: int, body: StopRequest, db: Session = Depends(get_
 
 
 @router.post("/runs/{run_id}/scale", response_model=RunOut)
-def scale_run_endpoint(run_id: int, body: ScaleRequest, db: Session = Depends(get_db)):
+def scale_run_endpoint(run_id: int, body: ScaleRequest, request: Request, db: Session = Depends(get_db)):
     # type: (...) -> Any
     """Change worker count; re-apportion and push ``retarget`` shares."""
     if body.workers < 1:
@@ -814,7 +822,7 @@ def scale_run_endpoint(run_id: int, body: ScaleRequest, db: Session = Depends(ge
         )
     driver = _run_driver(db, run)
     try:
-        run = lifecycle.scale_run(db, run, driver, body.workers)
+        run = lifecycle.scale_run(db, run, driver, body.workers, actor=_actor(request))
     except DriverError as exc:
         db.rollback()
         raise HTTPException(status_code=502, detail={"error": "scale_failed", "detail": str(exc)})
@@ -824,7 +832,7 @@ def scale_run_endpoint(run_id: int, body: ScaleRequest, db: Session = Depends(ge
 
 
 @router.post("/runs/{run_id}/rescale", response_model=RunOut)
-def rescale_run_endpoint(run_id: int, body: RescaleRequest, db: Session = Depends(get_db)):
+def rescale_run_endpoint(run_id: int, body: RescaleRequest, request: Request, db: Session = Depends(get_db)):
     # type: (...) -> Any
     """Change total rate at the same worker count; push ``retarget`` shares."""
     run = _load_active_run(db, run_id)
@@ -832,7 +840,7 @@ def rescale_run_endpoint(run_id: int, body: RescaleRequest, db: Session = Depend
         raise HTTPException(status_code=422, detail="rate_value must be > 0")
     driver = _run_driver(db, run)
     try:
-        run = lifecycle.rescale_run(db, run, driver, body.rate_value)
+        run = lifecycle.rescale_run(db, run, driver, body.rate_value, actor=_actor(request))
     except DriverError as exc:
         db.rollback()
         raise HTTPException(status_code=502, detail={"error": "rescale_failed", "detail": str(exc)})

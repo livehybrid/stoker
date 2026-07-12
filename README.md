@@ -55,6 +55,7 @@ The control plane never generates load itself. It owns state in Postgres (the so
 - **Exact-rate pacing.** A token bucket paces delivery against the wall clock to within ~+/-1% of the target aggregate rate, sharded across N workers by largest-remainder. Modes: EPS, GB/day, or count/interval.
 - **Two execution drivers.** SwarmDriver (Docker Swarm via the Portainer API, never mounting docker.sock) and K8sDriver (Kubernetes elastic Indexed `batch/v1` Jobs, k3s or EKS). A FakeDriver backs the tests. EKS Terraform under `infra/aws/stoker-eks/`.
 - **App-level auth.** Local password users (bcrypt) with a signed HttpOnly session cookie, roles `viewer < operator < admin`, a default admin seeded from env or a first-visit setup screen, user management, and trusted-proxy-header SSO (a header honoured only from a trusted peer). Vendor-neutral: no dependency on any specific IdP. `/api/agent` (per-run JWT) and `/api/hooks` (webhook HMAC) are exempt.
+- **API access for CI/CD + Swagger.** Admin-issued API tokens (`stk_...`, role-scoped, stored only as a SHA-256 hash, revocable, optional expiry) authenticate non-interactive callers via `Authorization: Bearer`, alongside the browser session. The whole REST API is documented as OpenAPI with **Swagger UI at `/docs`** (an Authorize box takes a token), so the spec drives client codegen.
 - **Packs from git.** Register a git repo (HTTPS PAT or SSH deploy key); Stoker clones it, indexes pack roots, lints them and resyncs on a GitHub push webhook (per-repo HMAC). A local pack directory can also be registered directly.
 - **Replay is single-worker.** A rawreplay run is forced to one worker (a multi-worker replay spec is rejected `409 replay_single_worker` at submit, and pinned at provision and scale).
 - **Dogfood telemetry.** The control plane can stream its own run metrics to a HEC target for self-observability (off unless configured).
@@ -109,6 +110,23 @@ python deploy.py --status   # show the stack + services
 
 `deploy.py` creates the `stoker_master_key` swarm secret once (a Fernet key persisted in `.env` so encrypted data survives redeploys) and injects env from `.env`. Kubernetes manifests are under `infra/k8s/`; EKS Terraform under `infra/aws/stoker-eks/`.
 
+### API access (CI/CD) and Swagger
+
+Every operator action is a REST call, so a pipeline can drive Stoker with an API token instead of a browser session. An admin mints a role-scoped token once (the secret is shown only on create), then it is presented as a bearer credential:
+
+```bash
+# Mint an operator token (needs an admin session or an admin token); secret shown once
+curl -sX POST https://stoker.cloud.livehybrid.com/api/tokens \
+  -H "Authorization: Bearer $STOKER_ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"github-ci","role":"operator","expires_in_days":90}'
+
+# Use it from CI to launch a run against an existing spec
+curl -sX POST https://stoker.cloud.livehybrid.com/api/specs/42/run \
+  -H "Authorization: Bearer $STOKER_CI_TOKEN" -H 'Content-Type: application/json' -d '{}'
+```
+
+A token carries its own role (a CI token can be `operator` without holding admin), can be revoked (`DELETE /api/tokens/{id}`) or expired, and is attributed in the audit trail (`started_by = token:github-ci`). Interactive docs: **Swagger UI at `/docs`**, ReDoc at `/redoc`, spec at `/openapi.json` (the `bearerAuth` scheme drives the Authorize box and client codegen).
+
 ## Live deployment
 
 - UI + operator API: **https://stoker.cloud.livehybrid.com** (protected by app-level auth)
@@ -121,7 +139,7 @@ python deploy.py --status   # show the stack + services
 ```
 worker/    agent (control-plane protocol, token-bucket pacing, HEC client)
            + engines: vendored eventgen 7.2.1 and rawreplay/Piston
-server/    FastAPI control plane: routes (agent/operator/auth/users),
+server/    FastAPI control plane: routes (agent/operator/auth/users/tokens),
            lifecycle, drivers (swarm/k8s/fake), gitsync, bundles, crypto, models
 ui/        React / Vite / TanStack Router single-page app (built into the image)
 packs/     example packs: flatline + apigw (eventgen), attack-replay (Piston)
@@ -134,8 +152,9 @@ tools/     hec_sink test collector + smoke scripts
 ## Documentation
 
 - [docs/WORKER-CONTRACT.md](docs/WORKER-CONTRACT.md) — the worker image's environment contract, socket protocol, pacing and drain behaviour.
-- [server/CONTROL-PLANE.md](server/CONTROL-PLANE.md) — the control-plane data model, agent + operator API and run lifecycle.
-- [packs/attack-replay/README.md](packs/attack-replay/README.md) — the pack format (eventgen and Piston) worked through a raw-replay pack. Git sync and pack linting are covered in [server/CONTROL-PLANE.md](server/CONTROL-PLANE.md).
+- [server/CONTROL-PLANE.md](server/CONTROL-PLANE.md) — the control-plane data model, agent + operator API (incl. API tokens + OpenAPI), auth and run lifecycle.
+- [docs/PACKS.md](docs/PACKS.md) — the authoritative pack-format reference (eventgen and Piston packs, `dataset_url` safety, git sync).
+- [packs/attack-replay/README.md](packs/attack-replay/README.md) — the pack format worked through a real raw-replay pack.
 - [infra/k8s/README.md](infra/k8s/README.md), [infra/aws/stoker-eks/README.md](infra/aws/stoker-eks/README.md) — Kubernetes and EKS deployment.
 
 ## Licence

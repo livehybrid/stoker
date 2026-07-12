@@ -552,17 +552,22 @@ _AUTH_ROLES = ("viewer", "operator", "admin")
 
 class UserOut(BaseModel):
     """A user view for the operator API. The password hash never appears here
-    (there is no field for it by construction) and is never serialised."""
+    (there is no field for it by construction) and is never serialised.
+
+    ``id`` / ``created_at`` are optional so a **transient API-token principal**
+    (``source="token"``, ``id=None``, no persisted row) also serialises when it
+    reaches ``/api/auth/me`` or ``/api/auth/status``; a real user always carries
+    both, so this is a widening that changes no persisted-user response."""
 
     model_config = _ORM
 
-    id: int
+    id: Optional[int] = None
     username: str
     email: Optional[str] = None
     role: str
-    source: str  # local | proxy
+    source: str  # local | proxy | token
     active: bool
-    created_at: datetime.datetime
+    created_at: Optional[datetime.datetime] = None
     last_login_at: Optional[datetime.datetime] = None
 
 
@@ -672,6 +677,86 @@ class SetupRequest(BaseModel):
         return v
 
 
+# --------------------------------------------------------------------------- #
+# API tokens (non-interactive bearer credentials)
+# --------------------------------------------------------------------------- #
+
+class ApiTokenCreate(BaseModel):
+    """Create an API token (admin only).
+
+    ``name`` is a unique human label. ``role`` is the authorisation the token
+    grants (viewer | operator | admin). ``expires_in_days`` optionally sets a
+    hard expiry that many days from now; omit for a non-expiring token.
+    """
+
+    name: str
+    role: str = "viewer"
+    expires_in_days: Optional[int] = None
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, v):
+        # type: (str) -> str
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("name is required")
+        if len(v) > 255:
+            raise ValueError("name must be at most 255 characters")
+        return v
+
+    @field_validator("role")
+    @classmethod
+    def _validate_role(cls, v):
+        # type: (str) -> str
+        v = (v or "viewer").strip()
+        if v not in _AUTH_ROLES:
+            raise ValueError("role must be one of %s" % ", ".join(_AUTH_ROLES))
+        return v
+
+    @field_validator("expires_in_days")
+    @classmethod
+    def _validate_expires(cls, v):
+        # type: (Optional[int]) -> Optional[int]
+        if v is None:
+            return v
+        if v <= 0:
+            raise ValueError("expires_in_days must be a positive integer")
+        return v
+
+
+class ApiTokenOut(BaseModel):
+    """Token metadata (list / management view). Never carries the secret or its
+    hash: there is no field for either by construction, so a listing can never
+    leak a usable credential."""
+
+    model_config = _ORM
+
+    id: int
+    name: str
+    role: str
+    prefix: str = Field(validation_alias="token_prefix")
+    created_by: Optional[str] = None
+    created_at: datetime.datetime
+    expires_at: Optional[datetime.datetime] = None
+    last_used_at: Optional[datetime.datetime] = None
+    revoked_at: Optional[datetime.datetime] = None
+
+
+class ApiTokenCreated(BaseModel):
+    """Create response: the ONLY place the plaintext ``token`` is returned.
+
+    The secret is shown once here and is unrecoverable afterwards (only its hash
+    is stored). ``prefix`` is the display label that later appears in listings."""
+
+    id: int
+    name: str
+    role: str
+    token: str = Field(repr=False)  # the plaintext secret, returned once
+    prefix: str
+    created_at: datetime.datetime
+    expires_at: Optional[datetime.datetime] = None
+
+
 class AuthStatus(BaseModel):
     """Public login-page status (safe when unauthenticated).
 
@@ -708,4 +793,6 @@ __all__ = [
     "ReadyRequest", "HeartbeatRequest", "HeartbeatCommand", "FinalRequest", "Empty",
     # auth
     "UserOut", "UserCreate", "UserUpdate", "LoginRequest", "SetupRequest", "AuthStatus",
+    # api tokens
+    "ApiTokenCreate", "ApiTokenOut", "ApiTokenCreated",
 ]

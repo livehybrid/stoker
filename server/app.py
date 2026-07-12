@@ -261,6 +261,51 @@ def _is_auth_exempt(path):
                for p in _AUTH_EXEMPT_PREFIXES)
 
 
+def _install_openapi(app):
+    # type: (FastAPI) -> None
+    """Add the ``bearerAuth`` security scheme to the generated OpenAPI spec.
+
+    Swagger/ReDoc and any client-codegen tool then know the API accepts an
+    ``Authorization: Bearer <token>`` credential: Swagger UI renders an
+    **Authorize** box, and the scheme is applied as a **global** security
+    requirement so the spec documents every operation as token-authenticable.
+    The schema is generated once and cached on ``app.openapi_schema`` (FastAPI's
+    own pattern), and ``/openapi.json`` / ``/docs`` / ``/redoc`` stay reachable
+    (they are non-``/api`` and thus exempt from the auth guard).
+    """
+    from fastapi.openapi.utils import get_openapi
+
+    def custom_openapi():
+        # type: () -> dict
+        if app.openapi_schema is not None:
+            return app.openapi_schema
+        schema = get_openapi(
+            title=app.title,
+            version=app.version,
+            summary=app.summary,
+            description=app.description,
+            routes=app.routes,
+        )
+        components = schema.setdefault("components", {})
+        schemes = components.setdefault("securitySchemes", {})
+        schemes["bearerAuth"] = {
+            "type": "http",
+            "scheme": "bearer",
+            "description": (
+                "Stoker API token (stk_...): "
+                "Authorization: Bearer <token>"
+            ),
+        }
+        # Global requirement: every operation may be called with a bearer token.
+        # Optional in effect (the unauthenticated entry points still work) but
+        # this makes the Authorize box appear and drives usable client codegen.
+        schema["security"] = [{"bearerAuth": []}]
+        app.openapi_schema = schema
+        return schema
+
+    app.openapi = custom_openapi  # type: ignore[method-assign]
+
+
 def _install_auth_middleware(app):
     # type: (FastAPI) -> None
     """Require an authenticated session for guarded ``/api/*`` requests.
@@ -292,7 +337,7 @@ def _install_auth_middleware(app):
                 user = auth_mod.resolve_user(request, db, settings)
                 if user is None or not user.active:
                     return None
-                return user.role
+                return (user.role, user.username)
 
         outcome = await asyncio.to_thread(_resolve)
         if outcome == "bootstrap":
@@ -300,11 +345,20 @@ def _install_auth_middleware(app):
         if outcome is None:
             return JSONResponse(
                 {"detail": "authentication required"}, status_code=401)
-        # Role gate: /api/users is admin-only; any other mutating request needs
-        # operator+ (so a read-only `viewer` cannot delete targets, launch runs
-        # or register repos); safe methods need only an authenticated viewer.
-        role, path, method = outcome, request.url.path, request.method
-        if path == "/api/users" or path.startswith("/api/users/"):
+        # Stash the resolved caller so mutating handlers can attribute the audit
+        # trail (run started_by + event actor) to a specific admin/user or a
+        # token principal (username "token:<name>"). Handlers fall back to
+        # "operator" when this is absent (bootstrap / auth-disabled paths).
+        role, username = outcome
+        request.state.actor = username
+        # Role gate: /api/users and /api/tokens are admin-only (managing users
+        # or API tokens is a strictly higher privilege than holding one); any
+        # other mutating request needs operator+ (so a read-only `viewer` cannot
+        # delete targets, launch runs or register repos); safe methods need only
+        # an authenticated viewer.
+        path, method = request.url.path, request.method
+        if (path == "/api/users" or path.startswith("/api/users/")
+                or path == "/api/tokens" or path.startswith("/api/tokens/")):
             if role != "admin":
                 return JSONResponse({"detail": "admin role required"},
                                     status_code=403)
@@ -326,22 +380,34 @@ def create_app():
         lifecycle.seed_fleets(db, settings=settings)
 
     app = FastAPI(
-        title="Stoker control plane",
+        title="Stoker Control Plane",
         version="0.1.0",
         summary="Server-owned lifecycle for the Stoker load-generation fleet.",
+        description=(
+            "HTTP API for the Stoker Splunk HEC load-generation control plane: "
+            "targets, packs, specs and runs.\n\n"
+            "Machine callers (CI/CD) authenticate with an **API token** minted at "
+            "`POST /api/tokens` (admin only), presented as "
+            "`Authorization: Bearer stk_...`. Interactive users use a session "
+            "cookie from `POST /api/auth/login`. Use the **Authorize** button to "
+            "supply a token when trying requests here."
+        ),
         lifespan=_lifespan,
     )
+    _install_openapi(app)
 
     # Routers registered by importing the stable ``router`` objects.
     from .routes.agent import router as agent_router
     from .routes.api import router as api_router
     from .routes.auth import router as auth_router
     from .routes.auth import users_router
+    from .routes.tokens import router as tokens_router
 
     app.include_router(agent_router)
     app.include_router(api_router)
     app.include_router(auth_router)
     app.include_router(users_router)
+    app.include_router(tokens_router)
 
     # Session guard for /api/* (agent + webhook + unauthenticated auth endpoints
     # are exempt; the SPA shell and /healthz are public). Installed after the

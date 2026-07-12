@@ -159,6 +159,7 @@ Vendor-neutral: no dependency on any specific IdP. Two identity sources feed one
 
 - **Local password users**: passlib **bcrypt** `password_hash`. `POST /api/auth/login` verifies the password and sets a signed, TTL-bounded **session cookie** (`stoker_session`; `itsdangerous` `URLSafeTimedSerializer` keyed off `STOKER_MASTER_KEY` with the salt `stoker-session-v1`, domain-separated from the Fernet and run-JWT uses of the same key; the cookie carries only the user id). Cookie is HttpOnly + SameSite=Lax; `Secure` follows the actual request scheme (honouring `X-Forwarded-Proto` behind a TLS-terminating proxy). Login failures are uniform ("invalid credentials") so they are not a user-enumeration oracle; a proxy/SSO account (no password) cannot log in via the password form.
 - **Trusted-proxy SSO**: a reverse proxy (e.g. Traefik forward-auth to an IdP) asserts the authenticated username in the configured header (`STOKER_AUTH_HEADER`, default `X-Forwarded-User`). The header is honoured **only** when the immediate socket peer (`request.client.host` — the proxy) falls inside one of `STOKER_TRUSTED_PROXIES`; a direct client that sends the header is ignored (no spoofing). It is the real peer address, never any `X-Forwarded-For`. A proxy-asserted user is created on first sight (`source="proxy"`, role from `STOKER_PROXY_DEFAULT_ROLE`, default operator). Proxy-header resolution wins over the session cookie.
+- **API tokens (CI/CD)**: admin-issued service credentials for non-interactive callers (`api_tokens` table). `POST /api/tokens` (admin only) returns a one-time secret `stk_<random>`; only its **sha256 hash** and a display prefix (`stk_ab12cd34`) are stored, never the plaintext. A caller presents it as `Authorization: Bearer stk_...`; `resolve_api_token` looks it up by the hash column, rejects a revoked (`DELETE /api/tokens/{id}` soft-revoke) or expired token, and throttles the `last_used_at` write. Each token carries its own role, so a CI token can launch runs as `operator` without holding admin. It resolves to a **transient principal** (`username="token:<name>"`, no `users` row) so the audit trail attributes runs and actions to the specific token. The `stk_` prefix domain-separates a token from the worker's per-run JWT (`eyJ…`), and `/api/agent` is exempt regardless, so the two never collide. Resolution order: trusted-proxy header, then API token, then session cookie.
 - **Roles** (`viewer` < `operator` < `admin`), enforced by the `_auth_guard` middleware over guarded `/api/*`:
   - `/api/users` and `/api/users/*` require **admin** (also enforced per-route via `require_admin`).
   - any other **mutating** request (non GET/HEAD/OPTIONS) requires **operator** or **admin** — a `viewer` gets 403 and cannot create/delete targets, launch runs, or register repos.
@@ -167,6 +168,7 @@ Vendor-neutral: no dependency on any specific IdP. Two identity sources feed one
 - **Kill switch**: `STOKER_AUTH_DISABLED` skips the guard entirely with a loud warning (local dev only). Traefik basic-auth has been removed; auth is this subsystem.
 - **User management** (`/api/users`, admin only): list / create / patch (role, password, active, email) / delete. Two integrity guards: you cannot delete or demote/deactivate the **last active admin**, and you cannot delete **yourself**. No hash is ever returned (`UserOut` has no hash field).
 - **Exempt from the session guard**: `/api/agent/*` (per-run JWT) and `/api/hooks/*` (per-repo webhook HMAC) authenticate their own way, plus the unauthenticated auth entry points the login page needs before a session exists (`/api/auth/login`, `/logout`, `/status`, `/setup`). The SPA shell, hashed `/assets`, `/healthz` and the OpenAPI docs are public (the HTML is public; the API it calls is what is protected, so the UI redirects to login on a 401).
+- **OpenAPI / Swagger**: the interactive docs are at `/docs` (Swagger UI) and `/redoc`, and the spec at `/openapi.json`. A custom `app.openapi()` declares the `bearerAuth` security scheme (the API token) as a global requirement, so Swagger UI shows an **Authorize** box (paste an `stk_` token) and the spec is usable for client codegen. The docs surface the API shape only, never a secret.
 
 ## Agent-facing API (`/api/agent`, `Authorization: Bearer <per-run JWT>`)
 
@@ -186,8 +188,9 @@ on heartbeat (200) and 409 on ready/final.
 ## Operator API (`/api`, session/role-guarded)
 
 All of `/api` (except `/api/hooks/github`) sits behind the auth middleware:
-reads need an authenticated viewer, writes need operator+, `/api/users` needs
-admin.
+reads need an authenticated viewer, writes need operator+, `/api/users` and
+`/api/tokens` need admin. Callers authenticate with a session cookie, a
+trusted-proxy header, or an API token (`Authorization: Bearer stk_...`).
 
 **Targets**
 - `POST /api/targets` `{name, hec_url, token, default_index, env_tag, max_concurrent_gb_day, verify_tls?}` -> target (token Fernet-encrypted at rest, never echoed). 409 on a duplicate name.
@@ -211,7 +214,7 @@ admin.
 - `POST /api/specs` (JobSpec), `GET /api/specs`, `GET /api/specs/{id}`.
 - `GET /api/specs/{id}/estimate` -> per-worker share, pct of ceiling, approx eps/gb, `ok` bool.
 - `PUT /api/specs/{id}`, `DELETE /api/specs/{id}` (409 when the spec has runs).
-- `POST /api/specs/{id}/run` `{overrides?}` -> `201 {run_id, state}` after the submit gates (in order): pack lint ok (`422 pack_lint_failed`); engine/pack consistency (`422 engine_pack_mismatch` — a rawreplay spec on a non-rawreplay pack); replay-single-worker (`409 replay_single_worker` when a replay run has workers>1); per-worker slice vs ceiling (`422 slice_exceeds_ceiling{suggested_workers, limiting_factor, detail}`); per-target concurrent-GB cap (`409 target_cap_exceeded{headroom_gb_day, detail}`); target health (`409 target_unhealthy` when red; unknown/amber pass). Then provision. A driver failure surfaces as `502 provision_failed`. (`started_by` is recorded as `"operator"` on the run.)
+- `POST /api/specs/{id}/run` `{overrides?}` -> `201 {run_id, state}` after the submit gates (in order): pack lint ok (`422 pack_lint_failed`); engine/pack consistency (`422 engine_pack_mismatch` — a rawreplay spec on a non-rawreplay pack); replay-single-worker (`409 replay_single_worker` when a replay run has workers>1); per-worker slice vs ceiling (`422 slice_exceeds_ceiling{suggested_workers, limiting_factor, detail}`); per-target concurrent-GB cap (`409 target_cap_exceeded{headroom_gb_day, detail}`); target health (`409 target_unhealthy` when red; unknown/amber pass). Then provision. A driver failure surfaces as `502 provision_failed`. (`started_by` records the resolving caller — a username, or `token:<name>` for an API token — falling back to `operator` only in the bootstrap / auth-disabled window; the same actor is stamped on the run's audit events for stop/scale/rescale.)
 
 **Runs**
 - `GET /api/runs`, `GET /api/runs/{id}` (state, snapshot, totals, lease roster, event log).
@@ -226,6 +229,11 @@ admin.
 - `GET /healthz` -> liveness with build/db info (public, no secrets).
 - `GET /api/auth/status` (public), `POST /api/auth/login`, `POST /api/auth/logout`, `POST /api/auth/setup`, `GET /api/auth/me` (session required).
 - `GET|POST /api/users`, `PATCH|DELETE /api/users/{id}` (admin only).
+
+**API tokens** (admin only; see Auth)
+- `POST /api/tokens` `{name, role, expires_in_days?}` -> `201 {id, name, role, token, prefix, created_at, expires_at}` — the secret `token` (`stk_...`) is returned **only** here. 409 on a duplicate name.
+- `GET /api/tokens` -> metadata only (id, name, role, prefix, created_by, created_at, expires_at, last_used_at, revoked_at); never the secret or its hash.
+- `DELETE /api/tokens/{id}` -> `204` soft-revoke (idempotent; 404 unknown). The row survives with `revoked_at` set for the audit trail.
 
 ## Metric roll-up + prune, and dogfood telemetry
 

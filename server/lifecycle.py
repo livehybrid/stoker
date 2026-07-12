@@ -183,10 +183,11 @@ def provision_run(db, spec, driver, overrides=None, started_by=None, settings=No
     db.flush()  # assign run.id
     append_event(db, run, "created",
                  {"spec_id": spec.id, "workers": workers,
-                  "fleet": spec.fleet, "bundle": bundle.digest}, actor="operator")
+                  "fleet": spec.fleet, "bundle": bundle.digest},
+                 actor=started_by or "operator")
 
     # preparing: snapshot frozen, bundle resolved.
-    transition_run(db, run, STATE_PREPARING, actor="operator")
+    transition_run(db, run, STATE_PREPARING, actor=started_by or "operator")
 
     # 4. Apportion shares across the slots and seed free leases.
     shares = build_share_list(spec.rate_mode, spec.rate_value, workers)
@@ -253,19 +254,20 @@ def _resolve_bundle(db, spec, settings=None):
     return bundle
 
 
-def stop_run(db, run, driver, force=False):
-    # type: (Session, Run, ExecutionDriver, bool) -> Run
+def stop_run(db, run, driver, force=False, actor="operator"):
+    # type: (Session, Run, ExecutionDriver, bool, str) -> Run
     """Begin draining a run.
 
     Move the run to ``draining`` so subsequent heartbeats answer ``drain``, call
     ``driver.stop(ref, STOP_GRACE_S)``, and (when ``force``) ``driver.destroy``
     immediately rather than waiting for leases to finalise. The supervisor
-    completes the transition to ``stopped`` once leases are done/lost.
+    completes the transition to ``stopped`` once leases are done/lost. ``actor``
+    is recorded on the audit event (the operator/token that initiated the stop).
     """
     if run.state in TERMINAL_STATES:
         return run
     transition_run(db, run, STATE_DRAINING,
-                   {"force": bool(force)}, actor="operator",
+                   {"force": bool(force)}, actor=actor,
                    end_reason="operator-stop")
     ref = driver_ref_of(run)
     if ref is not None:
@@ -295,8 +297,8 @@ def stop_run(db, run, driver, force=False):
     return run
 
 
-def scale_run(db, run, driver, workers):
-    # type: (Session, Run, ExecutionDriver, int) -> Run
+def scale_run(db, run, driver, workers, actor="operator"):
+    # type: (Session, Run, ExecutionDriver, int, str) -> Run
     """Change a run's worker count.
 
     ``driver.scale(ref, workers)``, then add/remove ``worker_leases`` rows and
@@ -368,16 +370,17 @@ def scale_run(db, run, driver, workers):
     snap["workers"] = workers
     run.spec_snapshot_json = snap
     append_event(db, run, "scaled",
-                 {"workers": workers, "rate_mode": rate_mode}, actor="operator")
+                 {"workers": workers, "rate_mode": rate_mode}, actor=actor)
     return run
 
 
-def rescale_run(db, run, driver, rate_value):
-    # type: (Session, Run, ExecutionDriver, float) -> Run
+def rescale_run(db, run, driver, rate_value, actor="operator"):
+    # type: (Session, Run, ExecutionDriver, float, str) -> Run
     """Change a run's total rate without changing the worker count.
 
     Re-apportion ``rate_value`` across the existing slots and push the new
-    shares as ``retarget`` on the next heartbeat of each live lease.
+    shares as ``retarget`` on the next heartbeat of each live lease. ``actor``
+    is recorded on the audit event (the operator/token that rescaled).
     """
     if run.state in TERMINAL_STATES:
         return run
@@ -402,7 +405,7 @@ def rescale_run(db, run, driver, rate_value):
     snap["rate_value"] = rate_value
     run.spec_snapshot_json = snap
     append_event(db, run, "rescaled",
-                 {"rate_mode": rate_mode, "rate_value": rate_value}, actor="operator")
+                 {"rate_mode": rate_mode, "rate_value": rate_value}, actor=actor)
     return run
 
 
