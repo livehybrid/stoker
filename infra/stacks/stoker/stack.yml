@@ -68,10 +68,9 @@ services:
         - traefik.http.routers.stoker.entrypoints=websecure
         - traefik.http.routers.stoker.tls=true
         - traefik.http.routers.stoker.rule=Host(`stoker.cloud.livehybrid.com`)
-        # Optional stopgap: remove this middleware once app-level auth is set up
-        # (leaving STOKER_BASICAUTH empty disables it). Kept for a safe migration.
-        - traefik.http.routers.stoker.middlewares=stoker-auth
-        - traefik.http.middlewares.stoker-auth.basicauth.users=${STOKER_BASICAUTH:-}
+        # No Traefik basic-auth: Stoker's own app-level auth (local users +
+        # trusted-proxy SSO) guards the UI/ops API. For forward-auth SSO, add
+        # middlewares=authentik@docker here and set STOKER_TRUSTED_PROXIES.
         - traefik.http.routers.stoker-agent.entrypoints=websecure
         - traefik.http.routers.stoker-agent.tls=true
         - traefik.http.routers.stoker-agent.priority=100
