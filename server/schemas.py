@@ -505,6 +505,154 @@ class Empty(BaseModel):
     """Empty ``{}`` response body (ready / final / heartbeat-less acks)."""
 
 
+# --------------------------------------------------------------------------- #
+# Auth (local users + trusted-proxy SSO)
+# --------------------------------------------------------------------------- #
+
+# Allowed roles, most to least privileged; mirrors config.VALID_ROLES.
+_AUTH_ROLES = ("viewer", "operator", "admin")
+
+
+class UserOut(BaseModel):
+    """A user view for the operator API. The password hash never appears here
+    (there is no field for it by construction) and is never serialised."""
+
+    model_config = _ORM
+
+    id: int
+    username: str
+    email: Optional[str] = None
+    role: str
+    source: str  # local | proxy
+    active: bool
+    created_at: datetime.datetime
+    last_login_at: Optional[datetime.datetime] = None
+
+
+class UserCreate(BaseModel):
+    """Create a local user (admin only). ``password`` is write-only and never
+    echoed back; a proxy user is created implicitly, not through this shape."""
+
+    username: str
+    password: str = Field(repr=False)
+    role: str = "operator"
+    email: Optional[str] = None
+
+    @field_validator("username")
+    @classmethod
+    def _validate_username(cls, v):
+        # type: (str) -> str
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("username is required")
+        if len(v) > 255:
+            raise ValueError("username must be at most 255 characters")
+        return v
+
+    @field_validator("password")
+    @classmethod
+    def _validate_password(cls, v):
+        # type: (str) -> str
+        if not v:
+            raise ValueError("password is required")
+        return v
+
+    @field_validator("role")
+    @classmethod
+    def _validate_role(cls, v):
+        # type: (str) -> str
+        v = (v or "operator").strip()
+        if v not in _AUTH_ROLES:
+            raise ValueError("role must be one of %s" % ", ".join(_AUTH_ROLES))
+        return v
+
+
+class UserUpdate(BaseModel):
+    """Partial update of a user (admin only). Unset fields are left unchanged.
+    ``password`` is write-only; setting it rehashes the account's credential."""
+
+    role: Optional[str] = None
+    password: Optional[str] = Field(default=None, repr=False)
+    active: Optional[bool] = None
+    email: Optional[str] = None
+
+    @field_validator("role")
+    @classmethod
+    def _validate_role(cls, v):
+        # type: (Optional[str]) -> Optional[str]
+        if v is None:
+            return v
+        v = v.strip()
+        if v not in _AUTH_ROLES:
+            raise ValueError("role must be one of %s" % ", ".join(_AUTH_ROLES))
+        return v
+
+    @field_validator("password")
+    @classmethod
+    def _validate_password(cls, v):
+        # type: (Optional[str]) -> Optional[str]
+        if v is None:
+            return v
+        if not v:
+            raise ValueError("password must not be empty")
+        return v
+
+
+class LoginRequest(BaseModel):
+    """Body of ``POST /api/auth/login``. Password is write-only."""
+
+    username: str
+    password: str = Field(repr=False)
+
+
+class SetupRequest(BaseModel):
+    """Body of ``POST /api/auth/setup``: create the very first admin.
+
+    Only honoured when zero users exist; the created user is always an admin.
+    Password is write-only.
+    """
+
+    username: str
+    password: str = Field(repr=False)
+
+    @field_validator("username")
+    @classmethod
+    def _validate_username(cls, v):
+        # type: (str) -> str
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("username is required")
+        if len(v) > 255:
+            raise ValueError("username must be at most 255 characters")
+        return v
+
+    @field_validator("password")
+    @classmethod
+    def _validate_password(cls, v):
+        # type: (str) -> str
+        if not v:
+            raise ValueError("password is required")
+        return v
+
+
+class AuthStatus(BaseModel):
+    """Public login-page status (safe when unauthenticated).
+
+    * ``authenticated`` — whether this request already carries a valid session
+      or a trusted-proxy identity.
+    * ``setup_needed`` — zero users exist and no proxy trust is configured, so
+      the first-access setup flow should be shown.
+    * ``sso_enabled`` — a trusted proxy is configured, so an SSO sign-in path
+      exists (the UI may offer it / rely on the proxy redirect).
+    * ``user`` — the resolved user when authenticated, else null.
+    """
+
+    authenticated: bool
+    setup_needed: bool
+    sso_enabled: bool
+    user: Optional[UserOut] = None
+
+
 __all__ = [
     # targets
     "TargetCreate", "TargetOut", "TargetTestResult",
@@ -521,4 +669,6 @@ __all__ = [
     # agent
     "ClaimRequest", "BundleRef", "HecSlice", "TelemetrySlice", "SpecSliceOut",
     "ReadyRequest", "HeartbeatRequest", "HeartbeatCommand", "FinalRequest", "Empty",
+    # auth
+    "UserOut", "UserCreate", "UserUpdate", "LoginRequest", "SetupRequest", "AuthStatus",
 ]

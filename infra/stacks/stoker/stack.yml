@@ -34,6 +34,16 @@ services:
       - REPO_CLONE_DIR=/data/repos
       - DOGFOOD_HEC_URL=${DOGFOOD_HEC_URL}
       - DOGFOOD_HEC_TOKEN=${DOGFOOD_HEC_TOKEN}
+      # App-level auth (replaces the Traefik basic-auth stopgap below). All are
+      # optional: unset => first-web-visit setup screen creates the first admin.
+      # STOKER_ADMIN_* seed a default admin; STOKER_TRUSTED_PROXIES + AUTH_HEADER
+      # enable trusted-proxy SSO (Traefik forward-auth to authentik or anything).
+      - STOKER_ADMIN_USER=${STOKER_ADMIN_USER:-}
+      - STOKER_ADMIN_PASSWORD=${STOKER_ADMIN_PASSWORD:-}
+      - STOKER_TRUSTED_PROXIES=${STOKER_TRUSTED_PROXIES:-}
+      - STOKER_AUTH_HEADER=${STOKER_AUTH_HEADER:-X-Forwarded-User}
+      - STOKER_PROXY_DEFAULT_ROLE=${STOKER_PROXY_DEFAULT_ROLE:-operator}
+      - STOKER_SESSION_TTL=${STOKER_SESSION_TTL:-43200}
     stop_grace_period: 45s
     deploy:
       replicas: 1
@@ -42,18 +52,26 @@ services:
       placement: {constraints: ["node.hostname == hpelite"]}
       restart_policy: {condition: on-failure}
       labels:
-        # Router split per the design. Router 1 (UI + operator/admin API) is
-        # behind Traefik basic-auth (the host is internet-facing). Router 2
-        # (/api/agent + /api/hooks) bypasses auth at higher priority: workers
-        # and GitHub cannot do basic-auth, and those paths are protected by the
-        # per-run JWT and the webhook HMAC. Swap basic-auth for authentik
-        # forward-auth (middlewares=authentik@docker) when ready.
+        # Router split per the design. Router 1 (UI + operator/admin API) is now
+        # protected by Stoker's own APP-LEVEL auth (local users + trusted-proxy
+        # SSO; see the STOKER_* env above), so the Traefik basic-auth below is an
+        # optional belt-and-braces stopgap you can drop. Router 2 (/api/agent +
+        # /api/hooks) bypasses browser auth at higher priority: workers and GitHub
+        # cannot log in, and those paths are protected by the per-run JWT and the
+        # webhook HMAC (Stoker also exempts them from its own session guard).
+        #
+        # For SSO, put Traefik forward-auth (middlewares=authentik@docker) on this
+        # router instead of basic-auth, set STOKER_TRUSTED_PROXIES to the proxy's
+        # network and STOKER_AUTH_HEADER to the header it injects; Stoker then
+        # trusts that header only from the proxy peer.
         - traefik.enable=true
         - traefik.http.routers.stoker.entrypoints=websecure
         - traefik.http.routers.stoker.tls=true
         - traefik.http.routers.stoker.rule=Host(`stoker.cloud.livehybrid.com`)
+        # Optional stopgap: remove this middleware once app-level auth is set up
+        # (leaving STOKER_BASICAUTH empty disables it). Kept for a safe migration.
         - traefik.http.routers.stoker.middlewares=stoker-auth
-        - traefik.http.middlewares.stoker-auth.basicauth.users=${STOKER_BASICAUTH}
+        - traefik.http.middlewares.stoker-auth.basicauth.users=${STOKER_BASICAUTH:-}
         - traefik.http.routers.stoker-agent.entrypoints=websecure
         - traefik.http.routers.stoker-agent.tls=true
         - traefik.http.routers.stoker-agent.priority=100

@@ -18,6 +18,11 @@ dependencies = [
     "pyjwt",
     "cryptography",
     "python-multipart",
+    # App-level auth: bcrypt password hashing + signed session cookies. bcrypt is
+    # pinned < 4.1 because passlib 1.7.4 cannot introspect bcrypt >= 4.1.
+    "passlib[bcrypt]",
+    "bcrypt<4.1",
+    "itsdangerous",
     # K8sDriver (k3s + EKS via kubeconfig contexts). Imported lazily by
     # server/drivers/k8s.py; only needed when a k8s fleet is actually used.
     "kubernetes>=29,<32",

@@ -306,6 +306,40 @@ class Fleet(Base):
     created_at: Mapped[datetime.datetime] = _ts_column(nullable=False, default=utcnow)
 
 
+class User(Base):
+    """An operator/admin/viewer account for the app-level auth subsystem.
+
+    Two kinds of user, distinguished by ``source``:
+
+    * ``local`` — a password account. ``password_hash`` holds a passlib bcrypt
+      hash (never a plaintext, never serialised). Created from the env admin,
+      via first-access setup, or by an admin through ``/api/users``.
+    * ``proxy`` — asserted by a trusted reverse proxy (Traefik forward-auth to
+      an IdP) via the configured auth header. Has no password (``password_hash``
+      is null); created-on-first-sight the first time the trusted proxy names it.
+
+    ``role`` is one of ``viewer`` | ``operator`` | ``admin`` and is the sole
+    authorisation input (admin gates user management). ``active`` False locks an
+    account out of login without deleting its audit trail. The bcrypt hash is
+    the only secret on the row and is excluded from every response schema.
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    # Secret: passlib bcrypt hash. Null for proxy/SSO users. Never serialised.
+    password_hash: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    # viewer | operator | admin
+    role: Mapped[str] = mapped_column(String(16), nullable=False, default="operator")
+    # local | proxy
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="local")
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime.datetime] = _ts_column(nullable=False, default=utcnow)
+    last_login_at: Mapped[Optional[datetime.datetime]] = _ts_column(nullable=True)
+
+
 __all__ = [
     "utcnow",
     "Target",
@@ -318,4 +352,5 @@ __all__ = [
     "MetricSample",
     "RunEvent",
     "Fleet",
+    "User",
 ]

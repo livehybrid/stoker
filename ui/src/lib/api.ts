@@ -11,6 +11,8 @@
 // secret values are ever sent in query strings or logged.
 
 import type {
+  AuthStatus,
+  LoginRequest,
   MetricsOut,
   PackOut,
   PackPreview,
@@ -26,6 +28,7 @@ import type {
   RunLogsOut,
   RunOut,
   ScaleRequest,
+  SetupRequest,
   SpecCreate,
   SpecEstimate,
   SpecOut,
@@ -34,9 +37,48 @@ import type {
   TargetCreate,
   TargetOut,
   TargetTestResult,
+  UserCreate,
+  UserOut,
+  UserUpdate,
 } from "./types";
 
 export const API_BASE = "/api";
+
+// The login route; a central 401 handler sends the browser here when a session
+// has expired or is missing. Kept as a constant so the router and the fetch
+// wrapper agree on the path.
+export const LOGIN_PATH = "/login";
+
+// Paths (relative to API_BASE) that must NEVER trigger the 401 -> /login
+// redirect: the login/setup POSTs report bad-credential 401s to their own forms,
+// and the public status probe is expected to be callable while signed out. A
+// redirect here would either loop (already on /login) or swallow the form error.
+const NO_REDIRECT_ON_401 = ["/auth/login", "/auth/setup", "/auth/status"];
+
+// Set by the app at startup to perform the actual navigation on a 401. Kept
+// injectable so this module has no hard dependency on the router instance (and
+// so tests can stub it). Falls back to a location assignment.
+type RedirectFn = () => void;
+let onUnauthorized: RedirectFn | null = null;
+
+/** Register the handler invoked once when an API call returns 401. */
+export function setUnauthorizedHandler(fn: RedirectFn | null): void {
+  onUnauthorized = fn;
+}
+
+function redirectToLogin(): void {
+  if (onUnauthorized) {
+    onUnauthorized();
+    return;
+  }
+  // Fallback: hard navigation (avoids a redirect loop when already on /login).
+  if (
+    typeof window !== "undefined" &&
+    window.location.pathname !== LOGIN_PATH
+  ) {
+    window.location.assign(LOGIN_PATH);
+  }
+}
 
 /**
  * Thrown on any non-2xx response. `detail` is the API's error payload: a plain
@@ -122,6 +164,12 @@ async function request<T>(
       payload && typeof payload === "object" && "detail" in payload
         ? (payload as { detail: unknown }).detail
         : payload;
+    // Central session handling: a 401 on any endpoint other than the auth
+    // endpoints themselves means the session is gone -> go to the login page.
+    // The error is still thrown so a caller mid-flight can react/cleanup.
+    if (res.status === 401 && !NO_REDIRECT_ON_401.includes(path)) {
+      redirectToLogin();
+    }
     throw new ApiError(res.status, detail, messageFromDetail(res.status, detail));
   }
 
@@ -211,6 +259,37 @@ export const runs = {
     request<RunOut>("POST", `/runs/${id}/rescale`, { body }),
 };
 
+// --------------------------------------------------------------------------- //
+// Auth (session lifecycle + first-access setup)
+// --------------------------------------------------------------------------- //
+
+export const auth = {
+  // Public: safe to call while signed out. Reports whether a session/SSO is
+  // active, whether first-access setup is needed, and whether SSO is configured.
+  status: () => request<AuthStatus>("GET", "/auth/status"),
+  // The signed-in user (401 when there is no session -> central redirect).
+  me: () => request<UserOut>("GET", "/auth/me"),
+  login: (body: LoginRequest) =>
+    request<UserOut>("POST", "/auth/login", { body }),
+  logout: () => request<void>("POST", "/auth/logout"),
+  // Create the very first admin (only honoured while zero users exist).
+  setup: (body: SetupRequest) =>
+    request<UserOut>("POST", "/auth/setup", { body }),
+};
+
+// --------------------------------------------------------------------------- //
+// Users (admin-only management)
+// --------------------------------------------------------------------------- //
+
+export const users = {
+  list: () => request<UserOut[]>("GET", "/users"),
+  get: (id: number) => request<UserOut>("GET", `/users/${id}`),
+  create: (body: UserCreate) => request<UserOut>("POST", "/users", { body }),
+  update: (id: number, body: UserUpdate) =>
+    request<UserOut>("PATCH", `/users/${id}`, { body }),
+  delete: (id: number) => request<void>("DELETE", `/users/${id}`),
+};
+
 // Grouped export for `import { api } from "@/lib/api"` ergonomics.
-export const api = { targets, repos, packs, specs, runs };
+export const api = { targets, repos, packs, specs, runs, auth, users };
 export default api;

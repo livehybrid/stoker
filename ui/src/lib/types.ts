@@ -285,3 +285,59 @@ export interface ScaleRequest {
 export interface RescaleRequest {
   rate_value: number;
 }
+
+// --------------------------------------------------------------------------- //
+// Auth (local users + trusted-proxy SSO)
+// --------------------------------------------------------------------------- //
+
+// Authorisation roles, most to least privileged. `admin` gates user management.
+export type Role = "viewer" | "operator" | "admin";
+export const ROLES: Role[] = ["viewer", "operator", "admin"];
+
+// How an identity was established: a local password account, or asserted by a
+// trusted reverse proxy (SSO).
+export type UserSource = "local" | "proxy";
+
+export interface UserOut {
+  id: number;
+  username: string;
+  email?: string | null;
+  role: string; // one of Role; kept wide so an unknown server value still renders
+  source: string; // local | proxy
+  active: boolean;
+  created_at: string;
+  last_login_at?: string | null;
+}
+
+export interface UserCreate {
+  username: string;
+  password: string; // write-only; never echoed back
+  role?: Role; // default "operator"
+  email?: string | null;
+}
+
+// Partial update; unset fields are left unchanged. `password` rehashes the
+// account's credential when present (write-only).
+export type UserUpdate = Partial<{
+  role: Role;
+  password: string;
+  active: boolean;
+  email: string | null;
+}>;
+
+export interface LoginRequest {
+  username: string;
+  password: string; // write-only
+}
+
+export interface SetupRequest {
+  username: string;
+  password: string; // write-only; creates the very first admin
+}
+
+export interface AuthStatus {
+  authenticated: boolean;
+  setup_needed: boolean;
+  sso_enabled: boolean;
+  user?: UserOut | null;
+}

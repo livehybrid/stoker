@@ -39,6 +39,26 @@ SUPERVISOR_INTERVAL_S = 2.0
 # Where the built UI lands relative to this package's parent (server/../ui/dist).
 _UI_DIST = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ui", "dist")
 
+# Only ``/api/*`` is guarded by the auth middleware; the SPA shell, hashed
+# ``/assets`` and ``/healthz`` are public (the HTML is public — the API it calls
+# is what is protected, so the UI redirects to login on a 401).
+_PROTECTED_PREFIX = "/api/"
+
+# ``/api`` paths that are NOT session-guarded:
+# * ``/api/agent`` — workers authenticate with a per-run JWT (see routes/agent).
+# * ``/api/hooks`` — GitHub webhooks authenticate with a per-repo HMAC.
+# * the unauthenticated auth entry points the login page needs before a session
+#   exists (login/logout/status/setup). ``/api/auth/me`` and ``/api/users`` are
+#   deliberately absent, so they require a session (and admin, in the route).
+_AUTH_EXEMPT_PREFIXES = (
+    "/api/agent",
+    "/api/hooks",
+    "/api/auth/login",
+    "/api/auth/logout",
+    "/api/auth/status",
+    "/api/auth/setup",
+)
+
 
 def _build_drivers_map():
     # type: () -> Dict[str, ExecutionDriver]
@@ -126,6 +146,12 @@ async def _lifespan(app):
     # type: (FastAPI) -> Any
     """Start the supervisor on startup, cancel it cleanly on shutdown."""
     app.state.boot_time = datetime.datetime.now(datetime.timezone.utc)
+    # Create the env-configured default admin before serving traffic (idempotent;
+    # a no-op when unset or already present). Never logs the password.
+    from . import auth as auth_mod
+
+    with SessionLocal() as db:
+        auth_mod.bootstrap_admin(db, get_settings())
     app.state.drivers = _build_drivers_map()
     task = asyncio.create_task(_supervisor_loop(app), name="stoker-supervisor")
     app.state.supervisor_task = task
@@ -138,6 +164,76 @@ async def _lifespan(app):
         with contextlib.suppress(asyncio.CancelledError):
             await task
         log.info("control plane stopped; supervisor loop cancelled")
+
+
+def _is_auth_exempt(path):
+    # type: (str) -> bool
+    """True when ``path`` is not subject to the session guard.
+
+    Non-``/api/`` paths (the SPA shell, ``/assets``, ``/healthz``, favicon, the
+    OpenAPI docs) are public. Within ``/api/`` the agent + webhook namespaces and
+    the unauthenticated auth endpoints are exempt; everything else is guarded.
+    """
+    if not path.startswith(_PROTECTED_PREFIX):
+        return True
+    # Match only on a path-segment boundary: an unanchored startswith(p) would
+    # silently exempt a future sibling like /api/agents or /api/setup-wizard.
+    return any(path == p or path.startswith(p + "/")
+               for p in _AUTH_EXEMPT_PREFIXES)
+
+
+def _install_auth_middleware(app):
+    # type: (FastAPI) -> None
+    """Require an authenticated session for guarded ``/api/*`` requests.
+
+    Skipped entirely when ``STOKER_AUTH_DISABLED`` is set. Otherwise every
+    guarded ``/api/*`` request must resolve to a user (trusted-proxy header or
+    session cookie) once auth is active; an anonymous request gets a 401 JSON
+    body and the UI redirects to login. Before any admin exists and with no proxy
+    trust configured, the instance is in first-run mode: the guard stands down so
+    the first admin can be created via ``/api/auth/setup`` (the API is otherwise
+    open only in that bootstrap window). ``/api/users`` additionally requires the
+    admin role, enforced in the route via ``require_admin``.
+    """
+    from . import auth as auth_mod
+
+    @app.middleware("http")
+    async def _auth_guard(request, call_next):
+        # type: (Any, Any) -> Any
+        settings = get_settings()
+        if settings.auth_disabled or _is_auth_exempt(request.url.path):
+            return await call_next(request)
+
+        # A guarded /api path: resolve identity against a short-lived session.
+        # Runs in a worker thread — SQLAlchemy here is synchronous.
+        def _resolve():
+            with SessionLocal() as db:
+                if not auth_mod.auth_active(db, settings):
+                    return "bootstrap"  # first-run: no admin yet, guard stands down
+                user = auth_mod.resolve_user(request, db, settings)
+                if user is None or not user.active:
+                    return None
+                return user.role
+
+        outcome = await asyncio.to_thread(_resolve)
+        if outcome == "bootstrap":
+            return await call_next(request)
+        if outcome is None:
+            return JSONResponse(
+                {"detail": "authentication required"}, status_code=401)
+        # Role gate: /api/users is admin-only; any other mutating request needs
+        # operator+ (so a read-only `viewer` cannot delete targets, launch runs
+        # or register repos); safe methods need only an authenticated viewer.
+        role, path, method = outcome, request.url.path, request.method
+        if path == "/api/users" or path.startswith("/api/users/"):
+            if role != "admin":
+                return JSONResponse({"detail": "admin role required"},
+                                    status_code=403)
+        elif method not in ("GET", "HEAD", "OPTIONS"):
+            if role not in ("operator", "admin"):
+                return JSONResponse({"detail": "operator role required"},
+                                    status_code=403)
+        return await call_next(request)
 
 
 def create_app():
@@ -160,9 +256,18 @@ def create_app():
     # Routers registered by importing the stable ``router`` objects.
     from .routes.agent import router as agent_router
     from .routes.api import router as api_router
+    from .routes.auth import router as auth_router
+    from .routes.auth import users_router
 
     app.include_router(agent_router)
     app.include_router(api_router)
+    app.include_router(auth_router)
+    app.include_router(users_router)
+
+    # Session guard for /api/* (agent + webhook + unauthenticated auth endpoints
+    # are exempt; the SPA shell and /healthz are public). Installed after the
+    # routers so their paths are resolvable.
+    _install_auth_middleware(app)
 
     @app.get("/healthz", tags=["ops"])
     def healthz():

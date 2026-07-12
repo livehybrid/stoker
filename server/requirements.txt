@@ -9,6 +9,13 @@ pyjwt
 cryptography
 python-multipart
 
+# App-level auth: bcrypt password hashing (passlib) + signed session cookies
+# (itsdangerous). passlib 1.7.4 cannot introspect bcrypt >= 4.1, so bcrypt is
+# pinned < 4.1 to keep the backend working (bcrypt 4.0.x hashes/verifies fine).
+passlib[bcrypt]
+bcrypt<4.1
+itsdangerous
+
 # Postgres driver for prod DATABASE_URL (postgresql+psycopg://...).
 # Optional locally: SQLite needs no driver. Kept here so the image can talk
 # to Postgres; pip resolves a wheel on 3.12.

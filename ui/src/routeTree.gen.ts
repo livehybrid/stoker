@@ -9,15 +9,22 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as UsersRouteImport } from './routes/users'
 import { Route as TargetsRouteImport } from './routes/targets'
 import { Route as SpecsRouteImport } from './routes/specs'
 import { Route as RunsRouteImport } from './routes/runs'
 import { Route as ReposRouteImport } from './routes/repos'
 import { Route as PacksRouteImport } from './routes/packs'
+import { Route as LoginRouteImport } from './routes/login'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as SpecsNewRouteImport } from './routes/specs.new'
 import { Route as RunsRunIdRouteImport } from './routes/runs.$runId'
 
+const UsersRoute = UsersRouteImport.update({
+  id: '/users',
+  path: '/users',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const TargetsRoute = TargetsRouteImport.update({
   id: '/targets',
   path: '/targets',
@@ -43,6 +50,11 @@ const PacksRoute = PacksRouteImport.update({
   path: '/packs',
   getParentRoute: () => rootRouteImport,
 } as any)
+const LoginRoute = LoginRouteImport.update({
+  id: '/login',
+  path: '/login',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
@@ -61,32 +73,38 @@ const RunsRunIdRoute = RunsRunIdRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/login': typeof LoginRoute
   '/packs': typeof PacksRoute
   '/repos': typeof ReposRoute
   '/runs': typeof RunsRouteWithChildren
   '/specs': typeof SpecsRouteWithChildren
   '/targets': typeof TargetsRoute
+  '/users': typeof UsersRoute
   '/runs/$runId': typeof RunsRunIdRoute
   '/specs/new': typeof SpecsNewRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/login': typeof LoginRoute
   '/packs': typeof PacksRoute
   '/repos': typeof ReposRoute
   '/runs': typeof RunsRouteWithChildren
   '/specs': typeof SpecsRouteWithChildren
   '/targets': typeof TargetsRoute
+  '/users': typeof UsersRoute
   '/runs/$runId': typeof RunsRunIdRoute
   '/specs/new': typeof SpecsNewRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/login': typeof LoginRoute
   '/packs': typeof PacksRoute
   '/repos': typeof ReposRoute
   '/runs': typeof RunsRouteWithChildren
   '/specs': typeof SpecsRouteWithChildren
   '/targets': typeof TargetsRoute
+  '/users': typeof UsersRoute
   '/runs/$runId': typeof RunsRunIdRoute
   '/specs/new': typeof SpecsNewRoute
 }
@@ -94,46 +112,61 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/login'
     | '/packs'
     | '/repos'
     | '/runs'
     | '/specs'
     | '/targets'
+    | '/users'
     | '/runs/$runId'
     | '/specs/new'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/login'
     | '/packs'
     | '/repos'
     | '/runs'
     | '/specs'
     | '/targets'
+    | '/users'
     | '/runs/$runId'
     | '/specs/new'
   id:
     | '__root__'
     | '/'
+    | '/login'
     | '/packs'
     | '/repos'
     | '/runs'
     | '/specs'
     | '/targets'
+    | '/users'
     | '/runs/$runId'
     | '/specs/new'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  LoginRoute: typeof LoginRoute
   PacksRoute: typeof PacksRoute
   ReposRoute: typeof ReposRoute
   RunsRoute: typeof RunsRouteWithChildren
   SpecsRoute: typeof SpecsRouteWithChildren
   TargetsRoute: typeof TargetsRoute
+  UsersRoute: typeof UsersRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/users': {
+      id: '/users'
+      path: '/users'
+      fullPath: '/users'
+      preLoaderRoute: typeof UsersRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/targets': {
       id: '/targets'
       path: '/targets'
@@ -167,6 +200,13 @@ declare module '@tanstack/react-router' {
       path: '/packs'
       fullPath: '/packs'
       preLoaderRoute: typeof PacksRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/login': {
+      id: '/login'
+      path: '/login'
+      fullPath: '/login'
+      preLoaderRoute: typeof LoginRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/': {
@@ -215,11 +255,13 @@ const SpecsRouteWithChildren = SpecsRoute._addFileChildren(SpecsRouteChildren)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  LoginRoute: LoginRoute,
   PacksRoute: PacksRoute,
   ReposRoute: ReposRoute,
   RunsRoute: RunsRouteWithChildren,
   SpecsRoute: SpecsRouteWithChildren,
   TargetsRoute: TargetsRoute,
+  UsersRoute: UsersRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
