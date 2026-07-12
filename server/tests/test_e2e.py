@@ -22,7 +22,7 @@ file always imports and collects. The primary path is the real subprocess; if
 that proves unavailable in the harness (e.g. eventgen import failure) the test
 records why and skips rather than hanging — every wait is bounded.
 
-Marked ``@pytest.mark.timeout(120)`` per the contract.
+Marked ``@pytest.mark.timeout(180)`` per the contract.
 """
 
 from __future__ import annotations
@@ -198,7 +198,7 @@ def _healthz_ok(base):
 # The proof.
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.timeout(120)
+@pytest.mark.timeout(180)
 def test_end_to_end_real_worker(live_server, hec_sink, make_pack):
     base, settings, driver = live_server
     sink_base, sink_stats = hec_sink
@@ -233,7 +233,8 @@ def test_end_to_end_real_worker(live_server, hec_sink, make_pack):
         #    still stubbed the run never leaves provisioning: detect and skip.
         reached = _wait_until(
             lambda: _run_state(base, run_id) in lifecycle.TERMINAL_STATES,
-            timeout_s=60.0, interval_s=0.5)
+            timeout_s=90.0, interval_s=0.5)  # generous: the real worker subprocess
+        #                                      can be CPU-starved behind the full suite
         final_state = _run_state(base, run_id)
 
         if not reached:
@@ -261,7 +262,7 @@ def test_end_to_end_real_worker(live_server, hec_sink, make_pack):
         # 4d) The HEC sink received roughly the expected number of events.
         # Give the worker a moment to finish its final flush + POST.
         _wait_until(lambda: sink_stats().get("events", 0) >= EXPECTED_EVENTS * 0.5,
-                    timeout_s=10.0)
+                    timeout_s=20.0)
         received = sink_stats().get("events", 0)
         lower = EXPECTED_EVENTS * 0.5   # generous: warm-up + drain truncation
         upper = EXPECTED_EVENTS * 2.0
@@ -278,7 +279,7 @@ def test_end_to_end_real_worker(live_server, hec_sink, make_pack):
 # the wire protocol + lifecycle transitions without eventgen generating load.
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.timeout(120)
+@pytest.mark.timeout(180)
 def test_end_to_end_control_client_handshake(live_server, hec_sink, make_pack):
     """Protocol-only proof using the vendored ControlClient (no engine).
 

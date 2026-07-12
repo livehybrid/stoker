@@ -1,0 +1,216 @@
+// Typed fetch client for the Stoker operator API.
+//
+// Same-origin: the control plane serves this UI and exposes the operator API
+// under `/api`. Every function here maps to exactly one endpoint in
+// server/routes/api.py; request/response shapes come from src/lib/types.ts,
+// which mirrors server/schemas.py.
+//
+// Error handling is centralised: any non-2xx throws an `ApiError` carrying the
+// status and the API's error body (FastAPI's `{"detail": ...}`, where `detail`
+// may be a string or a structured object like `slice_exceeds_ceiling`). No
+// secret values are ever sent in query strings or logged.
+
+import type {
+  MetricsOut,
+  PackOut,
+  PackPreview,
+  RepoCreate,
+  RepoCreated,
+  RepoOut,
+  RepoSyncResult,
+  RescaleRequest,
+  RunCreated,
+  RunDetail,
+  RunEventOut,
+  RunLaunch,
+  RunLogsOut,
+  RunOut,
+  ScaleRequest,
+  SpecCreate,
+  SpecEstimate,
+  SpecOut,
+  SpecUpdate,
+  StopRequest,
+  TargetCreate,
+  TargetOut,
+  TargetTestResult,
+} from "./types";
+
+export const API_BASE = "/api";
+
+/**
+ * Thrown on any non-2xx response. `detail` is the API's error payload: a plain
+ * string for simple errors, or a structured object for the typed rejections the
+ * contract defines (e.g. `{error: "slice_exceeds_ceiling", suggested_workers}`).
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly detail: unknown;
+
+  constructor(status: number, detail: unknown, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
+type Query = Record<string, string | number | boolean | null | undefined>;
+
+function buildUrl(path: string, query?: Query): string {
+  const url = `${API_BASE}${path}`;
+  if (!query) return url;
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (value === undefined || value === null) continue;
+    params.append(key, String(value));
+  }
+  const qs = params.toString();
+  return qs ? `${url}?${qs}` : url;
+}
+
+function messageFromDetail(status: number, detail: unknown): string {
+  if (typeof detail === "string") return detail;
+  if (detail && typeof detail === "object") {
+    const d = detail as Record<string, unknown>;
+    if (typeof d.detail === "string") return d.detail;
+    if (typeof d.error === "string") return d.error;
+    try {
+      return JSON.stringify(detail);
+    } catch {
+      /* fall through */
+    }
+  }
+  return `request failed with status ${status}`;
+}
+
+async function request<T>(
+  method: string,
+  path: string,
+  opts: { query?: Query; body?: unknown } = {},
+): Promise<T> {
+  const init: RequestInit = {
+    method,
+    headers: { Accept: "application/json" },
+  };
+  if (opts.body !== undefined) {
+    (init.headers as Record<string, string>)["Content-Type"] =
+      "application/json";
+    init.body = JSON.stringify(opts.body);
+  }
+
+  const res = await fetch(buildUrl(path, opts.query), init);
+
+  // 204 No Content (deletes) — nothing to parse.
+  if (res.status === 204) {
+    return undefined as T;
+  }
+
+  const text = await res.text();
+  let payload: unknown = undefined;
+  if (text) {
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      payload = text; // non-JSON body (unexpected); keep raw
+    }
+  }
+
+  if (!res.ok) {
+    // FastAPI puts the error under `detail`; unwrap it when present.
+    const detail =
+      payload && typeof payload === "object" && "detail" in payload
+        ? (payload as { detail: unknown }).detail
+        : payload;
+    throw new ApiError(res.status, detail, messageFromDetail(res.status, detail));
+  }
+
+  return payload as T;
+}
+
+// --------------------------------------------------------------------------- //
+// Targets
+// --------------------------------------------------------------------------- //
+
+export const targets = {
+  list: () => request<TargetOut[]>("GET", "/targets"),
+  get: (id: number) => request<TargetOut>("GET", `/targets/${id}`),
+  create: (body: TargetCreate) =>
+    request<TargetOut>("POST", "/targets", { body }),
+  delete: (id: number) => request<void>("DELETE", `/targets/${id}`),
+  test: (id: number) =>
+    request<TargetTestResult>("POST", `/targets/${id}/test`),
+};
+
+// --------------------------------------------------------------------------- //
+// Repos
+// --------------------------------------------------------------------------- //
+
+export const repos = {
+  list: () => request<RepoOut[]>("GET", "/repos"),
+  get: (id: number) => request<RepoOut>("GET", `/repos/${id}`),
+  create: (body: RepoCreate) =>
+    request<RepoCreated>("POST", "/repos", { body }),
+  delete: (id: number) => request<void>("DELETE", `/repos/${id}`),
+  sync: (id: number) => request<RepoSyncResult>("POST", `/repos/${id}/sync`),
+};
+
+// --------------------------------------------------------------------------- //
+// Packs
+// --------------------------------------------------------------------------- //
+
+export const packs = {
+  // `repo` filters to packs indexed from that repo id (alias: repo_id).
+  list: (repo?: number) =>
+    request<PackOut[]>("GET", "/packs", { query: { repo } }),
+  get: (id: number) => request<PackOut>("GET", `/packs/${id}`),
+  preview: (id: number) =>
+    request<PackPreview>("GET", `/packs/${id}/preview`),
+};
+
+// --------------------------------------------------------------------------- //
+// Specs
+// --------------------------------------------------------------------------- //
+
+export const specs = {
+  list: () => request<SpecOut[]>("GET", "/specs"),
+  get: (id: number) => request<SpecOut>("GET", `/specs/${id}`),
+  create: (body: SpecCreate) => request<SpecOut>("POST", "/specs", { body }),
+  update: (id: number, body: SpecUpdate) =>
+    request<SpecOut>("PUT", `/specs/${id}`, { body }),
+  delete: (id: number) => request<void>("DELETE", `/specs/${id}`),
+  estimate: (id: number) =>
+    request<SpecEstimate>("GET", `/specs/${id}/estimate`),
+  // POST /specs/{id}/run — validate + provision the spec into a run.
+  run: (id: number, body: RunLaunch = {}) =>
+    request<RunCreated>("POST", `/specs/${id}/run`, { body }),
+};
+
+// --------------------------------------------------------------------------- //
+// Runs
+// --------------------------------------------------------------------------- //
+
+export const runs = {
+  list: () => request<RunOut[]>("GET", "/runs"),
+  get: (id: number) => request<RunDetail>("GET", `/runs/${id}`),
+  metrics: (id: number, res = "5s", window = "15m") =>
+    request<MetricsOut>("GET", `/runs/${id}/metrics`, {
+      query: { res, window },
+    }),
+  logs: (id: number, opts: { slot?: number; tail?: number } = {}) =>
+    request<RunLogsOut>("GET", `/runs/${id}/logs`, {
+      query: { slot: opts.slot, tail: opts.tail },
+    }),
+  events: (id: number) =>
+    request<RunEventOut[]>("GET", `/runs/${id}/events`),
+  stop: (id: number, body: StopRequest = {}) =>
+    request<RunOut>("POST", `/runs/${id}/stop`, { body }),
+  scale: (id: number, body: ScaleRequest) =>
+    request<RunOut>("POST", `/runs/${id}/scale`, { body }),
+  rescale: (id: number, body: RescaleRequest) =>
+    request<RunOut>("POST", `/runs/${id}/rescale`, { body }),
+};
+
+// Grouped export for `import { api } from "@/lib/api"` ergonomics.
+export const api = { targets, repos, packs, specs, runs };
+export default api;

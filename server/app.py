@@ -183,19 +183,57 @@ def create_app():
 
 def _mount_ui(app):
     # type: (FastAPI) -> None
-    """Serve the built UI from ``ui/dist`` when present (deferred until stage 4).
+    """Serve the built single-page UI from ``ui/dist`` when present.
 
-    The React UI ships in a later stage; if ``ui/dist`` exists (e.g. baked into
-    the image) it is mounted at the root as static files. Absence is normal and
-    logged at debug level, never an error.
+    The UI is a client-routed SPA (TanStack Router). Hashed build assets under
+    ``ui/dist/assets`` are served as real static files (a missing asset returns a
+    genuine 404, never HTML, so cache-busting stays honest). Every other GET that
+    is not an API/agent/ops route falls back to ``index.html`` so a hard load,
+    refresh or bookmark of a client route (e.g. ``/runs/5``, ``/targets``) is
+    handled by the in-browser router instead of 404ing. The API, the agent API
+    and ``/healthz`` are registered before this and resolve first. Absence of
+    ``ui/dist`` is normal (e.g. an API-only deployment) and logged at debug.
     """
     if not os.path.isdir(_UI_DIST):
         log.debug("ui/dist not present (%s); UI not mounted this stage", _UI_DIST)
         return
+
+    from fastapi.responses import FileResponse
     from fastapi.staticfiles import StaticFiles
 
-    app.mount("/", StaticFiles(directory=_UI_DIST, html=True), name="ui")
-    log.info("serving UI from %s", _UI_DIST)
+    assets_dir = os.path.join(_UI_DIST, "assets")
+    index_html = os.path.join(_UI_DIST, "index.html")
+
+    # Hashed JS/CSS: served verbatim; a missing file is a real 404 (not the SPA
+    # fallback) so a stale/incorrect asset reference never masquerades as HTML.
+    if os.path.isdir(assets_dir):
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="ui-assets")
+
+    # Prefixes that must NOT be swallowed by the SPA fallback. These already have
+    # registered handlers (so they resolve first), but we still refuse to serve
+    # HTML for them: an unknown /api path should 404 as JSON-ish, not as the app.
+    _reserved = ("api/", "agent/", "healthz", "assets/", "docs", "openapi.json", "redoc")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def spa_fallback(full_path: str):
+        # type: (str) -> Any
+        """Return a concrete file under ui/dist if it exists, else index.html.
+
+        This is the SPA history-fallback: client routes have no file on disk, so
+        we hand back index.html and let the browser router render them.
+        """
+        if any(full_path == p.rstrip("/") or full_path.startswith(p) for p in _reserved):
+            # Let the reserved namespaces 404 on their own terms (not as the app).
+            return JSONResponse({"detail": "not found"}, status_code=404)
+        # Serve a real static file at the root of dist (e.g. favicon) when present.
+        if full_path:
+            candidate = os.path.normpath(os.path.join(_UI_DIST, full_path))
+            # Guard against path traversal escaping the dist directory.
+            if candidate.startswith(_UI_DIST + os.sep) and os.path.isfile(candidate):
+                return FileResponse(candidate)
+        return FileResponse(index_html)
+
+    log.info("serving SPA from %s (client-route fallback -> index.html)", _UI_DIST)
 
 
 # uvicorn entry point: `uvicorn server.app:app`.

@@ -72,6 +72,21 @@ jobs:
       - name: Control-plane tests
         run: python -m pytest server/tests -q --timeout=180
 
+  ui-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install and build the web UI
+        working-directory: ui
+        run: |
+          npm ci
+          npm run build
+
   build:
     needs: test
     if: github.event_name == 'push'
