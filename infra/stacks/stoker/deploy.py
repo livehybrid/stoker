@@ -36,6 +36,7 @@ SECRET_NAME = "stoker_master_key"
 ENV_KEYS = [
     "STOKER_DB_PASSWORD", "STOKER_PUBLIC_BASE_URL", "STOKER_WORKER_IMAGE",
     "PORTAINER_HOST", "PORTAINER_TOKEN", "DOGFOOD_HEC_URL", "DOGFOOD_HEC_TOKEN",
+    "STOKER_BASICAUTH",   # Traefik basic-auth users string for the UI/ops router
 ]
 DEFAULTS = {
     "STOKER_WORKER_IMAGE": "ghcr.io/livehybrid/stoker-worker:latest",

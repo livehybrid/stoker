@@ -42,14 +42,18 @@ services:
       placement: {constraints: ["node.hostname == hpelite"]}
       restart_policy: {condition: on-failure}
       labels:
-        # Enable once DNS for the host exists. Router split per the design: the
-        # UI/ops behind auth, /api/agent + /api/hooks bypass it (per-run JWT /
-        # HMAC). Until authentik lands, a Traefik IP-allowlist to the LAN stands
-        # in; the published port above is the interim access path.
+        # Router split per the design. Router 1 (UI + operator/admin API) is
+        # behind Traefik basic-auth (the host is internet-facing). Router 2
+        # (/api/agent + /api/hooks) bypasses auth at higher priority: workers
+        # and GitHub cannot do basic-auth, and those paths are protected by the
+        # per-run JWT and the webhook HMAC. Swap basic-auth for authentik
+        # forward-auth (middlewares=authentik@docker) when ready.
         - traefik.enable=true
         - traefik.http.routers.stoker.entrypoints=websecure
         - traefik.http.routers.stoker.tls=true
         - traefik.http.routers.stoker.rule=Host(`stoker.cloud.livehybrid.com`)
+        - traefik.http.routers.stoker.middlewares=stoker-auth
+        - traefik.http.middlewares.stoker-auth.basicauth.users=${STOKER_BASICAUTH}
         - traefik.http.routers.stoker-agent.entrypoints=websecure
         - traefik.http.routers.stoker-agent.tls=true
         - traefik.http.routers.stoker-agent.priority=100
