@@ -18,8 +18,8 @@ services:
     ports:
       - "8091:8080"        # LAN access this stage (a public host needs DNS + auth)
     volumes:
-      - /mnt/aios/stoker/bundles:/data/bundles   # immutable tarballs (safe on gluster)
-      - /mnt/aios/stoker/repos:/data/repos       # git clones
+      - stoker_bundles:/data/bundles   # content-addressed bundle tarballs
+      - stoker_repos:/data/repos       # git clones
     secrets:
       - stoker_master_key
     environment:
@@ -37,6 +37,9 @@ services:
     stop_grace_period: 45s
     deploy:
       replicas: 1
+      # Pinned to hpelite this stage so its named volumes (bundles/repos) stay
+      # put; relax once bundles move to shared storage.
+      placement: {constraints: ["node.hostname == hpelite"]}
       restart_policy: {condition: on-failure}
       labels:
         # Enable once DNS for the host exists. Router split per the design: the
@@ -61,10 +64,10 @@ services:
       - POSTGRES_USER=stoker
       - POSTGRES_PASSWORD=${STOKER_DB_PASSWORD}
     volumes:
-      - /home/rancher/stoker-pg:/var/lib/postgresql/data   # local bind, off gluster
+      - stoker_pgdata:/var/lib/postgresql/data
     deploy:
       replicas: 1
-      placement: {constraints: ["node.hostname == hpelite"]}   # the one pinned service
+      placement: {constraints: ["node.hostname == hpelite"]}   # pinned: data locality
 
   db-backup:
     image: tiredofit/db-backup
@@ -77,13 +80,20 @@ services:
       - DB01_PASS=${STOKER_DB_PASSWORD}
       - DB01_PORT=5432
     volumes:
-      - /mnt/aios/stoker-backups/db:/backup
+      - stoker_backups:/backup
     deploy:
       replicas: 1
+      placement: {constraints: ["node.hostname == hpelite"]}
 
 secrets:
   stoker_master_key:
     external: true          # created by deploy.py (ensure_master_key_secret)
+
+volumes:
+  stoker_pgdata: {}
+  stoker_bundles: {}
+  stoker_repos: {}
+  stoker_backups: {}
 
 networks:
   traefik_default: {external: true}
