@@ -590,7 +590,7 @@ function JobWizard() {
   );
 }
 
-export const Route = createFileRoute("/specs/new")({
+export const Route = createFileRoute("/specs_/new")({
   validateSearch: (search: Record<string, unknown>): WizardSearch => {
     const out: WizardSearch = {};
     const edit = Number(search.edit);

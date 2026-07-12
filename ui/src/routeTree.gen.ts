@@ -17,8 +17,8 @@ import { Route as ReposRouteImport } from './routes/repos'
 import { Route as PacksRouteImport } from './routes/packs'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as IndexRouteImport } from './routes/index'
-import { Route as SpecsNewRouteImport } from './routes/specs.new'
-import { Route as RunsRunIdRouteImport } from './routes/runs.$runId'
+import { Route as SpecsNewRouteImport } from './routes/specs_.new'
+import { Route as RunsRunIdRouteImport } from './routes/runs_.$runId'
 
 const UsersRoute = UsersRouteImport.update({
   id: '/users',
@@ -61,14 +61,14 @@ const IndexRoute = IndexRouteImport.update({
   getParentRoute: () => rootRouteImport,
 } as any)
 const SpecsNewRoute = SpecsNewRouteImport.update({
-  id: '/new',
-  path: '/new',
-  getParentRoute: () => SpecsRoute,
+  id: '/specs_/new',
+  path: '/specs/new',
+  getParentRoute: () => rootRouteImport,
 } as any)
 const RunsRunIdRoute = RunsRunIdRouteImport.update({
-  id: '/$runId',
-  path: '/$runId',
-  getParentRoute: () => RunsRoute,
+  id: '/runs_/$runId',
+  path: '/runs/$runId',
+  getParentRoute: () => rootRouteImport,
 } as any)
 
 export interface FileRoutesByFullPath {
@@ -76,8 +76,8 @@ export interface FileRoutesByFullPath {
   '/login': typeof LoginRoute
   '/packs': typeof PacksRoute
   '/repos': typeof ReposRoute
-  '/runs': typeof RunsRouteWithChildren
-  '/specs': typeof SpecsRouteWithChildren
+  '/runs': typeof RunsRoute
+  '/specs': typeof SpecsRoute
   '/targets': typeof TargetsRoute
   '/users': typeof UsersRoute
   '/runs/$runId': typeof RunsRunIdRoute
@@ -88,8 +88,8 @@ export interface FileRoutesByTo {
   '/login': typeof LoginRoute
   '/packs': typeof PacksRoute
   '/repos': typeof ReposRoute
-  '/runs': typeof RunsRouteWithChildren
-  '/specs': typeof SpecsRouteWithChildren
+  '/runs': typeof RunsRoute
+  '/specs': typeof SpecsRoute
   '/targets': typeof TargetsRoute
   '/users': typeof UsersRoute
   '/runs/$runId': typeof RunsRunIdRoute
@@ -101,12 +101,12 @@ export interface FileRoutesById {
   '/login': typeof LoginRoute
   '/packs': typeof PacksRoute
   '/repos': typeof ReposRoute
-  '/runs': typeof RunsRouteWithChildren
-  '/specs': typeof SpecsRouteWithChildren
+  '/runs': typeof RunsRoute
+  '/specs': typeof SpecsRoute
   '/targets': typeof TargetsRoute
   '/users': typeof UsersRoute
-  '/runs/$runId': typeof RunsRunIdRoute
-  '/specs/new': typeof SpecsNewRoute
+  '/runs_/$runId': typeof RunsRunIdRoute
+  '/specs_/new': typeof SpecsNewRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -143,8 +143,8 @@ export interface FileRouteTypes {
     | '/specs'
     | '/targets'
     | '/users'
-    | '/runs/$runId'
-    | '/specs/new'
+    | '/runs_/$runId'
+    | '/specs_/new'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -152,10 +152,12 @@ export interface RootRouteChildren {
   LoginRoute: typeof LoginRoute
   PacksRoute: typeof PacksRoute
   ReposRoute: typeof ReposRoute
-  RunsRoute: typeof RunsRouteWithChildren
-  SpecsRoute: typeof SpecsRouteWithChildren
+  RunsRoute: typeof RunsRoute
+  SpecsRoute: typeof SpecsRoute
   TargetsRoute: typeof TargetsRoute
   UsersRoute: typeof UsersRoute
+  RunsRunIdRoute: typeof RunsRunIdRoute
+  SpecsNewRoute: typeof SpecsNewRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -216,52 +218,34 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/specs/new': {
-      id: '/specs/new'
-      path: '/new'
+    '/specs_/new': {
+      id: '/specs_/new'
+      path: '/specs/new'
       fullPath: '/specs/new'
       preLoaderRoute: typeof SpecsNewRouteImport
-      parentRoute: typeof SpecsRoute
+      parentRoute: typeof rootRouteImport
     }
-    '/runs/$runId': {
-      id: '/runs/$runId'
-      path: '/$runId'
+    '/runs_/$runId': {
+      id: '/runs_/$runId'
+      path: '/runs/$runId'
       fullPath: '/runs/$runId'
       preLoaderRoute: typeof RunsRunIdRouteImport
-      parentRoute: typeof RunsRoute
+      parentRoute: typeof rootRouteImport
     }
   }
 }
-
-interface RunsRouteChildren {
-  RunsRunIdRoute: typeof RunsRunIdRoute
-}
-
-const RunsRouteChildren: RunsRouteChildren = {
-  RunsRunIdRoute: RunsRunIdRoute,
-}
-
-const RunsRouteWithChildren = RunsRoute._addFileChildren(RunsRouteChildren)
-
-interface SpecsRouteChildren {
-  SpecsNewRoute: typeof SpecsNewRoute
-}
-
-const SpecsRouteChildren: SpecsRouteChildren = {
-  SpecsNewRoute: SpecsNewRoute,
-}
-
-const SpecsRouteWithChildren = SpecsRoute._addFileChildren(SpecsRouteChildren)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   LoginRoute: LoginRoute,
   PacksRoute: PacksRoute,
   ReposRoute: ReposRoute,
-  RunsRoute: RunsRouteWithChildren,
-  SpecsRoute: SpecsRouteWithChildren,
+  RunsRoute: RunsRoute,
+  SpecsRoute: SpecsRoute,
   TargetsRoute: TargetsRoute,
   UsersRoute: UsersRoute,
+  RunsRunIdRoute: RunsRunIdRoute,
+  SpecsNewRoute: SpecsNewRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

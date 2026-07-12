@@ -239,6 +239,6 @@ function RunDetailPage() {
   );
 }
 
-export const Route = createFileRoute("/runs/$runId")({
+export const Route = createFileRoute("/runs_/$runId")({
   component: RunDetailPage,
 });
