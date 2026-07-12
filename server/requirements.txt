@@ -14,6 +14,12 @@ python-multipart
 # to Postgres; pip resolves a wheel on 3.12.
 psycopg[binary]
 
+# Kubernetes client for the K8sDriver (k3s + EKS via kubeconfig contexts).
+# server/drivers/k8s.py imports it lazily, so the control plane only needs it
+# present when a k8s fleet is actually used; kept here so the image and CI can
+# run the driver's conformance + request-shape tests.
+kubernetes>=29,<32
+
 # Test dependencies (installed in the same venv for CI/local).
 pytest
 pytest-timeout

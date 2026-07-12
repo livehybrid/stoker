@@ -51,7 +51,9 @@ def get_driver(fleet_row, cache=True):
 
     ``driver == "swarm"`` lazily builds a :class:`~server.drivers.swarm.SwarmDriver`
     from the fleet's ``config_json`` (Portainer endpoint id + host) and process
-    settings; anything else (``fake`` / ``k8s`` placeholder) yields a
+    settings; ``driver == "k8s"`` lazily builds a
+    :class:`~server.drivers.k8s.K8sDriver` from the fleet's ``config_json``
+    (kubeconfig context + namespace); anything else (``fake``) yields a
     :class:`~server.drivers.fake.FakeDriver`. Instances are cached by fleet name
     unless ``cache`` is False (tests pass their own driver instead).
     """
@@ -82,11 +84,12 @@ def _build(attrs):
 
         log.info("building SwarmDriver for fleet %s", attrs["name"])
         return SwarmDriver.from_fleet_config(config)
-    if driver_name in ("fake", "k8s"):
-        # k8s driver is deferred (design Phase 2/3); a FakeDriver stands in so a
-        # fake-local/k8s fleet never crashes the app this stage.
-        if driver_name == "k8s":
-            log.info("k8s driver deferred; using FakeDriver for fleet %s", attrs["name"])
+    if driver_name == "k8s":
+        from .k8s import K8sDriver
+
+        log.info("building K8sDriver for fleet %s", attrs["name"])
+        return K8sDriver.from_fleet_config(config)
+    if driver_name == "fake":
         from .fake import FakeDriver
 
         return FakeDriver()

@@ -1520,6 +1520,12 @@ def build_run_snapshot(run, spec, target, hec_token, settings=None):
 
     ``hec_token`` is the decrypted target token (the caller decrypts once); it is
     placed only in the env projection, never logged.
+
+    ``driver_opts`` carries the spec's own knobs (cpu/mem requests, namespace,
+    placement) plus the run's bounded ``duration_s`` when set, so a driver can
+    give the workload a hard deadline (the K8sDriver's
+    ``activeDeadlineSeconds = duration + 300``). Drivers that do not need it (the
+    SwarmDriver) simply ignore the key.
     """
     if settings is None:
         settings = get_settings()
@@ -1532,12 +1538,17 @@ def build_run_snapshot(run, spec, target, hec_token, settings=None):
     }
     if hec_token:
         env["STOKER_HEC_TOKEN"] = hec_token
+    driver_opts = dict(spec.driver_opts_json or {})
+    # Surface the bounded duration to the driver (for a hard workload deadline).
+    # Unbounded runs (duration_s falsy) leave it absent so no deadline is set.
+    if spec.duration_s:
+        driver_opts.setdefault("duration_s", spec.duration_s)
     return RunSnapshot(
         run_id=run.id,
         image=settings.worker_image,
         env=env,
         labels={"stoker.run": str(run.id)},
-        driver_opts=dict(spec.driver_opts_json or {}),
+        driver_opts=driver_opts,
         stop_grace_s=STOP_GRACE_S,
     )
 

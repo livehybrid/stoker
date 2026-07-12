@@ -1,0 +1,84 @@
+# Reference: the namespaced RBAC the Stoker CONTROL PLANE uses to drive the
+# K8sDriver. DOCUMENTATION of the minimal identity (DESIGN.md sections 11 "AWS"
+# + 14): "a ServiceAccount with a namespaced Role limited to jobs/pods/secrets
+# create, list, watch, delete".
+#
+# This is the identity the CONTROL PLANE authenticates as (on EKS via an access
+# entry mapped to exec-auth `aws eks get-token`; on k3s via a kubeconfig for this
+# ServiceAccount). It is NOT the workers' identity -- worker pods mount no token
+# at all (automountServiceAccountToken: false in the Job template).
+#
+# The verb set is exactly what server/drivers/k8s.py calls, no more:
+#   jobs:      create (create), get (read/status), patch (scale + drive),
+#              delete (stop/destroy), list + watch (boot reconciliation)
+#   secrets:   create (per-run token), patch (ownerReference), delete + list +
+#              watch (documented management; GC removes them via ownerRef)
+#   pods:      list (status pod view), get (pod reads), watch (documented)
+#   pods/log:  get (the logs() live-tail)
+# Scope is a single namespace (default: stoker). No cluster-wide permissions, no
+# access to nodes, other namespaces, or the API beyond this set.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: stoker-driver
+  namespace: stoker
+  labels:
+    app.kubernetes.io/part-of: stoker
+# The driver's pods (if any) and any token minted for this SA never need the
+# cluster API from inside a worker; this SA is for the control plane only.
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: stoker-driver
+  namespace: stoker
+  labels:
+    app.kubernetes.io/part-of: stoker
+rules:
+  # Indexed Jobs: the per-run workload the driver creates, reads, scales
+  # (patch parallelism+completions), stops/destroys (delete), and reconciles
+  # against on boot (list/watch).
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "patch", "delete"]
+  # Per-run ephemeral Secrets: created with the HEC token, patched with the
+  # Job ownerReference. delete/list/watch round out the documented management
+  # set (the garbage collector removes them via the ownerRef in practice).
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "get", "list", "watch", "patch", "delete"]
+  # Worker pods: listed/read for the status view and log addressing. The driver
+  # never creates pods directly (the Job controller does), so no create/delete.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  # Pod logs: the logs() live-tail reads the pod log subresource.
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: stoker-driver
+  namespace: stoker
+  labels:
+    app.kubernetes.io/part-of: stoker
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: stoker-driver
+subjects:
+  # On EKS the exec-auth identity (the IAM user with only eks:DescribeCluster) is
+  # mapped by an EKS access entry into the RBAC group "stoker:control-plane";
+  # this Group subject is the live EKS path (matches infra/aws/stoker-eks).
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: stoker:control-plane
+  # The ServiceAccount subject is for k3s / a control plane that authenticates
+  # as the SA directly.
+  - kind: ServiceAccount
+    name: stoker-driver
+    namespace: stoker

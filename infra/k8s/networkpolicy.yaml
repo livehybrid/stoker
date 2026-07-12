@@ -1,0 +1,72 @@
+# Reference: the egress-only NetworkPolicy that bounds Stoker worker pods.
+#
+# DOCUMENTATION of the hardening the K8sDriver relies on (DESIGN.md sections 11
+# "AWS" + 14). Apply this ONCE per namespace (it is not per-run and the driver
+# does not create it); every worker pod carries a `stoker.run` label, so the
+# podSelector below (key Exists) catches all of them, current and future.
+#
+# Intent: workers are egress-only cattle. They may reach exactly two things:
+#   1. the Splunk HEC target(s) they stream to, and
+#   2. the Stoker control plane (claims / heartbeats / bundle GETs),
+# plus DNS to resolve those names. Everything else (all ingress, all other
+# egress, the cluster's other pods, the metadata endpoint) is denied. On EKS
+# this plus the single-target token bounds the blast radius of a trusted-code
+# pack; a NetworkPolicy has no swarm equivalent, which is why trusted-code packs
+# on swarm are treated as running with full LAN access (DESIGN.md section 7).
+#
+# Requires a CNI that enforces NetworkPolicy (Calico / Cilium on EKS; k3s ships
+# with a policy-capable CNI). Replace the <angle-bracket> CIDRs with your real
+# HEC and control-plane egress IPs before applying.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: stoker-workers-egress-only
+  namespace: stoker
+  labels:
+    app.kubernetes.io/part-of: stoker
+spec:
+  # Match every Stoker worker pod (all carry a stoker.run=<id> label).
+  podSelector:
+    matchExpressions:
+      - key: stoker.run
+        operator: Exists
+  policyTypes:
+    - Ingress
+    - Egress
+  # No ingress at all: nothing connects INTO a worker.
+  ingress: []
+  egress:
+    # 1. DNS (needed to resolve the HEC and control-plane hostnames). kube-dns
+    #    on both TCP and UDP 53. Scoped to the cluster DNS service where possible.
+    - to:
+        - namespaceSelector: {}          # kube-system CoreDNS; tighten to it if desired
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # 2. The Splunk HEC target(s). One block per target endpoint CIDR + port.
+    #    HEC is HTTPS (8088 by default; 443 behind a load balancer). List every
+    #    target a run on this namespace may stream to.
+    - to:
+        - ipBlock:
+            cidr: <HEC_TARGET_CIDR>/32   # e.g. the Splunk HEC / ELB address
+      ports:
+        - protocol: TCP
+          port: 8088
+        - protocol: TCP
+          port: 443
+    # 3. The Stoker control plane (on-prem, reached from EKS over HTTPS through
+    #    Traefik at stoker.cloud.livehybrid.com). Egress to the house uplink IP
+    #    on 443 for claims / heartbeats / bundle GETs.
+    - to:
+        - ipBlock:
+            cidr: <CONTROL_PLANE_CIDR>/32 # the house egress / Traefik public IP
+      ports:
+        - protocol: TCP
+          port: 443
+  # NOTE: the AWS instance metadata endpoint (169.254.169.254) is intentionally
+  # NOT in any egress rule, so a compromised worker cannot reach IMDS to steal
+  # node credentials. Combined with automountServiceAccountToken: false on the
+  # pod, the worker has no path to the Kubernetes or AWS control planes.

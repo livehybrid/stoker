@@ -1,0 +1,25 @@
+# Example tfvars for the Stoker EKS module.
+#
+# Copy to a SOPS-encrypted `terraform.tfvars` (or pass `-var-file` a decrypted
+# tempfile) — the real file carries the house egress IP and the alert email and
+# must NOT be committed in plaintext. Only the two REQUIRED vars have no default.
+
+# REQUIRED — the house public egress IP in CIDR form. Restricts the EKS public
+# API endpoint access list to only the on-prem control plane. `/0` is rejected.
+house_egress_cidr = "203.0.113.4/32"
+
+# REQUIRED — where the (non-optional) Budgets alarm emails. Confirm the SNS
+# subscription once after the first apply.
+budget_alert_email = "will@livehybrid.com"
+
+# --- Optional overrides (defaults shown) ------------------------------------ #
+# region                     = "eu-west-2"
+# cluster_name               = "stoker"
+# kubernetes_version         = "1.30"      # must be >= 1.27 (Elastic Indexed Jobs)
+# worker_arch                = "arm64"     # Graviton
+# worker_instance_families   = ["c7g", "c6g", "m7g", "m6g"]
+# worker_capacity_type       = ["spot"]
+# worker_nodepool_cpu_limit  = 1000        # hard vCPU ceiling (spend backstop)
+# budget_limit_usd           = 150
+# budget_alert_thresholds_pct = [50, 80, 100]
+# extra_api_access_cidrs     = []          # e.g. an operator's static IP

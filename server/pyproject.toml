@@ -18,6 +18,9 @@ dependencies = [
     "pyjwt",
     "cryptography",
     "python-multipart",
+    # K8sDriver (k3s + EKS via kubeconfig contexts). Imported lazily by
+    # server/drivers/k8s.py; only needed when a k8s fleet is actually used.
+    "kubernetes>=29,<32",
 ]
 
 [project.optional-dependencies]

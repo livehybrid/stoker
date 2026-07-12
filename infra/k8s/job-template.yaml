@@ -1,0 +1,107 @@
+# Reference: the per-run workload the K8sDriver creates (server/drivers/k8s.py).
+#
+# This is DOCUMENTATION, not an applied manifest. The driver builds the Secret
+# and Job programmatically via the kubernetes python client (BatchV1Api /
+# CoreV1Api); this file is the faithful YAML mirror so an operator can see, diff
+# and hand-apply a run if needed. Placeholders in <angle brackets> are filled by
+# the driver from the RunSnapshot:
+#
+#   <ID>          run.run_id                (Job/Secret name suffix, stoker.run label)
+#   <N>           the worker count          (parallelism == completions)
+#   <IMAGE>       run.image                 (worker image, pinned by digest in prod)
+#   <DURATION>    driver_opts.duration_s    (bounded runs only; drives the deadline)
+#   <NAMESPACE>   fleet config namespace    (default: stoker)
+#
+# One Job per run, one Secret per run. The Secret is owned by the Job
+# (ownerReference), so deleting the Job garbage-collects the Secret;
+# ttlSecondsAfterFinished is the belt-and-braces stray-catcher.
+---
+# Per-run ephemeral Secret: carries ONLY the HEC token. Created by the driver
+# with stringData (the API server base64-encodes it); the token never appears in
+# the Job/Pod spec, only projected in via secretKeyRef (below). The driver adds
+# the ownerReference AFTER the Job exists (it needs the Job uid), so the Secret
+# GCs with the Job. Omitted entirely when the target has no HEC token.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: stoker-run-<ID>-hec
+  namespace: <NAMESPACE>
+  labels:
+    stoker.run: "<ID>"
+  ownerReferences:
+    - apiVersion: batch/v1
+      kind: Job
+      name: stoker-run-<ID>
+      uid: <JOB_UID>            # patched on by the driver post-create
+      controller: true
+      blockOwnerDeletion: true
+type: Opaque
+stringData:
+  hec-token: "<HEC_TOKEN>"     # never logged; projected via secretKeyRef only
+---
+# Per-run Indexed Job: the fleet. completionMode Indexed gives every pod a stable
+# JOB_COMPLETION_INDEX, surfaced to the worker as STOKER_HINT_SLOT via the
+# downward API. parallelism == completions == N; scaling patches BOTH together
+# (Elastic Indexed Jobs, k8s >= 1.27).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: stoker-run-<ID>
+  namespace: <NAMESPACE>
+  labels:
+    stoker.run: "<ID>"
+spec:
+  completionMode: Indexed
+  parallelism: <N>
+  completions: <N>
+  # A worker may legitimately restart (spot reclaim, transient HEC); 3*N gives
+  # the whole fleet headroom before the Job itself is marked failed.
+  backoffLimit: <3*N>
+  # Reap the finished Job (and its GC'd Secret + pods) an hour after completion.
+  ttlSecondsAfterFinished: 3600
+  # Bounded runs ONLY: duration + 300 s, so a wedged fleet cannot outlive its run
+  # (belt-and-braces with the control-plane drain). Omitted for unbounded runs.
+  activeDeadlineSeconds: <DURATION+300>
+  template:
+    metadata:
+      labels:
+        stoker.run: "<ID>"
+    spec:
+      restartPolicy: OnFailure
+      # Workers never call the API server: do not mount a ServiceAccount token.
+      automountServiceAccountToken: false
+      # Room for the drain path (SIGTERM -> flush HEC queue -> POST final);
+      # WORKER-CONTRACT keeps the whole drain under the 45 s SIGTERM budget.
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: worker
+          image: <IMAGE>       # ghcr.io/livehybrid/stoker-worker@sha256:<digest>
+          env:
+            # Base worker env from the RunSnapshot (RUN_ID / CONTROL_URL / JWT /
+            # TOTAL_WORKERS). Rendered as plain name/value pairs by the driver.
+            - name: STOKER_RUN_ID
+              value: "<ID>"
+            - name: STOKER_CONTROL_URL
+              value: "https://stoker.cloud.livehybrid.com"
+            - name: STOKER_RUN_JWT
+              value: "<RUN_JWT>"
+            - name: STOKER_TOTAL_WORKERS
+              value: "<N>"
+            # The HEC token: projected from the per-run Secret, NEVER inline.
+            - name: STOKER_HEC_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: stoker-run-<ID>-hec
+                  key: hec-token
+            # The slot hint: the pod's Indexed-Job completion index, exposed via
+            # the downward API from the annotation Kubernetes stamps on each pod.
+            - name: STOKER_HINT_SLOT
+              valueFrom:
+                fieldRef:
+                  fieldPath: >-
+                    metadata.annotations['batch.kubernetes.io/job-completion-index']
+          # Optional: CPU/memory requests+limits from spec.driver_opts_json
+          # (driver_opts.resources). Absent -> the driver omits the block.
+          # resources:
+          #   requests: {cpu: "500m", memory: "256Mi"}
+          #   limits:   {cpu: "1",    memory: "512Mi"}
