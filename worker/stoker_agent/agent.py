@@ -21,7 +21,8 @@ from . import confrewrite
 from .config import Config
 from .control import (ControlClient, DeadManError, StandaloneControl,
                       SupersededError)
-from .engine import STOP_GRACE_S, EngineError, EngineRunner
+from .engine import (STOP_GRACE_S, EngineError, EngineRunner,
+                     RawReplayRunner)
 from .metrics import CpuTracker, Metrics, read_rss_mb
 from .pacing import TokenBucket
 from .slice import SliceError, SpecSlice, parse_iso8601
@@ -53,13 +54,56 @@ def _default_engine_factory(conf_path, socket_path, cwd=None):
     return EngineRunner(conf_path, socket_path, cwd=cwd)
 
 
+class _RawReplayView(object):
+    """A ReplayConfig with ``mode`` overridden to match the run's pacing.
+
+    ``bundle.ReplayConfig`` carries the pack's declared mode; the agent derives
+    the operative mode from whether the run is gated. Rather than mutate the
+    pack config (or duplicate its fields), this thin adapter presents the same
+    attributes with ``mode`` replaced, so the factory sees one consistent object.
+    """
+
+    __slots__ = ("dataset", "mode", "time_multiple", "ts_field",
+                 "ts_regex", "ts_strptime")
+
+    def __init__(self, replay, mode):
+        # type: (Any, str) -> None
+        self.dataset = replay.dataset
+        self.mode = mode
+        self.time_multiple = replay.time_multiple
+        self.ts_field = replay.ts_field
+        self.ts_regex = replay.ts_regex
+        self.ts_strptime = replay.ts_strptime
+
+
+def _default_rawreplay_engine_factory(replay, socket_path, cwd=None,
+                                      log_dir=None):
+    # type: (Any, str, Optional[str], Optional[str]) -> RawReplayRunner
+    """Build the PISTON engine runner from a resolved pack replay config.
+
+    ``replay`` is a ``bundle.ReplayConfig`` (dataset absolutised, mode +
+    time_multiple + optional cadence hints). The engine mode is NOT taken from
+    here directly: the agent passes the mode that matches the run's pacing (see
+    ``Agent.run``); this default factory simply wires the runner from the config
+    it is handed (the agent overrides ``replay.mode`` before calling)."""
+    return RawReplayRunner(
+        socket_path, replay.dataset, replay.mode,
+        time_multiple=replay.time_multiple,
+        ts_field=replay.ts_field, ts_regex=replay.ts_regex,
+        ts_strptime=replay.ts_strptime, cwd=cwd, log_dir=log_dir)
+
+
 class Agent(object):
     def __init__(self, config, hec_factory=None, engine_factory=None,
-                 control=None, clock=time.time):
-        # type: (Config, Optional[Callable], Optional[Callable], Optional[Any], Callable[[], float]) -> None
+                 control=None, clock=time.time, rawreplay_engine_factory=None):
+        # type: (Config, Optional[Callable], Optional[Callable], Optional[Any], Callable[[], float], Optional[Callable]) -> None
         self._cfg = config
         self._hec_factory = hec_factory or _default_hec_factory
         self._engine_factory = engine_factory or _default_engine_factory
+        # PISTON: a separate injectable factory so tests can stub the raw-replay
+        # engine independently of the eventgen one (their constructors differ).
+        self._rawreplay_engine_factory = (
+            rawreplay_engine_factory or _default_rawreplay_engine_factory)
         self._control_override = control
         self._clock = clock
         self._drain_event = threading.Event()
@@ -108,10 +152,15 @@ class Agent(object):
                     sha256=sl.bundle_sha256, jwt=cfg.run_jwt)
                 gated = sl.rate_mode != "count_interval"
                 share_eps = self._gating_eps(sl, pack.estimates)
-                confrewrite.rewrite_file(
-                    pack.conf_path, conf_path, sl.rate_mode, sl.rate_value,
-                    cfg.overdrive, pack.samples_dir,
-                    slot=sl.slot, total_workers=sl.total_workers)
+                is_rawreplay = sl.engine == "rawreplay"
+                if not is_rawreplay:
+                    # eventgen: rewrite the pack's conf for this worker's share.
+                    confrewrite.rewrite_file(
+                        pack.conf_path, conf_path, sl.rate_mode, sl.rate_value,
+                        cfg.overdrive, pack.samples_dir,
+                        slot=sl.slot, total_workers=sl.total_workers)
+                # PISTON: for rawreplay the conf-rewrite is skipped entirely; the
+                # engine reads its dataset + pacing from the pack's replay config.
 
                 self._hec = self._hec_factory(
                     sl.hec_url, cfg.hec_token, gzip_enabled=sl.hec_gzip,
@@ -126,12 +175,17 @@ class Agent(object):
                                           self._bucket, make_filler(sl),
                                           gated=gated)
                 self._sock.start()
-                # cwd rooted at the pack so eventgen resolves relative
-                # file-token replacement paths (e.g. samples/foo.sample)
+                # cwd rooted at the pack so the engine resolves relative pack
+                # paths (eventgen's file-token replacement samples/foo.sample;
+                # rawreplay uses an absolute dataset path but inherits it too)
                 # against the pack, not the container working directory.
-                self._engine = self._engine_factory(conf_path,
-                                                    cfg.output_socket,
-                                                    pack.pack_dir)
+                if is_rawreplay:
+                    self._engine = self._build_rawreplay_engine(sl, pack,
+                                                                gated, workdir)
+                else:
+                    self._engine = self._engine_factory(conf_path,
+                                                        cfg.output_socket,
+                                                        pack.pack_dir)
                 if gated:
                     # warm the engine; the paused bucket holds output back
                     self._engine.start()
@@ -185,6 +239,47 @@ class Agent(object):
         self._state = "claiming"
         doc = control.claim(cfg.holder, cfg.hint_slot)
         return control, SpecSlice.from_claim(doc)
+
+    def _build_rawreplay_engine(self, sl, pack, gated, workdir):
+        # type: (SpecSlice, Any, bool, str) -> Any
+        """Build the PISTON engine runner for a rawreplay slice.
+
+        The pack must carry a resolved replay config (``pack.replay``); its
+        absence on a rawreplay run is a hard configuration error (raised as
+        ``EngineError`` so the setup-failure path drains with EXIT_CONFIG).
+
+        The engine **mode is derived from the run's pacing, not the pack's
+        declared mode**, so the two halves of the contract always agree:
+
+        * gated run (rate_mode eps / per_day_gb) -> engine RATE mode: emit
+          ``time = null`` HOT and let the agent's token bucket pace + stamp now,
+          looping the dataset to fill the duration;
+        * ungated run (rate_mode count_interval) -> engine CADENCE mode: the
+          engine reproduces the recorded inter-event gaps x time_multiple and
+          stamps ``time = now + offset`` (engine-paced; the socket reader is not
+          gated). This is the existing "replay is engine-paced, workers = 1" rule.
+
+        The pack's ``time_multiple`` and cadence timestamp hints (ts_regex /
+        ts_strptime / ts_field) are carried through unchanged; only ``mode`` is
+        overridden to match the pacing.
+        """
+        replay = getattr(pack, "replay", None)
+        if replay is None:
+            raise EngineError(
+                "engine=rawreplay but the pack declares no replay config "
+                "(expected a `replay:` section with a dataset path in "
+                "pack.yaml or stoker.json)")
+        mode = "rate" if gated else "cadence"
+        if replay.mode != mode:
+            log.info("rawreplay: run rate_mode=%s -> engine mode=%s "
+                     "(pack declared %s; pacing wins)",
+                     sl.rate_mode, mode, replay.mode)
+        # A per-run log dir under the workdir keeps the runner's log-dir base
+        # valid without polluting the pack.
+        log_dir = os.path.join(workdir, "rawreplay-logs")
+        resolved = _RawReplayView(replay, mode)
+        return self._rawreplay_engine_factory(
+            resolved, self._cfg.output_socket, pack.pack_dir, log_dir=log_dir)
 
     def _gating_eps(self, sl, estimates):
         # type: (SpecSlice, Dict[str, Any]) -> Optional[float]

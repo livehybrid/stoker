@@ -16,14 +16,20 @@ The temp credential material is created per invocation and deleted in a
 output is captured; on failure a :class:`GitSyncError` carrying a scrubbed,
 secret-free message is raised (the caller stores it in ``repo.sync_error``).
 
-Indexing walks the clone for **pack roots** (a directory holding
-``default/eventgen.conf`` at the repo root or under ``packs/*/``), synthesises a
-``pack.yaml`` when the pack lacks one (flagging the pack ``verified=False``),
-lints via :func:`server.bundles.lint_pack`, enforces the custom-code default-deny
-(``bin/`` and ``generator =`` stanzas are rejected unless ``repo.trusted_code``)
-and rejects ``file`` / ``mvfile`` token replacement paths that escape the pack
-root. Each pack upserts a :class:`~server.models.Pack` row keyed on
-``(repo_id, name)`` with ``indexed_sha`` = the repo head SHA.
+Indexing walks the clone for **pack roots**. A pack root is either an eventgen
+pack (a directory holding ``default/eventgen.conf``) or a rawreplay (Piston) pack
+(a directory whose ``pack.yaml`` declares ``engine: rawreplay`` with a
+``dataset`` / ``dataset_url`` and has NO eventgen.conf), at the repo root or
+under ``packs/*/``. For an eventgen pack lacking a ``pack.yaml`` one is
+synthesised (flagging the pack ``verified=False``); a rawreplay pack always ships
+its own ``pack.yaml`` (that is how it is recognised) so it is never synthesised.
+Every pack lints via :func:`server.bundles.lint_pack`, has the custom-code
+default-deny enforced (``bin/`` and ``generator =`` stanzas rejected unless
+``repo.trusted_code``) and ``file`` / ``mvfile`` token replacement paths (and, for
+rawreplay, the dataset path) that escape the pack root rejected. Each pack upserts
+a :class:`~server.models.Pack` row keyed on ``(repo_id, name)`` with
+``indexed_sha`` = the repo head SHA and ``engines_json`` = ``["rawreplay"]`` for a
+rawreplay pack.
 """
 
 from __future__ import annotations
@@ -213,8 +219,8 @@ def resolve_pack_dir(repo, pack, settings=None):
     rel = _pack_relpath(pack)
     pack_dir = os.path.join(checkout_root, rel) if rel else checkout_root
 
-    if os.path.isfile(os.path.join(pack_dir, CONF_RELPATH)):
-        return pack_dir  # already materialised
+    if _pack_present(pack_dir):
+        return pack_dir  # already materialised (eventgen conf or rawreplay pack)
 
     secret = _decrypt_secret(repo)
     os.makedirs(os.path.dirname(checkout_root), exist_ok=True)
@@ -225,10 +231,24 @@ def resolve_pack_dir(repo, pack, settings=None):
         _ensure_sha_present(clone_dir, sha, repo.url, env)
         _extract_tree(clone_dir, sha, checkout_root, env)
 
-    if not os.path.isfile(os.path.join(pack_dir, CONF_RELPATH)):
+    if not _pack_present(pack_dir):
         raise GitSyncError(
             "pack path %r not found at SHA %s in repo %s" % (rel, sha[:12], repo.id))
     return pack_dir
+
+
+def _pack_present(pack_dir):
+    # type: (str) -> bool
+    """True when ``pack_dir`` holds an eventgen conf or is a rawreplay pack.
+
+    Used by :func:`resolve_pack_dir` as both the materialised-cache check and the
+    post-extract presence assertion, so a rawreplay pack (no eventgen.conf, just a
+    ``pack.yaml`` + dataset) resolves for the bundle builder just like an eventgen
+    pack does.
+    """
+    if os.path.isfile(os.path.join(pack_dir, CONF_RELPATH)):
+        return True
+    return os.path.isdir(pack_dir) and bundles.is_rawreplay_pack(pack_dir)
 
 
 def _ensure_sha_present(clone_dir, sha, url, env):
@@ -452,20 +472,36 @@ def _find_pack_roots(clone_dir):
     # type: (str) -> List[str]
     """Pack roots in a clone: the repo root, then each ``packs/*/`` directory.
 
-    A pack root is a directory containing ``default/eventgen.conf``. The design
-    accepts the pack at the repo root or one level under ``packs/``. Sorted for
-    deterministic indexing.
+    A pack root is either an eventgen pack (a directory containing
+    ``default/eventgen.conf``) or a rawreplay pack (a directory whose
+    ``pack.yaml`` declares ``engine: rawreplay`` with a dataset; it has NO
+    eventgen.conf). The design accepts the pack at the repo root or one level
+    under ``packs/``. Sorted for deterministic indexing.
     """
     roots = []  # type: List[str]
-    if os.path.isfile(os.path.join(clone_dir, CONF_RELPATH)):
+    if _is_pack_root(clone_dir):
         roots.append(clone_dir)
     packs_parent = os.path.join(clone_dir, "packs")
     if os.path.isdir(packs_parent):
         for entry in sorted(os.listdir(packs_parent)):
             cand = os.path.join(packs_parent, entry)
-            if os.path.isdir(cand) and os.path.isfile(os.path.join(cand, CONF_RELPATH)):
+            if os.path.isdir(cand) and _is_pack_root(cand):
                 roots.append(cand)
     return roots
+
+
+def _is_pack_root(cand):
+    # type: (str) -> bool
+    """True when ``cand`` is an eventgen pack root or a rawreplay pack root.
+
+    An eventgen pack has ``default/eventgen.conf``; a rawreplay (Piston) pack has
+    a ``pack.yaml`` declaring ``engine: rawreplay`` (or a ``replay:`` section with
+    a dataset) and no conf. Recognising rawreplay here is what lets a
+    dataset-only pack index as a valid pack despite having no eventgen.conf.
+    """
+    if os.path.isfile(os.path.join(cand, CONF_RELPATH)):
+        return True
+    return bundles.is_rawreplay_pack(cand)
 
 
 def _pack_name(pack_dir, clone_dir, repo=None):

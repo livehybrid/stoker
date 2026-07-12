@@ -16,8 +16,9 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY worker/stoker_agent /app/stoker_agent
 COPY worker/engines /app/engines
 
-# /app for the agent package, engines/eventgen for the vendored splunk_eventgen tree.
-ENV PYTHONPATH=/app:/app/engines/eventgen
+# /app for the agent package, engines/eventgen for the vendored splunk_eventgen
+# tree, engines/rawreplay for the PISTON raw-replay engine (`-m stoker_rawreplay`).
+ENV PYTHONPATH=/app:/app/engines/eventgen:/app/engines/rawreplay
 
 USER stoker
 

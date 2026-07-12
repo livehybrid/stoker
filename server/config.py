@@ -48,6 +48,13 @@ DEFAULT_METRIC_DELETE_CHUNK = 5000    # rows per delete batch (never one huge tx
 # Dogfood telemetry cadence: the per-active-run aggregate emitter ships a
 # stoker:metrics event this often when dogfood is enabled.
 DEFAULT_DOGFOOD_METRICS_INTERVAL_S = 30.0
+
+# rawreplay (Piston) dataset fetch: a pack.yaml `dataset_url` (e.g. an
+# attack_data capture) is downloaded at bundle-build time. https only, capped so
+# a hostile/huge URL cannot exhaust the control-plane disk, and sha-verifiable
+# when the pack declares a `dataset_sha256`.
+DEFAULT_RAWREPLAY_MAX_DATASET_BYTES = 512 * 1024 * 1024  # 512 MiB
+DEFAULT_RAWREPLAY_FETCH_TIMEOUT_S = 120.0
 # The three authorisation roles, most to least privileged. ``admin`` gates user
 # management; validated here so a bad STOKER_PROXY_DEFAULT_ROLE fails at boot.
 VALID_ROLES = ("viewer", "operator", "admin")
@@ -112,6 +119,12 @@ class Settings:
     dogfood_metrics_interval_s: float = DEFAULT_DOGFOOD_METRICS_INTERVAL_S
     # Gzip the HEC event batch body (best-effort; the collector accepts either).
     dogfood_gzip: bool = True
+
+    # --- rawreplay (Piston) dataset fetch ----------------------------------- #
+    # Cap on a `dataset_url` download at bundle-build time (bytes); a fetch that
+    # would exceed this is refused. Fetch timeout in seconds.
+    rawreplay_max_dataset_bytes: int = DEFAULT_RAWREPLAY_MAX_DATASET_BYTES
+    rawreplay_fetch_timeout_s: float = DEFAULT_RAWREPLAY_FETCH_TIMEOUT_S
 
     @property
     def is_sqlite(self):
@@ -297,6 +310,12 @@ def load_settings(env=None):
             env, "DOGFOOD_METRICS_INTERVAL_S",
             DEFAULT_DOGFOOD_METRICS_INTERVAL_S),
         dogfood_gzip=_get_bool(env, "DOGFOOD_GZIP", True),
+        rawreplay_max_dataset_bytes=_get_int(
+            env, "RAWREPLAY_MAX_DATASET_BYTES",
+            DEFAULT_RAWREPLAY_MAX_DATASET_BYTES),
+        rawreplay_fetch_timeout_s=_get_float(
+            env, "RAWREPLAY_FETCH_TIMEOUT_S",
+            DEFAULT_RAWREPLAY_FETCH_TIMEOUT_S),
     )
 
 

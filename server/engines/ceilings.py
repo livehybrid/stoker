@@ -10,6 +10,13 @@ eventgen ceilings (per worker): 25 GB/day and 5000 EPS. ``per_day_gb`` shares
 are checked against the GB/day ceiling directly; ``eps`` against the EPS ceiling.
 When a ``per_day_gb`` share is supplied with a ``bytes_per_event`` estimate we
 also derive the implied EPS and check that too (whichever binds first wins).
+
+rawreplay (Piston) reuses eventgen's per-worker ceilings: in RATE mode the agent
+paces the replay with the same token bucket, so the same GB/day + EPS bounds
+apply. In CADENCE mode (``count_interval``) the engine self-paces from the
+recorded gaps and there is no rate ceiling (the ``count_interval`` branch below
+always passes). A rawreplay run is always a single worker (the control plane
+forces it), so the per-worker ceiling equals the whole-run ceiling.
 """
 
 from __future__ import annotations
@@ -21,6 +28,13 @@ from typing import Dict, Optional
 # engine -> ceilings. Extend as engines are added.
 CEILINGS = {
     "eventgen": {
+        "max_gb_day_per_worker": 25.0,
+        "max_eps_per_worker": 5000.0,
+    },
+    # rawreplay reuses eventgen's per-worker bounds (documented in the module
+    # docstring): in RATE mode the same token bucket paces it, and a replay run
+    # is always workers=1 so the per-worker ceiling is the whole-run ceiling.
+    "rawreplay": {
         "max_gb_day_per_worker": 25.0,
         "max_eps_per_worker": 5000.0,
     },

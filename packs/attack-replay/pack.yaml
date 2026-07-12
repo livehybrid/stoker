@@ -1,0 +1,22 @@
+# Stoker pack: PISTON raw-replay of a recorded attack_data capture.
+# The engine is `rawreplay`: Piston replays dataset/events.log byte-for-byte,
+# re-timestamped to now, at a chosen rate (rate mode) or the recorded cadence
+# (cadence mode). Replay settings (dataset, mode, time_multiple) are read from
+# THIS file, not from default/eventgen.conf (the agent skips the conf-rewrite
+# for engine == rawreplay).
+# NOTE: the worker parses this with a flat two-level scalar subset of YAML;
+# keep every value on a single line.
+name: attack-replay
+engine: rawreplay
+description: "Replays a recorded Sysmon/Windows-Security attack_data capture byte-for-byte (credential-access + lateral-movement chain), re-stamped to now"
+replay:
+  dataset: dataset/events.log
+  mode: rate                    # rate | cadence
+  time_multiple: 1.0            # cadence-mode gap multiplier (1.0 = real time; <1 faster, >1 slower)
+  dataset_url: https://github.com/splunk/security_content/tree/develop/datasets/attack_techniques
+estimates:
+  bytes_per_event: 1591         # measured mean of dataset/events.log; drives per_day_gb gating
+  per_day_gb: 0.05
+defaults:
+  index: main
+  sourcetype: XmlWinEventLog    # a realistic Sysmon/WinEventLog sourcetype

@@ -14,7 +14,10 @@ import socket as _socket
 from typing import Mapping, Optional
 
 RATE_MODES = ("eps", "per_day_gb", "count_interval")
-ENGINES = ("eventgen",)
+# eventgen templates events from samples; rawreplay (Piston) replays a recorded
+# dataset byte-for-byte. Both speak the same output-socket protocol; the agent's
+# HEC/pacing/control-plane wiring is engine-agnostic. STOKER_ENGINE selects.
+ENGINES = ("eventgen", "rawreplay")
 
 DEFAULT_OUTPUT_SOCKET = "/tmp/stoker-output.sock"
 DEFAULT_HEARTBEAT_S = 5.0

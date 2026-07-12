@@ -46,6 +46,34 @@ class Bundle:
     conf_path: str
     samples_dir: str
     estimates: Dict[str, Any]
+    # Raw-replay (PISTON) config, resolved from the pack's `replay:` section
+    # (stoker.json preferred, else pack.yaml). None when the pack declares no
+    # replay config (an eventgen-only pack). See resolve_replay_config.
+    replay: Optional["ReplayConfig"] = None
+
+
+@dataclasses.dataclass
+class ReplayConfig:
+    """The pack's raw-replay config for the rawreplay (PISTON) engine.
+
+    Resolved from the pack's ``replay:`` section. ``dataset`` is absolutised
+    against the pack directory here so the engine receives an absolute path
+    (the engine env carries ``STOKER_RAWREPLAY_DATASET`` = this path).
+
+    Fields:
+        dataset: absolute path to the recorded dataset inside the pack
+            (gzip-aware when it ends ``.gz``).
+        mode: ``rate`` | ``cadence`` (default ``rate``).
+        time_multiple: cadence gap scale (default 1.0).
+        ts_field / ts_regex / ts_strptime: optional cadence timestamp hints.
+    """
+
+    dataset: str
+    mode: str
+    time_multiple: float
+    ts_field: Optional[str] = None
+    ts_regex: Optional[str] = None
+    ts_strptime: Optional[str] = None
 
 
 def fetch_bundle(source, workdir, sha256=None, jwt=None):
@@ -155,8 +183,113 @@ def _load_pack(pack_dir):
     if not os.path.isdir(samples_dir):
         samples_dir = pack_dir
     estimates = _load_estimates(pack_dir)
+    replay = resolve_replay_config(pack_dir)
     return Bundle(pack_dir=pack_dir, conf_path=conf_path,
-                  samples_dir=samples_dir, estimates=estimates)
+                  samples_dir=samples_dir, estimates=estimates, replay=replay)
+
+
+# Recognised replay modes (mirrors stoker_rawreplay.engine's MODE_* constants;
+# duplicated here so bundle.py stays free of an engine import).
+_REPLAY_MODES = ("rate", "cadence")
+
+
+def _load_pack_doc(pack_dir):
+    # type: (str) -> Dict[str, Any]
+    """Return the pack's metadata doc: stoker.json if present, else pack.yaml.
+
+    stoker.json is exact JSON (no subset caveats) and is preferred; pack.yaml is
+    parsed with the flat two-level scalar subset parser. Returns ``{}`` when the
+    pack ships neither.
+    """
+    json_path = os.path.join(pack_dir, "stoker.json")
+    if os.path.isfile(json_path):
+        try:
+            with open(json_path, "r", encoding="utf-8") as fh:
+                doc = json.load(fh)
+        except (ValueError, OSError) as exc:
+            raise BundleError("stoker.json unreadable in %r: %s" % (pack_dir, exc))
+        return doc if isinstance(doc, dict) else {}
+    yaml_path = os.path.join(pack_dir, "pack.yaml")
+    if os.path.isfile(yaml_path):
+        with open(yaml_path, "r", encoding="utf-8") as fh:
+            return parse_pack_yaml(fh.read())
+    return {}
+
+
+def resolve_replay_config(pack_dir):
+    # type: (str) -> Optional[ReplayConfig]
+    """Resolve the pack's ``replay:`` section into a :class:`ReplayConfig`.
+
+    Shape (stoker.json preferred over pack.yaml)::
+
+        replay:
+          dataset: samples/capture.log        # or dataset/capture.log.gz
+          mode: cadence                       # rate (default) | cadence
+          time_multiple: 1.0                  # cadence gap scale
+          ts_regex: "..."                     # optional cadence hints
+          ts_strptime: "%Y-%m-%dT%H:%M:%S"
+          ts_field: _time
+
+    Returns ``None`` when the pack declares no ``replay`` section (an
+    eventgen-only pack). ``dataset`` is required when a ``replay`` section is
+    present and is absolutised against ``pack_dir`` (a relative path is resolved
+    inside the pack; an absolute path that escapes the pack is rejected so a
+    crafted pack cannot read arbitrary host files).
+    """
+    doc = _load_pack_doc(pack_dir)
+    section = doc.get("replay") if isinstance(doc, dict) else None
+    if not isinstance(section, dict):
+        return None
+
+    dataset_rel = section.get("dataset")
+    if not dataset_rel or not isinstance(dataset_rel, str):
+        raise BundleError(
+            "pack %r declares a replay section without a 'dataset' path" % pack_dir)
+
+    pack_abs = os.path.abspath(pack_dir)
+    if os.path.isabs(dataset_rel):
+        dataset_abs = os.path.realpath(dataset_rel)
+    else:
+        dataset_abs = os.path.realpath(os.path.join(pack_abs, dataset_rel))
+    pack_real = os.path.realpath(pack_abs)
+    if dataset_abs != pack_real and not dataset_abs.startswith(pack_real + os.sep):
+        raise BundleError(
+            "replay dataset %r escapes the pack root (rejected)" % dataset_rel)
+    if not os.path.isfile(dataset_abs):
+        raise BundleError(
+            "replay dataset not found in pack %r: %r" % (pack_dir, dataset_rel))
+
+    mode = str(section.get("mode") or "rate").lower()
+    if mode not in _REPLAY_MODES:
+        raise BundleError(
+            "replay mode must be one of %s, got %r"
+            % (", ".join(_REPLAY_MODES), mode))
+
+    time_multiple = 1.0
+    tm_raw = section.get("time_multiple")
+    if tm_raw is not None:
+        try:
+            time_multiple = float(tm_raw)
+        except (TypeError, ValueError):
+            raise BundleError("replay time_multiple must be a number, got %r" % tm_raw)
+        if time_multiple < 0:
+            raise BundleError("replay time_multiple must be >= 0, got %s" % time_multiple)
+
+    def _opt_str(key):
+        # type: (str) -> Optional[str]
+        val = section.get(key)
+        if val is None:
+            return None
+        return str(val)
+
+    return ReplayConfig(
+        dataset=dataset_abs,
+        mode=mode,
+        time_multiple=time_multiple,
+        ts_field=_opt_str("ts_field"),
+        ts_regex=_opt_str("ts_regex"),
+        ts_strptime=_opt_str("ts_strptime"),
+    )
 
 
 def _load_estimates(pack_dir):

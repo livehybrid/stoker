@@ -89,6 +89,26 @@ AUTO_ABORT_LOST_FRACTION = 0.5  # >50% leases lost ...
 AUTO_ABORT_LOST_S = 300.0       # ... sustained for 5 min -> fail
 JWT_REFRESH_FRACTION = 0.2      # roll the JWT within 20% of expiry
 
+# Engines the control plane forces to a single worker: replay (rawreplay/Piston)
+# reproduces a recorded dataset and cannot be rate-sharded across a fleet, so the
+# control plane guarantees workers = 1 (mirroring the eventgen ``mode = replay``
+# single-worker rule enforced at submit).
+SINGLE_WORKER_ENGINES = frozenset(("rawreplay",))
+
+
+def effective_workers(engine, workers):
+    # type: (Optional[str], int) -> int
+    """Clamp ``workers`` to 1 for a single-worker engine (rawreplay); else pass.
+
+    A replay run cannot be rate-sharded (it replays one dataset), so the control
+    plane forces exactly one worker regardless of the spec's requested count. The
+    submit route rejects a multi-worker replay spec up front; this is the
+    belt-and-braces invariant at provision time.
+    """
+    if (engine or "").strip() in SINGLE_WORKER_ENGINES:
+        return 1
+    return max(1, int(workers))
+
 
 # --------------------------------------------------------------------------- #
 # Provisioning and the operator-driven transitions (STUBBED — Core fills).
@@ -132,8 +152,18 @@ def provision_run(db, spec, driver, overrides=None, started_by=None, settings=No
     if target is None:
         raise ValueError("spec %s references unknown target %s" % (spec.id, spec.target_id))
 
+    # 0. Replay is a single-worker engine: force workers = 1 for rawreplay so a
+    #    replay run is never rate-sharded (mirrors the submit-time replay guard).
+    #    The snapshot's worker count is corrected too so every claim/slice agrees.
+    workers = effective_workers(spec.engine, spec.workers)
+    if workers != spec.workers:
+        log.info("run for spec %s engine=%s: forcing workers %s -> 1 (replay is "
+                 "single-worker)", spec.id, spec.engine, spec.workers)
+
     # 1. Freeze the non-secret snapshot (target embedded by id + non-secret fields).
     snapshot = build_spec_snapshot(spec, target, overrides=overrides)
+    if workers != spec.workers:
+        snapshot["workers"] = workers
 
     # 2. Resolve the bundle (build from the pack dir if absent).
     bundle = _resolve_bundle(db, spec, settings=settings)
@@ -152,14 +182,14 @@ def provision_run(db, spec, driver, overrides=None, started_by=None, settings=No
     db.add(run)
     db.flush()  # assign run.id
     append_event(db, run, "created",
-                 {"spec_id": spec.id, "workers": spec.workers,
+                 {"spec_id": spec.id, "workers": workers,
                   "fleet": spec.fleet, "bundle": bundle.digest}, actor="operator")
 
     # preparing: snapshot frozen, bundle resolved.
     transition_run(db, run, STATE_PREPARING, actor="operator")
 
     # 4. Apportion shares across the slots and seed free leases.
-    shares = build_share_list(spec.rate_mode, spec.rate_value, spec.workers)
+    shares = build_share_list(spec.rate_mode, spec.rate_value, workers)
     seed_leases(db, run, shares)
     db.flush()
 
@@ -167,9 +197,10 @@ def provision_run(db, spec, driver, overrides=None, started_by=None, settings=No
     hec_token = None
     if target.token_encrypted:
         hec_token = crypto.decrypt(target.token_encrypted, settings=settings)
-    run_snapshot = build_run_snapshot(run, spec, target, hec_token, settings=settings)
+    run_snapshot = build_run_snapshot(run, spec, target, hec_token,
+                                      settings=settings, workers=workers)
     try:
-        ref = driver.create(run_snapshot, spec.workers)
+        ref = driver.create(run_snapshot, workers)
     except Exception as exc:
         # A failed launch fails the run loudly (never a silent hang).
         log.error("run %s provision failed at driver.create: %s", run.id, exc)
@@ -278,6 +309,14 @@ def scale_run(db, run, driver, workers):
         raise ValueError("workers must be >= 1")
     if run.state in TERMINAL_STATES:
         return run
+
+    # Replay (rawreplay/Piston) is single-worker and cannot be rate-sharded:
+    # clamp any scale to 1 so a live replay run can never be duplicated into N
+    # identical streams. Mirrors the submit-time 409 and the provision-time
+    # effective_workers clamp; the route rejects workers>1 up front with a clear
+    # 409, so this is the belt-and-braces invariant for any other caller.
+    engine = (run.spec_snapshot_json or {}).get("engine")
+    workers = effective_workers(engine, workers)
 
     ref = driver_ref_of(run)
     if ref is not None:
@@ -1672,14 +1711,20 @@ def build_spec_snapshot(spec, target, overrides=None):
     }
 
 
-def build_run_snapshot(run, spec, target, hec_token, settings=None):
-    # type: (Run, Spec, Target, Optional[str], Optional[Settings]) -> RunSnapshot
+def build_run_snapshot(run, spec, target, hec_token, settings=None, workers=None):
+    # type: (Run, Spec, Target, Optional[str], Optional[Settings], Optional[int]) -> RunSnapshot
     """Build the :class:`RunSnapshot` a driver needs to launch the fleet.
 
     Projects the worker environment: ``STOKER_RUN_ID``, ``STOKER_CONTROL_URL``
-    (= ``PUBLIC_BASE_URL``), ``STOKER_RUN_JWT``, ``STOKER_TOTAL_WORKERS`` and the
-    HEC token as ``STOKER_HEC_TOKEN`` (the driver, not the slice, carries the
-    secret). ``labels`` always includes ``stoker.run=<id>``.
+    (= ``PUBLIC_BASE_URL``), ``STOKER_RUN_JWT``, ``STOKER_TOTAL_WORKERS``, the HEC
+    token as ``STOKER_HEC_TOKEN`` (the driver, not the slice, carries the secret)
+    and, for a non-default engine (rawreplay/Piston), ``STOKER_ENGINE`` so the
+    worker launches the right engine. ``labels`` always includes
+    ``stoker.run=<id>``.
+
+    ``workers`` overrides the projected ``STOKER_TOTAL_WORKERS`` (the provisioner
+    passes the single-worker-clamped count for a replay run); it defaults to the
+    spec's own worker count.
 
     ``hec_token`` is the decrypted target token (the caller decrypts once); it is
     placed only in the env projection, never logged.
@@ -1692,13 +1737,21 @@ def build_run_snapshot(run, spec, target, hec_token, settings=None):
     """
     if settings is None:
         settings = get_settings()
+    if workers is None:
+        workers = spec.workers
     jwt_token = crypto.mint_run_jwt(run.id, run.jwt_kid or crypto.new_kid(), settings=settings)
     env = {
         "STOKER_RUN_ID": str(run.id),
         "STOKER_CONTROL_URL": settings.public_base_url,
         "STOKER_RUN_JWT": jwt_token,
-        "STOKER_TOTAL_WORKERS": str(spec.workers),
+        "STOKER_TOTAL_WORKERS": str(workers),
     }
+    # Select the worker engine. eventgen is the default (the worker assumes it
+    # when STOKER_ENGINE is unset), so only project the var for a non-default
+    # engine (rawreplay/Piston) to keep the eventgen env byte-for-byte unchanged.
+    engine = (spec.engine or "eventgen").strip()
+    if engine and engine != "eventgen":
+        env["STOKER_ENGINE"] = engine
     if hec_token:
         env["STOKER_HEC_TOKEN"] = hec_token
     driver_opts = dict(spec.driver_opts_json or {})
@@ -1903,6 +1956,8 @@ __all__ = [
     "RELEASE_DELAY_S", "PROVISION_TIMEOUT_S", "LEASE_LAPSE_S", "BOOT_GRACE_S",
     "STOP_GRACE_S", "AUTO_ABORT_LOST_FRACTION", "AUTO_ABORT_LOST_S",
     "JWT_REFRESH_FRACTION",
+    # engine policy
+    "SINGLE_WORKER_ENGINES", "effective_workers",
     # domain (stubbed)
     "provision_run", "stop_run", "scale_run", "rescale_run", "supervisor_tick",
     "reconcile_on_boot", "claim_lease", "mark_ready", "record_heartbeat",

@@ -590,14 +590,36 @@ def run_spec(spec_id: int, body: RunLaunch, db: Session = Depends(get_db)):
             detail={"error": "pack_lint_failed", "errors": lint.errors},
         )
 
-    # 2. replay-single-worker: a pack containing a ``mode = replay`` stanza is
-    #    engine-paced and the control plane guarantees workers = 1 for it.
-    if _pack_has_replay(pack.source_path) and spec.workers != 1:
+    # 1b. Engine/pack consistency: a rawreplay spec needs a rawreplay pack (its
+    #     bundle must carry the replay config the worker reads); running the
+    #     rawreplay engine against a plain eventgen pack would fail at the worker.
+    #     An eventgen spec against a rawreplay pack that ships an eventgen-fallback
+    #     conf is allowed (the pack lints as eventgen-runnable too).
+    if (spec.engine or "").strip() == bundles.RAWREPLAY_ENGINE \
+            and not bundles.is_rawreplay_pack(pack.source_path):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "engine_pack_mismatch",
+                "detail": (
+                    "spec engine is 'rawreplay' but pack %s is not a rawreplay "
+                    "pack (no replay config); use a pack that declares "
+                    "engine: rawreplay with a dataset" % pack.id),
+            },
+        )
+
+    # 2. replay-single-worker: replay is engine-paced and the control plane
+    #    guarantees workers = 1. This covers an eventgen pack with a
+    #    ``mode = replay`` stanza AND a rawreplay (Piston) spec/pack, which
+    #    replays a whole dataset and cannot be rate-sharded.
+    if _is_replay_run(spec, pack) and spec.workers != 1:
         raise HTTPException(
             status_code=409,
             detail={
                 "error": "replay_single_worker",
-                "detail": "this pack contains a replay stanza; replay runs must use exactly 1 worker",
+                "detail": (
+                    "this is a replay run (rawreplay engine or a replay stanza); "
+                    "replay runs must use exactly 1 worker"),
                 "workers": spec.workers,
             },
         )
@@ -774,6 +796,22 @@ def scale_run_endpoint(run_id: int, body: ScaleRequest, db: Session = Depends(ge
     if body.workers < 1:
         raise HTTPException(status_code=422, detail="workers must be >= 1")
     run = _load_active_run(db, run_id)
+    # Replay (rawreplay/Piston) is single-worker: scaling would duplicate the
+    # dataset stream N times, so reject a grow with the same 409 the submit guard
+    # uses (lifecycle.scale_run also clamps defensively).
+    engine = (run.spec_snapshot_json or {}).get("engine")
+    if lifecycle.effective_workers(engine, body.workers) != body.workers:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "replay_single_worker",
+                "detail": (
+                    "this is a replay run (%s engine); replay replays a fixed "
+                    "dataset on exactly 1 worker and cannot be scaled"
+                    % (engine or "rawreplay")),
+                "workers": body.workers,
+            },
+        )
     driver = _run_driver(db, run)
     try:
         run = lifecycle.scale_run(db, run, driver, body.workers)
@@ -904,8 +942,13 @@ def _per_worker_share(rate_mode, rate_value, workers):
 
 def _estimate(spec, bytes_per_event):
     # type: (Spec, Optional[float]) -> SpecEstimate
-    """Build the estimate view for a spec (per-worker share + ceiling headroom)."""
-    workers = max(1, int(spec.workers))
+    """Build the estimate view for a spec (per-worker share + ceiling headroom).
+
+    For a single-worker engine (rawreplay) the worker count is clamped to 1 so
+    the estimate reflects what the run will actually do (the control plane forces
+    workers = 1 for a replay run regardless of the spec's requested count).
+    """
+    workers = lifecycle.effective_workers(spec.engine, max(1, int(spec.workers)))
     per_worker = _per_worker_share(spec.rate_mode, spec.rate_value, workers)
     check = ceilings.check_slice(
         spec.rate_mode, per_worker, bytes_per_event=bytes_per_event, engine=spec.engine)
@@ -1045,6 +1088,25 @@ def _snapshot_pack_id(run):
     if spec is not None:
         return spec.pack_id
     return None
+
+
+def _is_replay_run(spec, pack):
+    # type: (Spec, Pack) -> bool
+    """True when a run is a replay run (single-worker), for the submit guard.
+
+    Three triggers, any one of which forces a replay run:
+
+    * the spec's engine is ``rawreplay`` (Piston);
+    * the pack is a rawreplay pack (``pack.yaml`` engine/``replay:`` section);
+    * the pack's eventgen.conf declares a ``mode = replay`` stanza.
+
+    All are engine-paced and the control plane guarantees workers = 1 for them.
+    """
+    if (spec.engine or "").strip() == bundles.RAWREPLAY_ENGINE:
+        return True
+    if bundles.is_rawreplay_pack(pack.source_path):
+        return True
+    return _pack_has_replay(pack.source_path)
 
 
 def _pack_has_replay(pack_dir):

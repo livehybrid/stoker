@@ -38,7 +38,7 @@ Standalone mode (Phase 0 exit test, no control plane): `STOKER_STANDALONE=1` plu
 | `STOKER_RATE_VALUE` | number (EPS or GB/day; ignored for count_interval) |
 | `STOKER_DURATION_S` | bounded run length; empty = unbounded |
 | `STOKER_SLOT` / `STOKER_TOTAL_WORKERS` | default 0 / 1 |
-| `STOKER_ENGINE` | `eventgen` (only engine in Phase 0) |
+| `STOKER_ENGINE` | `eventgen` (default) or `rawreplay` (Piston raw-replay) |
 
 In standalone mode the agent synthesises a spec slice identical to a claim response, sets `T0 = now + 2 s`, logs heartbeat lines to stdout instead of POSTing, and ignores fencing/dead-man (there is no control plane to lose). Everything else (pacing, HEC, drain, SIGTERM) behaves identically.
 
@@ -94,6 +94,30 @@ Input: the bundle's `default/eventgen.conf` (RawConfigParser, `optionxform = str
 4. `count_interval` mode: `count` split across workers by largest-remainder; `interval` untouched; everything else untouched.
 5. `hourOfDayRate` / `dayOfWeekRate` (and the other `*Rate` shaping maps: `minuteOfHourRate`, `dayOfMonthRate`, `monthOfYearRate`) are preserved verbatim in `per_day_gb` and `count_interval` modes. In `eps` mode they are stripped from every non-replay stanza (and the global/default sections): `eps` is a flat instantaneous rate, and a diurnal map makes the engine under-produce during low-rate hours, starving the flat token bucket and breaching ±1%. Shaped volume belongs in `per_day_gb` mode. Replay stanzas are never touched (rule 6).
 6. Never touch `mode = replay` stanzas' pacing keys (`timeMultiple` etc.); replay is engine-paced and the control plane guarantees workers = 1.
+
+## rawreplay (Piston) engine
+
+Piston is a second worker engine that replays a recorded dataset **byte-for-byte** (e.g. a `splunk/security_content` attack_data capture): the exact recorded lines, re-timestamped to now. Selected by `STOKER_ENGINE=rawreplay` (the driver sets it; the slice's `engine` is `rawreplay`). The agent's HEC delivery, pacing token bucket, metadata stamping, drain and control-plane conversation are all unchanged; only the event source differs.
+
+Agent flow for `engine == "rawreplay"`: skip the eventgen conf-rewrite entirely and launch the rawreplay engine instead. The token bucket still paces (`eps` / `per_day_gb` → gated); metadata/HEC/control-plane are identical to eventgen.
+
+**Bundle shape.** A rawreplay pack declares `engine: rawreplay` and a `replay:` section in `pack.yaml` and needs **no** `default/eventgen.conf`. The dataset is either a file under the pack (`replay.dataset`) or an https `replay.dataset_url` the control plane fetches at build time (size-capped, sha-verifiable via `replay.dataset_sha256`) and embeds in the bundle. The built bundle's `stoker.json` records the replay config the engine reads:
+
+```json
+{"name":"attack-replay","engine":"rawreplay",
+ "estimates":{"bytes_per_event":1591,"per_day_gb":0.05},
+ "replay":{"dataset":"dataset/events.log","mode":"rate","time_multiple":1.0,
+           "sourcetype":"XmlWinEventLog","source":null}}
+```
+
+`replay.dataset` is the dataset's path **inside the bundle** (a fetched `dataset_url` lands at `dataset/replay.dat`). `sourcetype`/`source` are the pack `defaults` (the agent stamps metadata from the slice, as for eventgen). A pack may also ship an eventgen-fallback `mode = replay` conf, but Piston reads only `stoker.json`.
+
+**Pacing.**
+
+- **rate mode** (`replay.mode: rate`; run `rate_mode` = `eps` / `per_day_gb`): the engine emits events HOT (as fast as the socket accepts; the blocking write backpressures) with `time = null`, so the agent stamps *now* and its token bucket delivers at the exact rate. The dataset **loops** to fill the run duration.
+- **cadence mode** (`replay.mode: cadence`; run `rate_mode` = `count_interval`): the engine self-paces, reproducing the recorded inter-event gaps × `time_multiple` and setting `time = now + offset` (engine-paced, not gated), matching the existing "replay is engine-paced, workers = 1" rule.
+
+Replay cannot be rate-sharded (it replays one dataset), so the control plane forces **workers = 1** for a rawreplay run (a multi-worker rawreplay spec is rejected `409 replay_single_worker` at submit).
 
 ## Unix socket protocol (plugin → agent)
 

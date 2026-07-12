@@ -23,6 +23,11 @@ _ALLOWED_URL_SCHEMES = ("https://", "ssh://", "git://", "file://")
 _SCP_URL_RE = re.compile(r"^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+:")
 _SAFE_REF_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 
+# Engines the control plane can register/run on a spec. Kept in step with
+# ``server.engines.known.ENGINES`` (imported lazily in the validator to avoid a
+# heavy import at module load).
+from .engines.known import ENGINES as _KNOWN_ENGINES  # noqa: E402
+
 # --------------------------------------------------------------------------- #
 # Shared config: allow ORM attribute reads for response models.
 # --------------------------------------------------------------------------- #
@@ -219,7 +224,7 @@ class SpecCreate(BaseModel):
     pack_id: int
     target_id: int
     ref: str = "local"
-    engine: str = "eventgen"
+    engine: str = "eventgen"  # eventgen | rawreplay
     overrides: Optional[Dict[str, str]] = None
     rate_mode: str = "eps"  # eps | per_day_gb | count_interval
     rate_value: Optional[float] = None
@@ -229,6 +234,16 @@ class SpecCreate(BaseModel):
     fleet: str = "swarm-local"
     strict_release: bool = False
     driver_opts: Optional[Dict[str, Any]] = None
+
+    @field_validator("engine")
+    @classmethod
+    def _validate_engine(cls, v):
+        # type: (str) -> str
+        v = (v or "eventgen").strip() or "eventgen"
+        if v not in _KNOWN_ENGINES:
+            raise ValueError(
+                "engine must be one of %s" % ", ".join(_KNOWN_ENGINES))
+        return v
 
 
 class SpecUpdate(BaseModel):
@@ -248,6 +263,18 @@ class SpecUpdate(BaseModel):
     fleet: Optional[str] = None
     strict_release: Optional[bool] = None
     driver_opts: Optional[Dict[str, Any]] = None
+
+    @field_validator("engine")
+    @classmethod
+    def _validate_engine(cls, v):
+        # type: (Optional[str]) -> Optional[str]
+        if v is None:
+            return v
+        v = v.strip()
+        if v not in _KNOWN_ENGINES:
+            raise ValueError(
+                "engine must be one of %s" % ", ".join(_KNOWN_ENGINES))
+        return v
 
 
 class SpecOut(BaseModel):

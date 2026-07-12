@@ -25,6 +25,8 @@ STOP_GRACE_S = 10.0
 _HERE = os.path.dirname(os.path.abspath(__file__))
 # worker/stoker_agent/ -> worker/engines/eventgen
 DEFAULT_ENGINE_ROOT = os.path.join(os.path.dirname(_HERE), "engines", "eventgen")
+# worker/stoker_agent/ -> worker/engines/rawreplay (the PISTON engine package root)
+DEFAULT_RAWREPLAY_ROOT = os.path.join(os.path.dirname(_HERE), "engines", "rawreplay")
 
 
 class EngineError(Exception):
@@ -44,6 +46,21 @@ def build_command(conf_path, env=None):
             return [conf_path if p == "{conf}" else p for p in parts]
         return parts + [conf_path]
     return [sys.executable, "-m", "splunk_eventgen", "generate", conf_path]
+
+
+def build_rawreplay_command(env=None):
+    # type: (Optional[Dict[str, str]]) -> List[str]
+    """PISTON invocation: ``python -m stoker_rawreplay``.
+
+    Takes no conf argument (the rawreplay engine reads its whole configuration
+    from the environment: STOKER_OUTPUT_SOCKET + the STOKER_RAWREPLAY_* vars).
+    STOKER_RAWREPLAY_CMD (shell-quoted) lets ENGINE-NOTES supply an alternate
+    launcher without a code change, mirroring STOKER_ENGINE_CMD for eventgen."""
+    env = env if env is not None else os.environ
+    override = env.get("STOKER_RAWREPLAY_CMD")
+    if override:
+        return shlex.split(override)
+    return [sys.executable, "-m", "stoker_rawreplay"]
 
 
 class EngineRunner(object):
@@ -171,3 +188,70 @@ class EngineRunner(object):
         # type: () -> List[str]
         with self._ring_lock:
             return list(self._ring)
+
+
+class RawReplayRunner(EngineRunner):
+    """Subprocess manager for the PISTON raw-replay engine.
+
+    Reuses every bit of :class:`EngineRunner` (Popen, the daemon log-reader ring
+    buffer, SIGTERM->grace->SIGKILL stop, is_alive/returncode/log_tail) and only
+    changes what makes an engine an engine: the command (``python -m
+    stoker_rawreplay``, no conf argument), the PYTHONPATH root (the rawreplay
+    package tree, not the eventgen tree) and the environment (the STOKER_RAWREPLAY_*
+    contract instead of eventgen's log dir).
+
+    Construction takes the dataset path + mode + time_multiple (and optional
+    cadence timestamp hints) rather than a conf path. ``cwd`` is rooted at the
+    pack like the eventgen runner (harmless for rawreplay, which uses an absolute
+    dataset path, but kept for symmetry and any relative pack references).
+    """
+
+    def __init__(self, socket_path, dataset, mode, time_multiple=1.0,
+                 ts_field=None, ts_regex=None, ts_strptime=None,
+                 fallback_gap_s=None, engine_root=None, extra_env=None,
+                 ring_size=DEFAULT_RING_SIZE, cwd=None, log_dir=None):
+        # type: (str, str, str, float, Optional[str], Optional[str], Optional[str], Optional[float], Optional[str], Optional[Dict[str, str]], int, Optional[str], Optional[str]) -> None
+        # The base uses conf_path only to derive a default log directory; pass the
+        # explicit log_dir (or the dataset's dir) so that dirname() is valid.
+        conf_stand_in = log_dir or os.path.dirname(dataset) or "."
+        EngineRunner.__init__(
+            self, conf_stand_in, socket_path,
+            engine_root=engine_root or DEFAULT_RAWREPLAY_ROOT,
+            extra_env=extra_env, ring_size=ring_size, cwd=cwd)
+        self._dataset = dataset
+        self._mode = mode
+        self._time_multiple = time_multiple
+        self._ts_field = ts_field
+        self._ts_regex = ts_regex
+        self._ts_strptime = ts_strptime
+        self._fallback_gap_s = fallback_gap_s
+
+    def _command(self):
+        # type: () -> List[str]
+        return build_rawreplay_command()
+
+    def _build_env(self):
+        # type: () -> Dict[str, str]
+        env = dict(os.environ)
+        env.update(self._extra_env)
+        env["STOKER_OUTPUT_SOCKET"] = self._socket_path
+        # PYTHONPATH: prepend the rawreplay package root so `-m stoker_rawreplay`
+        # resolves (same mechanism as the eventgen runner prepends its tree).
+        existing = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = self._engine_root + (
+            os.pathsep + existing if existing else "")
+        # The rawreplay contract (see stoker_rawreplay.engine.load_config and
+        # docs/WORKER-CONTRACT.md). The dataset path is absolute (bundle.py
+        # absolutises it and rejects escapes); never a secret.
+        env["STOKER_RAWREPLAY_DATASET"] = self._dataset
+        env["STOKER_RAWREPLAY_MODE"] = self._mode
+        env["STOKER_RAWREPLAY_TIME_MULTIPLE"] = repr(float(self._time_multiple))
+        if self._ts_field:
+            env["STOKER_RAWREPLAY_TS_FIELD"] = self._ts_field
+        if self._ts_regex:
+            env["STOKER_RAWREPLAY_TS_REGEX"] = self._ts_regex
+        if self._ts_strptime:
+            env["STOKER_RAWREPLAY_TS_STRPTIME"] = self._ts_strptime
+        if self._fallback_gap_s is not None:
+            env["STOKER_RAWREPLAY_FALLBACK_GAP_S"] = repr(float(self._fallback_gap_s))
+        return env
