@@ -44,6 +44,19 @@ services:
       - STOKER_AUTH_HEADER=${STOKER_AUTH_HEADER:-X-Forwarded-User}
       - STOKER_PROXY_DEFAULT_ROLE=${STOKER_PROXY_DEFAULT_ROLE:-operator}
       - STOKER_SESSION_TTL=${STOKER_SESSION_TTL:-43200}
+      # Advanced overrides — all optional; server/config.py holds the defaults, so
+      # an unset var (empty here) just uses that default. See .env.example.
+      - STOKER_JWT_TTL_S=${STOKER_JWT_TTL_S:-}
+      - METRIC_ROLLUP_AFTER_H=${METRIC_ROLLUP_AFTER_H:-}
+      - METRIC_PRUNE_AFTER_D=${METRIC_PRUNE_AFTER_D:-}
+      - METRIC_ROLLUP_BUCKET_S=${METRIC_ROLLUP_BUCKET_S:-}
+      - METRIC_MAINTENANCE_INTERVAL_S=${METRIC_MAINTENANCE_INTERVAL_S:-}
+      - METRIC_DELETE_CHUNK=${METRIC_DELETE_CHUNK:-}
+      - DOGFOOD_METRICS_INTERVAL_S=${DOGFOOD_METRICS_INTERVAL_S:-}
+      - DOGFOOD_GZIP=${DOGFOOD_GZIP:-}
+      # rawreplay (Piston) dataset_url fetch caps (note: no STOKER_ prefix).
+      - RAWREPLAY_MAX_DATASET_BYTES=${RAWREPLAY_MAX_DATASET_BYTES:-}
+      - RAWREPLAY_FETCH_TIMEOUT_S=${RAWREPLAY_FETCH_TIMEOUT_S:-}
     stop_grace_period: 45s
     deploy:
       replicas: 1
@@ -52,10 +65,10 @@ services:
       placement: {constraints: ["node.hostname == hpelite"]}
       restart_policy: {condition: on-failure}
       labels:
-        # Router split per the design. Router 1 (UI + operator/admin API) is now
+        # Router split per the design. Router 1 (UI + operator/admin API) is
         # protected by Stoker's own APP-LEVEL auth (local users + trusted-proxy
-        # SSO; see the STOKER_* env above), so the Traefik basic-auth below is an
-        # optional belt-and-braces stopgap you can drop. Router 2 (/api/agent +
+        # SSO; see the STOKER_* env above) — the old Traefik basic-auth stopgap
+        # has been removed, so there is no basic-auth here. Router 2 (/api/agent +
         # /api/hooks) bypasses browser auth at higher priority: workers and GitHub
         # cannot log in, and those paths are protected by the per-run JWT and the
         # webhook HMAC (Stoker also exempts them from its own session guard).

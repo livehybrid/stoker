@@ -51,6 +51,17 @@ Then register the k3s context as a Stoker fleet (`fleets.config_json`:
 > the policy is documentary. The design accepts LAN-reachable swarm workers as
 > the parity posture (DESIGN.md section 14).
 
+> Scope: `stoker-workers-egress-only` bounds **worker pods** (it selects
+> `stoker.run` Exists), not the control plane. The control plane runs on-prem
+> (the swarm stack), outside this cluster and this policy, so it fetches a Piston
+> `dataset_url` itself. That fetch is guarded in the app, not by any
+> NetworkPolicy: `server/bundles.py` (`_assert_fetchable_url` /
+> `_fetch_dataset_url`) forces `https`, refuses non-public / loopback / link-local
+> hosts, re-validates the host on **every** redirect hop (auto-redirects off, so a
+> public URL cannot 30x into an internal one), and caps the download size
+> (`RAWREPLAY_MAX_DATASET_BYTES`) and timeout. Keep those guards in mind when
+> reviewing the SSRF posture — the worker policy here does not cover it.
+
 ## Consistency with the EKS Terraform
 
 `rbac.yaml` and `networkpolicy.yaml` are the k3s twins of the RBAC/NetworkPolicy
@@ -61,8 +72,18 @@ in `infra/aws/stoker-eks/rbac.tf`. Both bind the same least-privilege Role to:
 - the **ServiceAccount `stoker-driver`** — for k3s / a control plane that
   authenticates as the SA directly.
 
-Keep the verb set (`jobs`/`pods`/`pods/log`/`secrets`) identical across the two
-when it changes.
+The verb set is the exact set `server/drivers/k8s.py` calls. `rbac.yaml` grants:
+
+- jobs (`batch`): `create`, `get`, `list`, `watch`, `patch`, `delete`
+- secrets: `create`, `get`, `list`, `watch`, `patch`, `delete`
+- pods: `get`, `list`, `watch`
+- pods/log: `get`
+
+`infra/aws/stoker-eks/rbac.tf` is a small deliberate superset of this: it also
+allows `update` on jobs and secrets (patch-or-update parity), `delete` on pods
+(reap) and `list` on pods/log. Both stay least-privilege (one namespace, no
+cluster-scoped rights, no wildcards); keep them in step when the driver's calls
+change.
 
 ## What the driver creates per run (not applied here)
 

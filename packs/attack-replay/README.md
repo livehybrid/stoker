@@ -56,8 +56,16 @@ defaults:
   sourcetype: XmlWinEventLog    # a realistic Sysmon/WinEventLog sourcetype
 ```
 
-`dataset_url` is documentation only: it records where a real capture came from.
-Piston reads events from the local `replay.dataset` file inside the bundle.
+Here `dataset_url` is **provenance only**: because a local `replay.dataset` is
+present, the control plane keeps the on-disk file and never fetches the URL (it
+just records where the capture came from). A `dataset_url` becomes an *actionable*
+https fetch source only when a pack ships **no** local `dataset` — then the
+control plane downloads it at build time (https-only, public-host, size-capped,
+sha-pinned) and embeds the bytes in the bundle. Piston always reads events from
+the dataset inside the bundle, never from the network.
+
+For the full pack-format reference (both engines, every field, the git-sync and
+`dataset_url` safety rules) see [`docs/PACKS.md`](../../docs/PACKS.md).
 
 ## Pointing this pack at a real attack_data dataset
 

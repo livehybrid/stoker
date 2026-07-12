@@ -36,12 +36,18 @@ SECRET_NAME = "stoker_master_key"
 ENV_KEYS = [
     "STOKER_DB_PASSWORD", "STOKER_PUBLIC_BASE_URL", "STOKER_WORKER_IMAGE",
     "PORTAINER_HOST", "PORTAINER_TOKEN", "DOGFOOD_HEC_URL", "DOGFOOD_HEC_TOKEN",
-    "STOKER_BASICAUTH",   # Traefik basic-auth users string for the UI/ops router
     # App-level auth (see .env.example). All optional; the stack.yml supplies
-    # ${VAR:-default} fallbacks, so an unset var just uses its default.
+    # ${VAR:-default} fallbacks, so an unset var just uses its default. (Traefik
+    # basic-auth was removed: Stoker's own app-level auth guards the UI/ops API.)
     "STOKER_ADMIN_USER", "STOKER_ADMIN_PASSWORD",
     "STOKER_TRUSTED_PROXIES", "STOKER_AUTH_HEADER", "STOKER_PROXY_DEFAULT_ROLE",
     "STOKER_SESSION_TTL",
+    # Advanced overrides (all optional; server/config.py holds the defaults).
+    "STOKER_JWT_TTL_S",
+    "METRIC_ROLLUP_AFTER_H", "METRIC_PRUNE_AFTER_D", "METRIC_ROLLUP_BUCKET_S",
+    "METRIC_MAINTENANCE_INTERVAL_S", "METRIC_DELETE_CHUNK",
+    "DOGFOOD_METRICS_INTERVAL_S", "DOGFOOD_GZIP",
+    "RAWREPLAY_MAX_DATASET_BYTES", "RAWREPLAY_FETCH_TIMEOUT_S",
 ]
 DEFAULTS = {
     "STOKER_WORKER_IMAGE": "ghcr.io/livehybrid/stoker-worker:latest",

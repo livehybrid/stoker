@@ -24,7 +24,7 @@ serves local k3s. This is the AWS half of DESIGN.md section 11.
 | Worker SG | `aws_security_group.worker_egress_only`: egress rule only, **no ingress rule at all** | "security groups blocking all ingress: workers are egress-only cattle" |
 | No NAT | VPC has `enable_nat_gateway = false` | "keeps NAT Gateway data-processing out of the data path" |
 | Namespace | `stoker` | "a namespace `stoker`" |
-| RBAC | `Role` limited to `jobs`/`pods`/`pods/log`/`secrets` (create/list/watch/delete etc.), bound to group `stoker:control-plane` | "a namespaced Role limited to ... create, list, watch, delete (NOT cluster-admin)" |
+| RBAC | namespaced `Role` bound to group `stoker:control-plane` (and the `stoker-driver` SA): jobs + secrets `create/get/list/watch/patch/update/delete`, pods `get/list/watch/delete`, pods/log `get/list` — the exact verbs the `K8sDriver` calls, NOT cluster-admin | "a namespaced Role limited to ... create, list, watch, delete (NOT cluster-admin)" |
 | NetworkPolicy | `stoker-workers-egress-only` (deny ingress; egress DNS + 443/8088) | "a NetworkPolicy makes workers egress-only" |
 | Control-plane IAM | `aws_iam_user.control_plane` with **only** `eks:DescribeCluster` (on this cluster ARN), mapped via `aws_eks_access_entry` to `stoker:control-plane` | "a dedicated IAM principal ... whose only permission is eks:DescribeCluster, mapped via an EKS access entry to the namespaced Role" |
 | Cost | `aws_budgets_budget` + SNS email (`budget_alert_email`) | "a NON-OPTIONAL AWS Budgets alarm (SNS to an email var)" |
