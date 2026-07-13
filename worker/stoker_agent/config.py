@@ -15,9 +15,11 @@ from typing import Mapping, Optional
 
 RATE_MODES = ("eps", "per_day_gb", "count_interval")
 # eventgen templates events from samples; rawreplay (Piston) replays a recorded
-# dataset byte-for-byte. Both speak the same output-socket protocol; the agent's
-# HEC/pacing/control-plane wiring is engine-agnostic. STOKER_ENGINE selects.
-ENGINES = ("eventgen", "rawreplay")
+# dataset byte-for-byte; metrics generates synthetic Splunk metric data points
+# (event:"metric" + fields) over a shaped time series. All speak the same
+# output-socket protocol; the agent's HEC/pacing/control-plane wiring is
+# engine-agnostic. STOKER_ENGINE selects.
+ENGINES = ("eventgen", "rawreplay", "metrics")
 
 DEFAULT_OUTPUT_SOCKET = "/tmp/stoker-output.sock"
 DEFAULT_HEARTBEAT_S = 5.0

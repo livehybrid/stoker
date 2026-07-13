@@ -27,6 +27,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_ENGINE_ROOT = os.path.join(os.path.dirname(_HERE), "engines", "eventgen")
 # worker/stoker_agent/ -> worker/engines/rawreplay (the PISTON engine package root)
 DEFAULT_RAWREPLAY_ROOT = os.path.join(os.path.dirname(_HERE), "engines", "rawreplay")
+# worker/stoker_agent/ -> worker/engines/metrics (the metrics engine package root)
+DEFAULT_METRICS_ROOT = os.path.join(os.path.dirname(_HERE), "engines", "metrics")
 
 
 class EngineError(Exception):
@@ -61,6 +63,20 @@ def build_rawreplay_command(env=None):
     if override:
         return shlex.split(override)
     return [sys.executable, "-m", "stoker_rawreplay"]
+
+
+def build_metrics_command(env=None):
+    # type: (Optional[Dict[str, str]]) -> List[str]
+    """Metrics-engine invocation: ``python -m stoker_metrics``.
+
+    Reads its whole configuration from the environment (STOKER_OUTPUT_SOCKET +
+    the STOKER_METRICS_* vars). STOKER_METRICS_CMD (shell-quoted) overrides the
+    launcher, mirroring STOKER_ENGINE_CMD / STOKER_RAWREPLAY_CMD."""
+    env = env if env is not None else os.environ
+    override = env.get("STOKER_METRICS_CMD")
+    if override:
+        return shlex.split(override)
+    return [sys.executable, "-m", "stoker_metrics"]
 
 
 class EngineRunner(object):
@@ -254,4 +270,49 @@ class RawReplayRunner(EngineRunner):
             env["STOKER_RAWREPLAY_TS_STRPTIME"] = self._ts_strptime
         if self._fallback_gap_s is not None:
             env["STOKER_RAWREPLAY_FALLBACK_GAP_S"] = repr(float(self._fallback_gap_s))
+        return env
+
+
+class MetricsRunner(EngineRunner):
+    """Subprocess manager for the metrics engine (``python -m stoker_metrics``).
+
+    Reuses every bit of :class:`EngineRunner` (Popen, log-reader ring buffer,
+    SIGTERM->grace->SIGKILL stop) and only changes the command, the PYTHONPATH
+    root (the metrics package tree) and the environment (the STOKER_METRICS_*
+    contract). Construction takes the resolved config-file path (the agent writes
+    the pack's ``metrics:`` block there), this worker's slot / total_workers (the
+    engine strides the series matrix by them) and an optional resolution override.
+    """
+
+    def __init__(self, socket_path, config_path, slot, total_workers,
+                 resolution_s=None, engine_root=None, extra_env=None,
+                 ring_size=DEFAULT_RING_SIZE, cwd=None, log_dir=None):
+        # type: (str, str, int, int, Optional[float], Optional[str], Optional[Dict[str, str]], int, Optional[str], Optional[str]) -> None
+        conf_stand_in = log_dir or os.path.dirname(config_path) or "."
+        EngineRunner.__init__(
+            self, conf_stand_in, socket_path,
+            engine_root=engine_root or DEFAULT_METRICS_ROOT,
+            extra_env=extra_env, ring_size=ring_size, cwd=cwd)
+        self._config_path = config_path
+        self._slot = slot
+        self._total_workers = total_workers
+        self._resolution_s = resolution_s
+
+    def _command(self):
+        # type: () -> List[str]
+        return build_metrics_command()
+
+    def _build_env(self):
+        # type: () -> Dict[str, str]
+        env = dict(os.environ)
+        env.update(self._extra_env)
+        env["STOKER_OUTPUT_SOCKET"] = self._socket_path
+        existing = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = self._engine_root + (
+            os.pathsep + existing if existing else "")
+        env["STOKER_METRICS_CONFIG"] = self._config_path
+        env["STOKER_METRICS_SLOT"] = str(int(self._slot))
+        env["STOKER_METRICS_TOTAL_WORKERS"] = str(int(self._total_workers))
+        if self._resolution_s is not None:
+            env["STOKER_METRICS_RESOLUTION_S"] = repr(float(self._resolution_s))
         return env

@@ -6,12 +6,13 @@ Authoritative spec for the worker image `ghcr.io/livehybrid/stoker-worker`. The 
 
 One container, two processes:
 
-1. **Agent** (`worker/stoker_agent/`, entrypoint `python -m stoker_agent`): owns the control-plane conversation, the pacing token bucket, the HEC client and all counters. Binds a unix socket first, then spawns the engine. Engine-agnostic: HEC delivery, pacing, metadata stamping, drain and control-plane wiring are identical for both engines.
+1. **Agent** (`worker/stoker_agent/`, entrypoint `python -m stoker_agent`): owns the control-plane conversation, the pacing token bucket, the HEC client and all counters. Binds a unix socket first, then spawns the engine. Engine-agnostic: HEC delivery, pacing, metadata stamping, drain and control-plane wiring are identical for every engine.
 2. **Engine** subprocess, one of:
    - **eventgen** (vendored `splunk_eventgen` 7.2.1): `python -m splunk_eventgen generate <rewritten.conf>`. Templates events from samples and streams every event to the agent through the `stoker` output plugin. Knows nothing about HEC, JWTs or the control plane.
    - **rawreplay / Piston** (`stoker_rawreplay`): `python -m stoker_rawreplay` (no conf argument; configured entirely from `STOKER_RAWREPLAY_*` env). Replays a recorded dataset byte-for-byte.
+   - **metrics** (`stoker_metrics`): `python -m stoker_metrics` (no conf argument; configured from `STOKER_METRICS_*` env). Generates synthetic Splunk **metric** data points (`event: "metric"` + a `fields` object) over a shaped time series. Engine-paced (count_interval), sharding the series matrix by slot. See [metrics engine](#metrics-engine).
 
-`STOKER_ENGINE` selects (`eventgen` default, `rawreplay` for Piston). The engine command can be overridden without a code change: `STOKER_ENGINE_CMD` (eventgen; shell-quoted, `{conf}` placeholder or the conf appended) and `STOKER_RAWREPLAY_CMD` (rawreplay).
+`STOKER_ENGINE` selects (`eventgen` default, `rawreplay` for Piston, `metrics`). The engine command can be overridden without a code change: `STOKER_ENGINE_CMD` (eventgen; shell-quoted, `{conf}` placeholder or the conf appended), `STOKER_RAWREPLAY_CMD` and `STOKER_METRICS_CMD`.
 
 Data path: engine -> socket (NDJSON, one envelope per line) -> agent reader -> token bucket (gated modes) -> HEC batch queue -> gzip POST to Splunk. Backpressure is structural: when the token bucket is paused or the HEC queue is full the agent stops reading the socket, the kernel buffer fills and the engine's blocking `sendall` stalls. Bounded memory by construction.
 
@@ -69,6 +70,18 @@ The agent sets these on the rawreplay subprocess from the pack's resolved replay
 | `STOKER_RAWREPLAY_CMD` | none | shell-quoted launcher override (mirrors `STOKER_ENGINE_CMD`) |
 
 Without a `TS_REGEX`, cadence mode uses a built-in timestamp battery (ISO 8601 with optional fractional seconds and Z/offset, syslog `Mon DD HH:MM:SS`, `YYYY-MM-DD HH:MM:SS`, and delimited 10-/13-digit epoch seconds/millis).
+
+### metrics engine vars (`STOKER_METRICS_*`)
+
+The agent sets these on the metrics subprocess from the pack's resolved `metricgen` config; they are the engine's own contract (`stoker_metrics/engine.py load_config`):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `STOKER_METRICS_CONFIG` | — (required) | absolute path to a JSON file (the agent writes the pack's `metricgen` block to the workdir) holding `{resolution_s, tz_offset_hours, seed, dimensions, metrics}` |
+| `STOKER_METRICS_SLOT` | `0` | this worker's slot; with `TOTAL_WORKERS` it strides the series matrix (`series[slot::total]`) so the fleet partitions it without overlap |
+| `STOKER_METRICS_TOTAL_WORKERS` | `1` | fleet size (the stride denominator) |
+| `STOKER_METRICS_RESOLUTION_S` | from config `resolution_s` (else `10`) | grid period in seconds; each series emits one multi-metric event per tick |
+| `STOKER_METRICS_CMD` | none | shell-quoted launcher override (mirrors `STOKER_ENGINE_CMD`) |
 
 ### Common tuning (both modes)
 
@@ -157,6 +170,18 @@ Replay cannot be rate-sharded, so the control plane forces **workers = 1** for a
 
 **Bundle shape (worker side).** The pack/bundle format is [`PACKS.md`](PACKS.md); a rawreplay pack declares `engine: rawreplay` and a `replay:` section and needs no `default/eventgen.conf`. What the worker reads from the built bundle's `stoker.json` `replay` block is only: `dataset` (the dataset's path **inside the bundle** — a fetched `dataset_url` lands at `dataset/replay.dat`, a local dataset keeps its pack-relative path), `mode`, `time_multiple`, and the optional `ts_regex`/`ts_strptime`/`ts_field` cadence hints. The manifest also carries `sourcetype`/`source`, but the worker ignores them and stamps metadata from the slice like eventgen. `dataset_url`/`dataset_sha256` are resolved at build time and are not in the manifest (the dataset is embedded, so the worker never re-fetches).
 
+## metrics engine
+
+The metrics engine generates synthetic Splunk **metric** data points over a shaped time series instead of log events. Selected by `STOKER_ENGINE=metrics` (the slice's `engine` is `metrics`); the agent skips the eventgen conf-rewrite and launches `python -m stoker_metrics`. HEC delivery, metadata stamping and the control-plane conversation are unchanged — only the payload differs (`event: "metric"` + a `fields` object; see the socket protocol below).
+
+**Series matrix + sharding.** The pack's `metricgen` config declares `dimensions` (each a `key` + `values`); the **series matrix** is their cross-product. This worker owns `series[slot::total_workers]` — a deterministic stride, so the fleet partitions the matrix without overlap and with no cross-worker coordination. Each metric definition (`name`, `kind`, `min`/`p95`/`max`, `pattern`, optional per-dimension `scale`) is emitted for every owned series.
+
+**Emission + pacing.** Metrics are **engine-paced** (the run uses `rate_mode = count_interval`, so the agent's socket reader is ungated, exactly like rawreplay cadence). The engine emits on a wall-clock-aligned grid of period `resolution_s`: at each tick, for each owned series, it computes every metric's value and sends **one multi-metric envelope** carrying all of them (`{"metric_name:a": .., "metric_name:b": .., <dimensions>}`). It loops until the socket closes on drain. `time` is the tick epoch. A worker that owns no series (workers > matrix size) idles until drain.
+
+**Value model.** `value(t)` is `pattern_activity(t) in [0,1]` mapped onto `min + a*(p95 - min)` with noise, clamped to `[min, max]` — i.e. **min = quiet floor, p95 = busy-hours level, max = rare ceiling**. `kind` interprets it: `gauge` = the value; `count` = an integer per-interval count; `counter` = a monotonic cumulative total. Deterministic given the config `seed` (the control-plane preview and the worker produce the same curve). Patterns: `constant`, `sine`, `business_hours`, `business_double_hump`, `ramp`, `spike`, `random_walk` (`stoker_metrics/patterns.py`). Full pack/config format in [`PACKS.md`](PACKS.md).
+
+**Bundle shape (worker side).** A metrics pack declares `engine: metrics` and a `metricgen` block in `stoker.json`; it ships a stub `default/eventgen.conf` only to satisfy the pack-root file contract (never executed). The worker reads the whole `metricgen` object (`resolution_s`, `tz_offset_hours`, `seed`, `dimensions`, `metrics`) and hands it to the engine via `STOKER_METRICS_CONFIG`.
+
 ## Unix socket protocol (engine -> agent)
 
 Stream socket at `STOKER_OUTPUT_SOCKET`. One NDJSON envelope per event, one line each, UTF-8. Both the eventgen `stoker` output plugin (`worker/engines/eventgen/.../plugins/output/stoker.py`) and the rawreplay engine speak it identically:
@@ -168,6 +193,7 @@ Stream socket at `STOKER_OUTPUT_SOCKET`. One NDJSON envelope per event, one line
 - `time` = the event's generated timestamp (epoch seconds, float) or `null` (agent stamps now); non-finite values are coerced to `null`. rawreplay sends `null` in rate mode and `now + offset` in cadence mode; eventgen forwards its `_time` (int from the default/perdayvolume paths, float from replay).
 - Metadata fields (`host`/`source`/`sourcetype`/`index`) may be `null`. The agent fills them: a run-declared **override wins over the plugin value**; otherwise a `null` is filled from the slice `hec` default; a still-`null` value is omitted from the HEC body so Splunk applies its own default. rawreplay always leaves all four `null`.
 - `event` is mandatory; a line whose `event` is `null`/absent, that is not a JSON object, or that fails to decode is counted `malformed` and dropped.
+- `fields` is optional and used only by the **metrics** engine: it carries `metric_name:<name>` measurements plus dimension key/values, and `event` is the literal string `"metric"`. The agent passes `fields` through verbatim to the HEC event endpoint (Splunk stores it as a metric data point when `event == "metric"`); log-event envelopes have no `fields`. The metrics engine leaves the four metadata fields `null` (the metrics index/sourcetype come from the slice, like every other engine).
 - Writes are blocking with no buffering beyond one line, so a stalled agent stalls the engine. A connect failure at engine start is fatal (the agent always binds the listener before launching the engine). The eventgen plugin's connection is sticky-dead on failure (no silent reconnect); the whole engine is restarted instead.
 
 ## HEC client (`hec_client.py`)

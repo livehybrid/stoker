@@ -50,6 +50,10 @@ class Bundle:
     # (stoker.json preferred, else pack.yaml). None when the pack declares no
     # replay config (an eventgen-only pack). See resolve_replay_config.
     replay: Optional["ReplayConfig"] = None
+    # Metrics-engine config, the pack's `metricgen` block (stoker.json). The whole
+    # object ({resolution_s, tz_offset_hours, seed, dimensions, metrics: [...]}) is
+    # passed through to the metrics engine as-is. None for a non-metrics pack.
+    metricgen: Optional[Dict[str, Any]] = None
 
 
 @dataclasses.dataclass
@@ -184,8 +188,30 @@ def _load_pack(pack_dir):
         samples_dir = pack_dir
     estimates = _load_estimates(pack_dir)
     replay = resolve_replay_config(pack_dir)
+    metricgen = resolve_metrics_config(pack_dir)
     return Bundle(pack_dir=pack_dir, conf_path=conf_path,
-                  samples_dir=samples_dir, estimates=estimates, replay=replay)
+                  samples_dir=samples_dir, estimates=estimates, replay=replay,
+                  metricgen=metricgen)
+
+
+def resolve_metrics_config(pack_dir):
+    # type: (str) -> Optional[Dict[str, Any]]
+    """Return the pack's ``metricgen`` config object (stoker.json), or None.
+
+    The whole object is handed to the metrics engine verbatim; the control plane
+    lints its shape at build time, so here we only require it to be a dict with a
+    non-empty ``metrics`` list (a metrics pack that declares no metrics is a
+    build-time error, not a runtime one).
+    """
+    doc = _load_pack_doc(pack_dir)
+    block = doc.get("metricgen") if isinstance(doc, dict) else None
+    if block is None:
+        return None
+    if not isinstance(block, dict) or not block.get("metrics"):
+        raise BundleError(
+            "pack %r declares a metricgen section without a 'metrics' list"
+            % pack_dir)
+    return block
 
 
 # Recognised replay modes (mirrors stoker_rawreplay.engine's MODE_* constants;
