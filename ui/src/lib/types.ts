@@ -302,6 +302,26 @@ export interface SpecEstimate {
 
 export interface RunLaunch {
   overrides?: Record<string, string> | null;
+  // Backfill: generate the last `window` seconds of history then finish.
+  backfill_window_s?: number | null;
+  backfill_resolution_s?: number | null; // metrics coarse step
+  backfill_cap_eps?: number | null; // delivery cap
+}
+
+export interface BackfillEstimateRequest {
+  window_s: number;
+  resolution_s?: number | null;
+  cap_eps?: number | null;
+}
+
+export interface BackfillEstimate {
+  engine: string;
+  events: number;
+  bytes?: number | null;
+  seconds: number;
+  cap_eps: number;
+  series?: number | null;
+  warning: string;
 }
 
 export interface RunCreated {

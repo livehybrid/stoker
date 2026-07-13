@@ -393,9 +393,33 @@ class SpecEstimate(BaseModel):
 # --------------------------------------------------------------------------- #
 
 class RunLaunch(BaseModel):
-    """Body for POST /specs/{id}/run: last-minute override values."""
+    """Body for POST /specs/{id}/run: last-minute override values.
+
+    ``backfill_window_s`` (when set) launches a **backfill** run: generate the
+    last ``window`` seconds of history (events stamped at their historical time),
+    delivered at ``backfill_cap_eps`` (default cap), then finish.
+    """
 
     overrides: Optional[Dict[str, str]] = None
+    backfill_window_s: Optional[int] = None
+    backfill_resolution_s: Optional[float] = None   # metrics coarse step
+    backfill_cap_eps: Optional[float] = None         # delivery cap
+
+
+class BackfillEstimateRequest(BaseModel):
+    window_s: int
+    resolution_s: Optional[float] = None
+    cap_eps: Optional[float] = None
+
+
+class BackfillEstimate(BaseModel):
+    engine: str
+    events: int
+    bytes: Optional[int] = None
+    seconds: float                                   # est. delivery time at the cap
+    cap_eps: float
+    series: Optional[int] = None                     # metrics only
+    warning: str
 
 
 class RunCreated(BaseModel):

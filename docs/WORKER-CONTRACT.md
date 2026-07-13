@@ -182,6 +182,21 @@ The metrics engine generates synthetic Splunk **metric** data points over a shap
 
 **Bundle shape (worker side).** A metrics pack declares `engine: metrics` and a `metricgen` block in `stoker.json`; it ships a stub `default/eventgen.conf` only to satisfy the pack-root file contract (never executed). The worker reads the whole `metricgen` object (`resolution_s`, `tz_offset_hours`, `seed`, `dimensions`, `metrics`) and hands it to the engine via `STOKER_METRICS_CONFIG`.
 
+## Backfill
+
+Backfill generates a window of **history** (events/points stamped at their past time) as fast as the target accepts, up to a delivery cap. It is a per-run option: the control plane launches a **gated eps run at the cap** (so the token bucket paces delivery and a large window does not overwhelm Splunk) and carries the window in the claim slice:
+
+```json
+"backfill": {"start_s": <epoch>, "end_s": <epoch>, "resolution_s": <float|null>}
+```
+
+Both engines re-use the normal delivery path (the agent stamps nothing new; the engine sets the historical `time`):
+
+- **metrics** — the engine (`STOKER_METRICS_BACKFILL_START_S`/`END_S`/`RESOLUTION_S`, set by the `MetricsRunner` from the slice) walks the window **in time order** (stateful `random_walk`/`counter` evolve correctly), stamps each point at its historical time, emits hot (the bucket paces), then **exits**. The agent's engine-exit path drains the run. Preserves the daily shape across the window.
+- **eventgen** — `confrewrite` widens each stanza's timestamp window to `earliest = -<window>s`, `latest = now` so the sample's timestamp token stamps every event a historical time across `[now-window, now]` (text timestamp and `_time` agree). The run is bounded by the **duration deadline** (the control plane sizes it to the volume). Uniform density; the diurnal shape is not reproduced. (eventgen's native `backfill` rater is non-functional in the vendored tree, hence this approach.)
+
+Standalone: `STOKER_BACKFILL_START_S` / `STOKER_BACKFILL_END_S` / `STOKER_BACKFILL_RESOLUTION_S`. **Caveat:** re-running a backfill appends duplicate points/events (Splunk metrics/`mstats` double-count) — run once, or clear the window first.
+
 ## Unix socket protocol (engine -> agent)
 
 Stream socket at `STOKER_OUTPUT_SOCKET`. One NDJSON envelope per event, one line each, UTF-8. Both the eventgen `stoker` output plugin (`worker/engines/eventgen/.../plugins/output/stoker.py`) and the rawreplay engine speak it identically:

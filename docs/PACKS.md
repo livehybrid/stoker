@@ -416,6 +416,13 @@ for the engine side.
 - `run_spec` enforces the pairing: a metrics pack must run under the metrics
   engine with `count_interval`, and vice versa (`422 engine_pack_mismatch` /
   `metrics_rate_mode`).
+- **Backfill.** Launch a run with `backfill_window_s` (see the job wizard's
+  Backfill section, or `POST /specs/{id}/run {backfill_window_s}`) to generate the
+  last N of history instead of streaming live: the metrics engine walks the window
+  in time order (preserving the daily shape) and finishes. Eventgen packs backfill
+  too (uniform density). Both are delivered at a cap and detailed in
+  [WORKER-CONTRACT.md](WORKER-CONTRACT.md#backfill). Re-running a backfill
+  duplicates points, so run each window once.
 
 > Metric packs are not git-synced (they have no directory); author them in the UI
 > or via `POST /api/metric-packs {name, config}`. The preview endpoint

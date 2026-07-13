@@ -44,6 +44,8 @@ from ..models import (
     utcnow,
 )
 from ..schemas import (
+    BackfillEstimate,
+    BackfillEstimateRequest,
     MetricSampleOut,
     MetricsOut,
     PackCreate,
@@ -577,6 +579,37 @@ def estimate_spec(spec_id: int, db: Session = Depends(get_db)):
     return _estimate(spec, bytes_per_event)
 
 
+@router.post("/specs/{spec_id}/backfill_estimate", response_model=BackfillEstimate)
+def backfill_estimate(spec_id: int, body: BackfillEstimateRequest,
+                      db: Session = Depends(get_db)):
+    # type: (...) -> Any
+    """Size a would-be backfill run (events, ~time, bytes) without launching it."""
+    spec = db.get(Spec, spec_id)
+    if spec is None:
+        raise HTTPException(status_code=404, detail="unknown spec")
+    pack = db.get(Pack, spec.pack_id)
+    series = 0
+    pack_res = None
+    if pack is not None and pack.builder_config_json is not None:
+        series = bundles.metrics_series_count(pack.builder_config_json)
+        pack_res = (pack.builder_config_json or {}).get("resolution_s")
+    live_eps = spec.rate_value if spec.rate_mode == "eps" else None
+    res = body.resolution_s or pack_res
+    plan = lifecycle.plan_backfill(spec.engine, series, live_eps, body.window_s,
+                                   res, body.cap_eps, time.time())
+    bpe = pack.est_bytes_per_event if pack is not None else None
+    return BackfillEstimate(
+        engine=spec.engine,
+        events=plan["events"],
+        bytes=int(plan["events"] * bpe) if bpe else None,
+        seconds=round(plan["seconds"], 1),
+        cap_eps=plan["cap_eps"],
+        series=series if spec.engine == "metrics" else None,
+        warning=("Re-running a backfill appends duplicate points; mstats will "
+                 "double-count. Run once, or clear the window first."),
+    )
+
+
 @router.put("/specs/{spec_id}", response_model=SpecOut)
 def update_spec(spec_id: int, body: SpecUpdate, db: Session = Depends(get_db)):
     # type: (...) -> Any
@@ -778,10 +811,17 @@ def run_spec(spec_id: int, body: RunLaunch, request: Request, db: Session = Depe
         )
 
     # --- Provision (delegates to the Core lifecycle) ----------------------- #
+    backfill = None
+    if body.backfill_window_s and body.backfill_window_s > 0:
+        backfill = {"window_s": body.backfill_window_s,
+                    "resolution_s": body.backfill_resolution_s,
+                    "cap_eps": body.backfill_cap_eps}
+
     driver = get_driver(spec.fleet)
     try:
         run = lifecycle.provision_run(
-            db, spec, driver, overrides=body.overrides, started_by=_actor(request))
+            db, spec, driver, overrides=body.overrides,
+            started_by=_actor(request), backfill=backfill)
     except DriverError as exc:
         # The fleet could not be materialised (e.g. Portainer unreachable / a
         # swarm fleet with no PORTAINER_HOST). Fail loudly, never hang.

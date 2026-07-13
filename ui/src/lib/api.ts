@@ -12,6 +12,8 @@
 
 import type {
   AuthStatus,
+  BackfillEstimate,
+  BackfillEstimateRequest,
   LoginRequest,
   MetricPackCreate,
   MetricPackDetail,
@@ -262,6 +264,8 @@ export const specs = {
   // POST /specs/{id}/run — validate + provision the spec into a run.
   run: (id: number, body: RunLaunch = {}) =>
     request<RunCreated>("POST", `/specs/${id}/run`, { body }),
+  backfillEstimate: (id: number, body: BackfillEstimateRequest) =>
+    request<BackfillEstimate>("POST", `/specs/${id}/backfill_estimate`, { body }),
 };
 
 // --------------------------------------------------------------------------- //
