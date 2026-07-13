@@ -1,11 +1,12 @@
 import { useMemo, useState } from "react";
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 
 import { api } from "../lib/api";
 import type { PackOut } from "../lib/types";
 import { PageHeader } from "../components/PageHeader";
 import { Card } from "../components/Card";
+import { Button } from "../components/Button";
 import { Field, Select } from "../components/Field";
 import { EmptyState, ErrorState, LoadingState } from "../components/States";
 import { PackCard } from "../features/packs/PackCard";
@@ -43,7 +44,12 @@ function Packs() {
     <div className="space-y-5">
       <PageHeader
         title="Packs"
-        subtitle="Indexed eventgen sample packs. Pick one to preview or launch a job."
+        subtitle="Sample packs to launch jobs from: indexed eventgen packs and metric packs you build here."
+        actions={
+          <Link to="/metric-packs/new">
+            <Button variant="primary">+ New metric pack</Button>
+          </Link>
+        }
       />
 
       <Card>

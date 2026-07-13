@@ -13,6 +13,10 @@
 import type {
   AuthStatus,
   LoginRequest,
+  MetricPackCreate,
+  MetricPackDetail,
+  MetricPreviewRequest,
+  MetricPreviewResponse,
   MetricsOut,
   PackOut,
   PackPreview,
@@ -227,6 +231,22 @@ export const packs = {
 };
 
 // --------------------------------------------------------------------------- //
+// Metric packs (UI-authored metricgen config -> engine: metrics)
+// --------------------------------------------------------------------------- //
+
+export const metricPacks = {
+  create: (body: MetricPackCreate) =>
+    request<PackOut>("POST", "/metric-packs", { body }),
+  update: (id: number, body: MetricPackCreate) =>
+    request<PackOut>("PUT", `/metric-packs/${id}`, { body }),
+  get: (id: number) =>
+    request<MetricPackDetail>("GET", `/metric-packs/${id}`),
+  // Compute one metric's 24 h curve from a (possibly in-progress) config.
+  preview: (body: MetricPreviewRequest) =>
+    request<MetricPreviewResponse>("POST", "/metric-packs/preview", { body }),
+};
+
+// --------------------------------------------------------------------------- //
 // Specs
 // --------------------------------------------------------------------------- //
 
@@ -301,5 +321,14 @@ export const users = {
 };
 
 // Grouped export for `import { api } from "@/lib/api"` ergonomics.
-export const api = { targets, repos, packs, specs, runs, auth, users };
+export const api = {
+  targets,
+  repos,
+  packs,
+  metricPacks,
+  specs,
+  runs,
+  auth,
+  users,
+};
 export default api;

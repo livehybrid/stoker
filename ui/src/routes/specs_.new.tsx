@@ -25,6 +25,7 @@ import { EstimatePanel } from "../features/specs/EstimatePanel";
 import { localEstimate } from "../features/specs/estimate";
 import { parseApiError } from "../features/specs/errors";
 import { packLooksReplay } from "../features/specs/replay";
+import { packIsMetrics } from "../features/metrics/config";
 import { RATE_MODE_LABEL } from "../features/specs/format";
 
 // Search params: ?edit=<id> reopens a saved spec for editing; ?clone=<id>
@@ -177,7 +178,16 @@ function JobWizard() {
   );
 
   const isReplay = packLooksReplay(selectedPack);
+  const isMetrics = packIsMetrics(selectedPack);
   const bytesPerEvent = selectedPack?.est_bytes_per_event ?? null;
+
+  // Metrics packs need the metrics engine + count_interval pacing (engine-paced
+  // on a fixed grid); load the pack's config to align interval/count to it.
+  const metricDetailQ = useQuery({
+    queryKey: ["wizard-metric-pack", form.pack_id],
+    queryFn: () => api.metricPacks.get(form.pack_id as number),
+    enabled: isMetrics && form.pack_id != null,
+  });
   const workersNum = Math.max(1, Math.floor(numOrNull(form.workers) ?? 1));
   const rateValueNum = numOrNull(form.rate_value);
 
@@ -199,6 +209,29 @@ function JobWizard() {
     if (isReplay && form.workers !== "1") patch({ workers: "1" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isReplay]);
+
+  // A metrics pack must run on the metrics engine with count_interval pacing;
+  // align interval to the pack's resolution, count to its series and cap workers
+  // at the series count. The engine + rate-mode fields are locked below.
+  useEffect(() => {
+    if (!isMetrics) return;
+    setForm((f) => {
+      const next: FormState = {
+        ...f,
+        engine: "metrics",
+        rate_mode: "count_interval",
+      };
+      const detail = metricDetailQ.data;
+      if (detail) {
+        next.interval_s = String(detail.config.resolution_s);
+        next.rate_value = String(detail.series_count);
+        const w = Math.max(1, Math.floor(Number(f.workers) || 1));
+        if (w > detail.series_count) next.workers = String(detail.series_count);
+      }
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isMetrics, metricDetailQ.data]);
 
   const [saving, setSaving] = useState<null | "save" | "run">(null);
   const [errText, setErrText] = useState<string | null>(null);
@@ -380,6 +413,14 @@ function JobWizard() {
               locked to 1. The control plane enforces this at launch regardless.
             </div>
           )}
+          {isMetrics && (
+            <div className="rounded-md border border-sky-800/60 bg-sky-950/30 px-3 py-2 text-xs text-sky-200">
+              Metric pack: runs on the metrics engine, engine-paced on its
+              resolution grid. Engine and rate mode are locked to count_interval;
+              interval and count follow the pack (resolution and series count) and
+              the series matrix is sharded across workers.
+            </div>
+          )}
         </div>
       </Card>
 
@@ -399,9 +440,10 @@ function JobWizard() {
             <Field label="Engine">
               <Select
                 value={form.engine}
+                disabled={isMetrics}
                 onChange={(e) => patch({ engine: e.target.value })}
               >
-                {ENGINES.map((e) => (
+                {(isMetrics ? ["metrics"] : ENGINES).map((e) => (
                   <option key={e} value={e}>
                     {e}
                   </option>
@@ -411,6 +453,7 @@ function JobWizard() {
             <Field label="Rate mode">
               <Select
                 value={form.rate_mode}
+                disabled={isMetrics}
                 onChange={(e) => patch({ rate_mode: e.target.value as RateMode })}
               >
                 {RATE_MODES.map((m) => (

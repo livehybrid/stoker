@@ -4,6 +4,7 @@ import type { PackOut } from "../../lib/types";
 import { Badge, StatusBadge } from "../../components/Badge";
 import { Button } from "../../components/Button";
 import { formatBytes, formatGbDay, shortSha } from "../format";
+import { packIsMetrics } from "../metrics/config";
 
 // A pack card: lint + verified badges, sourcetypes, estimated bytes/event and
 // declared GB/day, with Preview and "New job from pack" (design section 10.4).
@@ -20,6 +21,7 @@ function asStringList(v: unknown): string[] {
 export function PackCard({ pack, onPreview }: Props) {
   const sourcetypes = asStringList(pack.sourcetypes_json);
   const engines = asStringList(pack.engines_json);
+  const isMetric = packIsMetrics(pack);
 
   return (
     <section className="flex flex-col rounded-lg border border-surface-muted bg-surface-soft p-4 shadow-sm">
@@ -94,9 +96,17 @@ export function PackCard({ pack, onPreview }: Props) {
           {pack.indexed_sha ? `indexed ${shortSha(pack.indexed_sha)}` : "local pack"}
         </span>
         <div className="flex items-center gap-2">
-          <Button variant="secondary" onClick={() => onPreview(pack)}>
-            Preview
-          </Button>
+          {isMetric ? (
+            // A metric pack has no eventgen stanzas to preview; edit it in the
+            // builder instead.
+            <Link to="/metric-packs/new" search={{ edit: pack.id }}>
+              <Button variant="secondary">Edit</Button>
+            </Link>
+          ) : (
+            <Button variant="secondary" onClick={() => onPreview(pack)}>
+              Preview
+            </Button>
+          )}
           {/* Pre-selects this pack in the wizard via its ?pack=<id> search
               param (validated by src/routes/specs.new.tsx). */}
           <Link to="/specs/new" search={{ pack: pack.id }}>

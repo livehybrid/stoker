@@ -132,6 +132,97 @@ export interface PackPreviewRun {
 }
 
 // --------------------------------------------------------------------------- //
+// Metric packs (UI-authored `metricgen` config -> engine: metrics)
+// --------------------------------------------------------------------------- //
+
+export type MetricKind = "gauge" | "count" | "counter";
+
+export type PatternType =
+  | "constant"
+  | "sine"
+  | "business_hours"
+  | "business_double_hump"
+  | "ramp"
+  | "spike"
+  | "random_walk";
+
+export interface MetricDimension {
+  key: string;
+  values: string[];
+}
+
+export interface MetricPattern {
+  type: PatternType;
+  [param: string]: unknown;
+}
+
+export interface MetricDef {
+  name: string;
+  kind: MetricKind;
+  unit?: string;
+  min: number;
+  p95: number;
+  max: number;
+  noise?: number;
+  pattern: MetricPattern;
+  // scale[dimensionKey][dimensionValue] = multiplier applied to this metric's
+  // min/p95/max for series carrying that dimension value.
+  scale?: Record<string, Record<string, number>>;
+}
+
+export interface MetricgenConfig {
+  resolution_s: number;
+  tz_offset_hours?: number;
+  seed?: number;
+  sourcetype?: string;
+  dimensions: MetricDimension[];
+  metrics: MetricDef[];
+}
+
+export interface MetricPackCreate {
+  name: string;
+  description?: string | null;
+  config: MetricgenConfig;
+}
+
+export interface MetricPackDetail {
+  id: number;
+  name: string;
+  description?: string | null;
+  engines_json?: string[] | null;
+  sourcetypes_json?: string[] | null;
+  verified: boolean;
+  lint_status: string;
+  lint_errors_json?: string[] | null;
+  created_at: string;
+  config: MetricgenConfig;
+  series_count: number;
+}
+
+export interface MetricPreviewRequest {
+  config: MetricgenConfig;
+  metric?: string | null;
+  cell?: Record<string, string> | null;
+  points?: number;
+}
+
+export interface MetricPreviewPoint {
+  hour: number;
+  activity: number;
+  center: number;
+  value: number;
+}
+
+export interface MetricPreviewResponse {
+  metric: string;
+  unit?: string | null;
+  kind: string;
+  guides: { min: number; p95: number; max: number };
+  points: MetricPreviewPoint[];
+  series_count: number;
+}
+
+// --------------------------------------------------------------------------- //
 // Specs
 // --------------------------------------------------------------------------- //
 

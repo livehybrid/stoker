@@ -19,6 +19,7 @@ import { Route as LoginRouteImport } from './routes/login'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as SpecsNewRouteImport } from './routes/specs_.new'
 import { Route as RunsRunIdRouteImport } from './routes/runs_.$runId'
+import { Route as MetricPacksNewRouteImport } from './routes/metric-packs.new'
 
 const UsersRoute = UsersRouteImport.update({
   id: '/users',
@@ -70,6 +71,11 @@ const RunsRunIdRoute = RunsRunIdRouteImport.update({
   path: '/runs/$runId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const MetricPacksNewRoute = MetricPacksNewRouteImport.update({
+  id: '/metric-packs/new',
+  path: '/metric-packs/new',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -80,6 +86,7 @@ export interface FileRoutesByFullPath {
   '/specs': typeof SpecsRoute
   '/targets': typeof TargetsRoute
   '/users': typeof UsersRoute
+  '/metric-packs/new': typeof MetricPacksNewRoute
   '/runs/$runId': typeof RunsRunIdRoute
   '/specs/new': typeof SpecsNewRoute
 }
@@ -92,6 +99,7 @@ export interface FileRoutesByTo {
   '/specs': typeof SpecsRoute
   '/targets': typeof TargetsRoute
   '/users': typeof UsersRoute
+  '/metric-packs/new': typeof MetricPacksNewRoute
   '/runs/$runId': typeof RunsRunIdRoute
   '/specs/new': typeof SpecsNewRoute
 }
@@ -105,6 +113,7 @@ export interface FileRoutesById {
   '/specs': typeof SpecsRoute
   '/targets': typeof TargetsRoute
   '/users': typeof UsersRoute
+  '/metric-packs/new': typeof MetricPacksNewRoute
   '/runs_/$runId': typeof RunsRunIdRoute
   '/specs_/new': typeof SpecsNewRoute
 }
@@ -119,6 +128,7 @@ export interface FileRouteTypes {
     | '/specs'
     | '/targets'
     | '/users'
+    | '/metric-packs/new'
     | '/runs/$runId'
     | '/specs/new'
   fileRoutesByTo: FileRoutesByTo
@@ -131,6 +141,7 @@ export interface FileRouteTypes {
     | '/specs'
     | '/targets'
     | '/users'
+    | '/metric-packs/new'
     | '/runs/$runId'
     | '/specs/new'
   id:
@@ -143,6 +154,7 @@ export interface FileRouteTypes {
     | '/specs'
     | '/targets'
     | '/users'
+    | '/metric-packs/new'
     | '/runs_/$runId'
     | '/specs_/new'
   fileRoutesById: FileRoutesById
@@ -156,6 +168,7 @@ export interface RootRouteChildren {
   SpecsRoute: typeof SpecsRoute
   TargetsRoute: typeof TargetsRoute
   UsersRoute: typeof UsersRoute
+  MetricPacksNewRoute: typeof MetricPacksNewRoute
   RunsRunIdRoute: typeof RunsRunIdRoute
   SpecsNewRoute: typeof SpecsNewRoute
 }
@@ -232,6 +245,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof RunsRunIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/metric-packs/new': {
+      id: '/metric-packs/new'
+      path: '/metric-packs/new'
+      fullPath: '/metric-packs/new'
+      preLoaderRoute: typeof MetricPacksNewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -244,6 +264,7 @@ const rootRouteChildren: RootRouteChildren = {
   SpecsRoute: SpecsRoute,
   TargetsRoute: TargetsRoute,
   UsersRoute: UsersRoute,
+  MetricPacksNewRoute: MetricPacksNewRoute,
   RunsRunIdRoute: RunsRunIdRoute,
   SpecsNewRoute: SpecsNewRoute,
 }
