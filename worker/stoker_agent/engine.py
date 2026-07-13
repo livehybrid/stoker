@@ -285,9 +285,10 @@ class MetricsRunner(EngineRunner):
     """
 
     def __init__(self, socket_path, config_path, slot, total_workers,
-                 resolution_s=None, engine_root=None, extra_env=None,
+                 resolution_s=None, backfill_start_s=None, backfill_end_s=None,
+                 backfill_resolution_s=None, engine_root=None, extra_env=None,
                  ring_size=DEFAULT_RING_SIZE, cwd=None, log_dir=None):
-        # type: (str, str, int, int, Optional[float], Optional[str], Optional[Dict[str, str]], int, Optional[str], Optional[str]) -> None
+        # type: (str, str, int, int, Optional[float], Optional[float], Optional[float], Optional[float], Optional[str], Optional[Dict[str, str]], int, Optional[str], Optional[str]) -> None
         conf_stand_in = log_dir or os.path.dirname(config_path) or "."
         EngineRunner.__init__(
             self, conf_stand_in, socket_path,
@@ -297,6 +298,9 @@ class MetricsRunner(EngineRunner):
         self._slot = slot
         self._total_workers = total_workers
         self._resolution_s = resolution_s
+        self._backfill_start_s = backfill_start_s
+        self._backfill_end_s = backfill_end_s
+        self._backfill_resolution_s = backfill_resolution_s
 
     def _command(self):
         # type: () -> List[str]
@@ -315,4 +319,10 @@ class MetricsRunner(EngineRunner):
         env["STOKER_METRICS_TOTAL_WORKERS"] = str(int(self._total_workers))
         if self._resolution_s is not None:
             env["STOKER_METRICS_RESOLUTION_S"] = repr(float(self._resolution_s))
+        if self._backfill_start_s is not None and self._backfill_end_s is not None:
+            env["STOKER_METRICS_BACKFILL_START_S"] = repr(float(self._backfill_start_s))
+            env["STOKER_METRICS_BACKFILL_END_S"] = repr(float(self._backfill_end_s))
+            if self._backfill_resolution_s is not None:
+                env["STOKER_METRICS_BACKFILL_RESOLUTION_S"] = repr(
+                    float(self._backfill_resolution_s))
         return env

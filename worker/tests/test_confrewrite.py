@@ -121,6 +121,25 @@ class TestEpsMode:
         assert conf.getint("sample1.csv", "count") == 29
         assert conf.getint("sample2.csv", "count") == 86
 
+
+class TestBackfill:
+    def test_backfill_widens_the_timestamp_window(self, tmp_path):
+        src = write_base_conf(tmp_path, BASE_CONF)
+        dst = str(tmp_path / "bf.conf")
+        rewrite_file(src, dst, "eps", 100, 1.0, "/bundle/samples",
+                     backfill_window_s=3600)
+        conf = load_conf(dst)
+        for section in ("sample1.csv", "sample2.csv"):
+            assert conf.get(section, "earliest") == "-3600s"
+            assert conf.get(section, "latest") == "now"
+            # still paced (the rate rewrite ran)
+            assert conf.getint(section, "interval") == 1
+
+    def test_no_backfill_leaves_timestamp_window_untouched(self, tmp_path):
+        conf = rewritten(tmp_path, "eps", 100)
+        # Without a backfill window, no earliest/latest override is injected.
+        assert conf.get("sample1.csv", "earliest", fallback=None) != "-3600s"
+
     def test_interval_forced_to_one(self, tmp_path):
         conf = rewritten(tmp_path, "eps", 100)
         assert conf.get("sample1.csv", "interval") == "1"

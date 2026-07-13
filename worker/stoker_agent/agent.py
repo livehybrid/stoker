@@ -95,13 +95,18 @@ def _default_rawreplay_engine_factory(replay, socket_path, cwd=None,
 
 
 def _default_metrics_engine_factory(config_path, socket_path, slot, total_workers,
-                                    resolution_s=None, cwd=None, log_dir=None):
-    # type: (str, str, int, int, Optional[float], Optional[str], Optional[str]) -> MetricsRunner
+                                    resolution_s=None, backfill_start_s=None,
+                                    backfill_end_s=None, backfill_resolution_s=None,
+                                    cwd=None, log_dir=None):
+    # type: (str, str, int, int, Optional[float], Optional[float], Optional[float], Optional[float], Optional[str], Optional[str]) -> MetricsRunner
     """Build the metrics engine runner from a written config file + this worker's
-    shard coordinates (slot / total_workers stride the series matrix)."""
+    shard coordinates (slot / total_workers stride the series matrix). A backfill
+    window, when present, makes the engine emit historical points then exit."""
     return MetricsRunner(
         socket_path, config_path, slot, total_workers,
-        resolution_s=resolution_s, cwd=cwd, log_dir=log_dir)
+        resolution_s=resolution_s, backfill_start_s=backfill_start_s,
+        backfill_end_s=backfill_end_s, backfill_resolution_s=backfill_resolution_s,
+        cwd=cwd, log_dir=log_dir)
 
 
 class Agent(object):
@@ -171,10 +176,15 @@ class Agent(object):
                 is_metrics = sl.engine == "metrics"
                 if not is_rawreplay and not is_metrics:
                     # eventgen: rewrite the pack's conf for this worker's share.
+                    # A backfill window turns it into an eventgen backfill run.
+                    backfill_window_s = None
+                    if sl.backfill_start_s is not None and sl.backfill_end_s is not None:
+                        backfill_window_s = sl.backfill_end_s - sl.backfill_start_s
                     confrewrite.rewrite_file(
                         pack.conf_path, conf_path, sl.rate_mode, sl.rate_value,
                         cfg.overdrive, pack.samples_dir,
-                        slot=sl.slot, total_workers=sl.total_workers)
+                        slot=sl.slot, total_workers=sl.total_workers,
+                        backfill_window_s=backfill_window_s)
                 # PISTON / metrics: the conf-rewrite is skipped entirely; those
                 # engines read their config from the pack (replay / metricgen).
 
@@ -326,7 +336,10 @@ class Agent(object):
         resolution = metricgen.get("resolution_s")
         return self._metrics_engine_factory(
             config_path, self._cfg.output_socket, sl.slot, sl.total_workers,
-            resolution_s=resolution, cwd=pack.pack_dir, log_dir=log_dir)
+            resolution_s=resolution, backfill_start_s=sl.backfill_start_s,
+            backfill_end_s=sl.backfill_end_s,
+            backfill_resolution_s=sl.backfill_resolution_s,
+            cwd=pack.pack_dir, log_dir=log_dir)
 
     def _gating_eps(self, sl, estimates):
         # type: (SpecSlice, Dict[str, Any]) -> Optional[float]

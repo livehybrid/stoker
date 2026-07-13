@@ -66,12 +66,26 @@ def _get(env, key):
 
 
 class Config(object):
-    def __init__(self, socket_path, spec, slot, total_workers, resolution_s):
+    def __init__(self, socket_path, spec, slot, total_workers, resolution_s,
+                 backfill_start_s=None, backfill_end_s=None,
+                 backfill_resolution_s=None):
         self.socket_path = socket_path
         self.spec = spec                    # the parsed metrics config dict
         self.slot = slot
         self.total_workers = total_workers
         self.resolution_s = resolution_s
+        # Backfill: when start+end are set the engine emits historical points
+        # over [start, end) at backfill_resolution_s (default = resolution_s),
+        # hot (no real-time sleep; the agent's token bucket paces delivery), then
+        # exits — a bounded run. None on start/end = live grid mode.
+        self.backfill_start_s = backfill_start_s
+        self.backfill_end_s = backfill_end_s
+        self.backfill_resolution_s = backfill_resolution_s
+
+    @property
+    def is_backfill(self):
+        # type: () -> bool
+        return self.backfill_start_s is not None and self.backfill_end_s is not None
 
 
 def load_config(env=None):
@@ -123,7 +137,29 @@ def load_config(env=None):
     if resolution <= 0:
         raise MetricsError("resolution_s must be > 0, got %s" % resolution)
 
-    return Config(socket_path, spec, slot, total, resolution)
+    def _float(key):
+        raw = _get(env, key)
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except ValueError:
+            raise MetricsError("%s must be a number, got %r" % (key, raw))
+
+    bf_start = _float("STOKER_METRICS_BACKFILL_START_S")
+    bf_end = _float("STOKER_METRICS_BACKFILL_END_S")
+    bf_res = _float("STOKER_METRICS_BACKFILL_RESOLUTION_S")
+    if (bf_start is None) != (bf_end is None):
+        raise MetricsError("backfill needs both START_S and END_S (or neither)")
+    if bf_start is not None and bf_end <= bf_start:
+        raise MetricsError("backfill END_S (%s) must be > START_S (%s)"
+                           % (bf_end, bf_start))
+    if bf_res is not None and bf_res <= 0:
+        raise MetricsError("backfill resolution must be > 0")
+
+    return Config(socket_path, spec, slot, total, resolution,
+                  backfill_start_s=bf_start, backfill_end_s=bf_end,
+                  backfill_resolution_s=bf_res)
 
 
 def build_series(spec):
@@ -241,7 +277,10 @@ class MetricsEngine(object):
                 # the agent closes the socket on drain, then exit clean.
                 self._idle_until_closed(sock)
                 return 0
-            self._run_grid(sock)
+            if self._cfg.is_backfill:
+                self._run_backfill(sock)
+            else:
+                self._run_grid(sock)
         finally:
             try:
                 sock.close()
@@ -265,6 +304,32 @@ class MetricsEngine(object):
                 if not self._send(sock, envelope):
                     return  # socket closed on drain
             tick += res
+
+    def _run_backfill(self, sock):
+        # type: (socket.socket) -> None
+        """Emit historical points over [start, end) then exit (a bounded run).
+
+        Walks the window in ``backfill_resolution_s`` steps (default = the live
+        resolution) IN TIME ORDER so stateful patterns (random_walk, counter)
+        evolve correctly across the window. Each point is stamped at its own
+        historical time; there is no real-time sleep — events are emitted hot and
+        the agent's token bucket paces delivery to the run's cap. When the window
+        is done the method returns, the engine exits, and the agent's engine-exit
+        path drains the run to completion.
+        """
+        cfg = self._cfg
+        res = cfg.backfill_resolution_s or cfg.resolution_s
+        start = math.floor(cfg.backfill_start_s / res) * res
+        tick = start
+        emitted_ticks = 0
+        while tick < cfg.backfill_end_s:
+            for si, series in enumerate(self._series):
+                if not self._send(sock, _encode(tick, self._fields_for(si, series, tick))):
+                    return  # socket closed on drain
+            tick += res
+            emitted_ticks += 1
+        log.info("metrics backfill complete: %d ticks x %d series over [%s, %s)",
+                 emitted_ticks, len(self._series), cfg.backfill_start_s, cfg.backfill_end_s)
 
     def _idle_until_closed(self, sock):
         # type: (socket.socket) -> None

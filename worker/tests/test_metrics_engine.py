@@ -171,6 +171,47 @@ class _FakeSock:
         pass
 
 
+def test_backfill_emits_the_historical_window_then_returns():
+    import math
+    cfg = m.Config("/x", _spec(), 0, 1, 10.0, backfill_start_s=1000.0,
+                   backfill_end_s=1600.0, backfill_resolution_s=60.0)
+    assert cfg.is_backfill
+    eng = m.MetricsEngine(cfg)
+    sock = _FakeSock(stop_after=100000)  # let the whole window emit
+    eng._run_backfill(sock)  # returns when the window is done (engine then exits)
+    docs = [json.loads(b.decode("utf-8")) for b in sock.sent]
+    start_grid = math.floor(1000.0 / 60) * 60  # 960: floored to the grid
+    expected = [float(t) for t in range(int(start_grid), 1600, 60)]
+    times = sorted({d["time"] for d in docs})
+    assert times == expected                       # historical ticks over [start,end)
+    assert len(docs) == len(expected) * 6          # x 6 series (3 products x 2 regions)
+    assert docs[0]["time"] == expected[0]          # emitted in ascending time order
+    assert docs[-1]["time"] == expected[-1]
+    assert all(d["event"] == "metric" for d in docs)
+
+
+def test_load_config_parses_backfill_window(tmp_path):
+    cfg_file = tmp_path / "m.json"
+    cfg_file.write_text(json.dumps(_spec()))
+    env = {"STOKER_METRICS_CONFIG": str(cfg_file), "STOKER_OUTPUT_SOCKET": "/s",
+           "STOKER_METRICS_BACKFILL_START_S": "1000", "STOKER_METRICS_BACKFILL_END_S": "4600",
+           "STOKER_METRICS_BACKFILL_RESOLUTION_S": "300"}
+    cfg = m.load_config(env)
+    assert cfg.is_backfill
+    assert (cfg.backfill_start_s, cfg.backfill_end_s, cfg.backfill_resolution_s) == (1000.0, 4600.0, 300.0)
+
+
+def test_load_config_rejects_bad_backfill_window(tmp_path):
+    cfg_file = tmp_path / "m.json"
+    cfg_file.write_text(json.dumps(_spec()))
+    base = {"STOKER_METRICS_CONFIG": str(cfg_file), "STOKER_OUTPUT_SOCKET": "/s"}
+    with pytest.raises(m.MetricsError):  # end <= start
+        m.load_config({**base, "STOKER_METRICS_BACKFILL_START_S": "5000",
+                       "STOKER_METRICS_BACKFILL_END_S": "1000"})
+    with pytest.raises(m.MetricsError):  # only one bound set
+        m.load_config({**base, "STOKER_METRICS_BACKFILL_START_S": "1000"})
+
+
 def test_run_grid_emits_owned_series_each_tick():
     spec = _spec()
     cfg = m.Config("/x", spec, 0, 1, 10.0)
