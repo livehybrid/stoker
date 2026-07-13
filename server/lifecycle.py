@@ -224,7 +224,7 @@ def _resolve_bundle(db, spec, settings=None):
     a re-run of the same pack never rebuilds. The bundle row is added/flushed so
     ``bundle.id`` is available for the run's ``bundle_id`` foreign key.
     """
-    from .bundles import build_from_pack
+    from .bundles import build_from_metrics_config, build_from_pack
 
     pack = spec.pack
     if pack is None:
@@ -236,7 +236,14 @@ def _resolve_bundle(db, spec, settings=None):
 
     if settings is None:
         settings = get_settings()
-    built = build_from_pack(pack.source_path, bundle_dir=settings.bundle_dir)
+    # A UI-authored metrics pack has no source directory: its bundle is
+    # synthesised from the stored builder config. Every other pack builds from
+    # its on-disk source_path (a local directory or a repo clone).
+    if pack.builder_config_json is not None:
+        built = build_from_metrics_config(
+            pack.name, pack.builder_config_json, bundle_dir=settings.bundle_dir)
+    else:
+        built = build_from_pack(pack.source_path, bundle_dir=settings.bundle_dir)
 
     existing = db.execute(
         select(Bundle).where(Bundle.digest == built.digest)

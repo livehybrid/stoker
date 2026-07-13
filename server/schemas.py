@@ -220,6 +220,65 @@ class PackPreview(BaseModel):
     lint_errors: List[str] = Field(default_factory=list)
 
 
+# --------------------------------------------------------------------------- #
+# Metric packs (UI-authored `metricgen` config -> engine: metrics)
+# --------------------------------------------------------------------------- #
+
+class MetricPackCreate(BaseModel):
+    """Create/update a metric pack from a builder `metricgen` config.
+
+    ``config`` is the whole ``metricgen`` object (``resolution_s``,
+    ``tz_offset_hours``, ``seed``, ``dimensions``, ``metrics``); it is validated
+    by ``bundles.lint_metrics_config`` at the route, not schema-enforced here, so
+    the flexible pattern/scale shapes stay open.
+    """
+
+    name: str
+    description: Optional[str] = None
+    config: Dict[str, Any]
+
+
+class MetricPackDetail(BaseModel):
+    """A metric pack with its builder config, for the editor."""
+
+    id: int
+    name: str
+    description: Optional[str] = None
+    engines_json: Optional[Any] = None
+    sourcetypes_json: Optional[Any] = None
+    verified: bool
+    lint_status: str
+    lint_errors_json: Optional[Any] = None
+    created_at: datetime.datetime
+    config: Dict[str, Any]
+    series_count: int
+
+
+class MetricPreviewRequest(BaseModel):
+    """Preview one metric's daily curve from an (in-progress) builder config."""
+
+    config: Dict[str, Any]
+    metric: Optional[str] = None                 # name; default = first metric
+    cell: Optional[Dict[str, str]] = None        # a dimension combo for scaling
+    points: int = 96                             # samples across 24 h
+
+
+class MetricPreviewPoint(BaseModel):
+    hour: float
+    activity: float
+    center: float
+    value: float
+
+
+class MetricPreviewResponse(BaseModel):
+    metric: str
+    unit: Optional[str] = None
+    kind: str
+    guides: Dict[str, float]                      # {min, p95, max} (cell-scaled)
+    points: List[MetricPreviewPoint]
+    series_count: int
+
+
 class PackPreviewRun(BaseModel):
     """Rendered preview events from a pack (no fleet, no HEC target).
 

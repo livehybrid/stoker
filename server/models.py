@@ -135,6 +135,11 @@ class Pack(Base):
     repo_id: Mapped[Optional[int]] = mapped_column(ForeignKey("repos.id"), nullable=True)
     # The repo head SHA this pack was last indexed at (null for a local pack).
     indexed_sha: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    # UI-authored builder config (currently metrics packs): the `metricgen`
+    # object the bundle is synthesised from. Null for a normal (directory/repo)
+    # pack. When set, the pack has no meaningful source_path and its bundle is
+    # built via bundles.build_from_metrics_config rather than from disk.
+    builder_config_json: Mapped[Optional[Any]] = mapped_column(JSON_VARIANT, nullable=True)
     created_at: Mapped[datetime.datetime] = _ts_column(nullable=False, default=utcnow)
 
     bundles: Mapped[list["Bundle"]] = relationship(back_populates="pack")

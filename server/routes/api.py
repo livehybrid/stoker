@@ -647,12 +647,16 @@ def run_spec(spec_id: int, body: RunLaunch, request: Request, db: Session = Depe
     # --- Submit-time validation gates (order: cheap/local first) ----------- #
 
     # 1. Lint ok: the pack must currently lint clean (a stale/broken pack is a
-    #    hard stop; 422 with the lint errors so the operator can fix it).
-    lint = bundles.lint_pack(pack.source_path)
-    if not lint.ok:
+    #    hard stop; 422 with the lint errors so the operator can fix it). A
+    #    UI-authored metrics pack has no source directory; lint its stored config.
+    if pack.builder_config_json is not None:
+        lint_errors = bundles.lint_metrics_config(pack.builder_config_json)
+    else:
+        lint_errors = bundles.lint_pack(pack.source_path).errors
+    if lint_errors:
         raise HTTPException(
             status_code=422,
-            detail={"error": "pack_lint_failed", "errors": lint.errors},
+            detail={"error": "pack_lint_failed", "errors": lint_errors},
         )
 
     # 1b. Engine/pack consistency: a rawreplay spec needs a rawreplay pack (its
@@ -672,6 +676,33 @@ def run_spec(spec_id: int, body: RunLaunch, request: Request, db: Session = Depe
                     "engine: rawreplay with a dataset" % pack.id),
             },
         )
+
+    # 1c. Metrics engine/pack consistency. A metrics pack (UI-authored builder
+    #     config) must run under the metrics engine (its bundle ships only a stub
+    #     eventgen.conf), and the metrics engine needs a metrics pack (it reads a
+    #     metricgen config). The metrics engine is also engine-paced, so it
+    #     requires count_interval pacing (an eps/per_day_gb bucket would throttle
+    #     the fixed-resolution grid).
+    is_metrics_pack = pack.builder_config_json is not None
+    is_metrics_spec = (spec.engine or "").strip() == bundles.METRICS_ENGINE
+    if is_metrics_spec and not is_metrics_pack:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "engine_pack_mismatch",
+                    "detail": "spec engine is 'metrics' but pack %s is not a "
+                              "metrics pack (no metricgen config)" % pack.id})
+    if is_metrics_pack and not is_metrics_spec:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "engine_pack_mismatch",
+                    "detail": "pack %s is a metrics pack; the spec engine must be "
+                              "'metrics'" % pack.id})
+    if is_metrics_spec and spec.rate_mode != "count_interval":
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "metrics_rate_mode",
+                    "detail": "the metrics engine is engine-paced; use "
+                              "rate_mode 'count_interval' (interval = resolution)"})
 
     # 2. replay-single-worker: replay is engine-paced and the control plane
     #    guarantees workers = 1. This covers an eventgen pack with a
