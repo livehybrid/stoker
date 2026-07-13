@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import os
 import py_compile
+import re
 import subprocess
 import sys
 
@@ -199,6 +200,42 @@ def test_sample_file_generate_with_timestamp_token(tmp_path):
     assert len(lines) == 4, result.stdout.decode()
     # every timestamp must have been replaced away from the 2020 fixture value
     assert all("2020-01-01" not in line for line in lines), lines
+
+
+def test_file_token_generate_replaces_from_sample_file(tmp_path):
+    # Regression for the vendored `file`/`mvfile` token path: it opens the
+    # referenced sample with open(path, "r"). It previously used mode "rU", which
+    # was removed in py3.11 and raises ValueError: invalid mode: 'rU', breaking
+    # every pack with a `replacementType = file` token (apigw, web-access,
+    # aws-s3-access, aws-elb-alb). The generate run must succeed and the token's
+    # placeholder must be replaced with a value drawn from the sample file.
+    pytest.importorskip("dateutil")
+    conf = _write_pack(
+        tmp_path,
+        "[web.sample]\n"
+        "generator = default\n"
+        "count = 6\n"
+        "interval = 1\n"
+        "end = 1\n"
+        "outputMode = stdout\n"
+        "token.0.token = status=(\\d{3})\n"
+        "token.0.replacementType = file\n"
+        # The file token path resolves via os.path.abspath (relative to cwd,
+        # which _run_generate sets to tmp_path); the pack lives at pack/ under it.
+        "token.0.replacement = pack/samples/status_codes.sample\n",
+        samples={
+            "web.sample": "GET /a status=000\n",
+            "status_codes.sample": "200\n503\n404\n",
+        },
+    )
+    result = _run_generate(conf, tmp_path)
+    assert result.returncode == 0, result.stderr.decode()
+    lines = [l for l in result.stdout.decode().splitlines() if "GET /a status=" in l]
+    assert len(lines) == 6, result.stdout.decode()
+    # The 000 placeholder is replaced by a value read from the file token target.
+    codes = {re.search(r"status=(\d{3})", line).group(1) for line in lines}
+    assert codes <= {"200", "503", "404"}, codes
+    assert "status=000" not in "".join(lines)
 
 
 def test_jinja_generate_smoke(tmp_path):

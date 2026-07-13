@@ -134,6 +134,29 @@ A token carries its own role (a CI token can be `operator` without holding admin
 - Portainer swarm stack 107, Postgres 16 backing store.
 - Images: `ghcr.io/livehybrid/stoker` (control plane) and `ghcr.io/livehybrid/stoker-worker` (worker), both multi-arch (amd64, arm64) and cosign-signed.
 
+## Bundled packs
+
+Stoker ships a set of ready-to-run packs under [`packs/`](packs/), each mapped to
+its Splunk-native sourcetype so events land under the right field extractions.
+Pick one at submit, set a rate (EPS or GB/day) and go; author your own with
+[docs/PACKS.md](docs/PACKS.md).
+
+| Pack | Engine | Sourcetype | What it generates |
+|---|---|---|---|
+| `flatline` | eventgen | `stoker:flatline` | Steady single-line web-service log at a constant rate — the exact-rate baseline. |
+| `apigw` | eventgen | `stoker:apigw` | API gateway access log with a diurnal `hourOfDayRate` curve and a weighted status mix. |
+| `web-access` | eventgen | `access_combined` | Generic website access log (NCSA combined): browsers, mobiles, API clients, search bots and scanner probes, diurnal curve. |
+| `aws-cloudtrail` | eventgen | `aws:cloudtrail` | AWS CloudTrail JSON — S3 data events (GetObject/PutObject/DeleteObject/HeadObject/ListObjects) plus management events (ConsoleLogin, AssumeRole, RunInstances, CreateBucket, KMS). |
+| `aws-s3-access` | eventgen | `aws:s3:accesslogs` | S3 server access logs — the space-delimited per-request log, weighted REST operation mix. |
+| `aws-elb-alb` | eventgen | `aws:elb:accesslogs` | Application Load Balancer access logs — full ALB field order, weighted http/https/h2 and status mix. |
+| `attack-replay` | rawreplay (Piston) | `XmlWinEventLog` | Byte-for-byte replay of a recorded Sysmon/Windows-Security attack capture, re-stamped to now. |
+
+All eventgen packs re-stamp timestamps to now, randomise source IPs and apply a
+realistic weighted status/event mix. Want real recorded captures instead of
+synthetic templates? See ["Sourcing real datasets"](docs/PACKS.md#sourcing-real-datasets)
+for public corpora (BOTSv3, attack_data, NASA-HTTP, …) you can wire in as
+`rawreplay` `dataset_url` packs.
+
 ## Repo layout
 
 ```
@@ -142,7 +165,8 @@ worker/    agent (control-plane protocol, token-bucket pacing, HEC client)
 server/    FastAPI control plane: routes (agent/operator/auth/users/tokens),
            lifecycle, drivers (swarm/k8s/fake), gitsync, bundles, crypto, models
 ui/        React / Vite / TanStack Router single-page app (built into the image)
-packs/     example packs: flatline + apigw (eventgen), attack-replay (Piston)
+packs/     bundled packs (see "Bundled packs"): flatline, apigw, web-access,
+           aws-cloudtrail, aws-s3-access, aws-elb-alb (eventgen) + attack-replay (Piston)
 infra/     stacks/stoker (swarm stack + deploy.py), k8s/ manifests,
            aws/stoker-eks/ Terraform
 docs/      WORKER-CONTRACT.md and design references

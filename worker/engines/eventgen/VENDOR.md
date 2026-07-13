@@ -46,6 +46,7 @@ Generator plugins kept: `default`, `replay`, `jinja`, `windbag`, `counter`, `per
 | `lib/eventgensamples.py` | same six → `urllib.request` swap in `saveState` | drop six |
 | `lib/eventgentoken.py` | six imports → `urllib.parse`; `quote` call updated | drop six |
 | `lib/eventgentoken.py` | `random.randint(minDelta, maxDelta)` → `int(maxDelta)` cast | float args to randint raise on py3.10+ |
+| `lib/eventgentoken.py` | `open(replacementFile, "rU")` → `open(replacementFile, "r")` on the `file`/`mvfile` token path | the `U` (universal-newlines) mode flag was removed in py3.11 and raises `ValueError: invalid mode: 'rU'`; text mode is universal-newlines by default in py3, so behaviour is unchanged. Without this, any pack with a `replacementType = file` token (`apigw`, `web-access`, `aws-s3-access`, `aws-elb-alb`) fails to render on py3.11+ |
 | `lib/generatorplugin.py` | httplib2 + six backfillSearch REST call → stdlib `urllib.request` with unverified SSL context (matches upstream's disabled cert validation) | drop httplib2 and six |
 | `lib/generatorplugin.py` | undefined name `c` → `self.config` in `setupBackfill`, catch `AttributeError` too | upstream NameError bug (was flake8-suppressed with noqa F821) |
 | `lib/eventgentimestamp.py` | `int()` casts on `time.mktime` results fed to `random.randint` (3 sites) | float args to randint raise on py3.10+ |

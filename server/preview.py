@@ -277,12 +277,28 @@ def _apply_token(line, compiled, rtype, replacement, now):
     A fresh replacement value is drawn per match for random tokens (ipv4 /
     integer), so two ipv4 tokens on one line differ, mirroring eventgen. An
     unsupported/unknown token type leaves the matched text untouched.
+
+    When the token regex has a capturing group, only **group 1** is replaced and
+    the literal text on either side of it within the match is preserved — exactly
+    as the vendored eventgen does (it substitutes ``match.start(1)..end(1)``, not
+    the whole match). This keeps structural context intact: a ``srcip=(...)``
+    token keeps ``srcip=``, a ``"sourceIPAddress":"(...)"`` token keeps the JSON
+    key and quotes, and a ``] (ip)`` token keeps the ``] `` before the address.
+    A groupless token replaces the whole match (e.g. a bare timestamp regex).
     """
+    has_group = compiled.groups >= 1
+
     def _sub(_match):
         # type: (re.Match) -> str
         value = _replacement_value(rtype, replacement, now)
         # Unsupported token: keep the original matched text verbatim.
-        return _match.group(0) if value is None else value
+        if value is None:
+            return _match.group(0)
+        if has_group and _match.group(1) is not None:
+            whole = _match.group(0)
+            base = _match.start(0)
+            return whole[: _match.start(1) - base] + value + whole[_match.end(1) - base :]
+        return value
 
     return compiled.sub(_sub, line)
 

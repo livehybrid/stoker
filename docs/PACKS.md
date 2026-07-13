@@ -24,7 +24,7 @@ There are **two pack kinds**, selected by the engine:
 | Purpose | *Template* events from a sample, tokens re-randomised each pass | *Replay* a recorded dataset **byte-for-byte**, re-timestamped to now |
 | Required file | `default/eventgen.conf` | `pack.yaml` with `engine: rawreplay` + a `replay:` section |
 | Payload | `samples/*` | a dataset file (`replay.dataset`) or an https `replay.dataset_url` |
-| Examples | `packs/flatline`, `packs/apigw` | `packs/attack-replay` |
+| Examples | `packs/flatline`, `packs/apigw`, `packs/web-access`, `packs/aws-cloudtrail`, `packs/aws-s3-access`, `packs/aws-elb-alb` | `packs/attack-replay` |
 | Workers | fan-out across N | **1** (control plane forces it; `409 replay_single_worker`) |
 
 Both kinds share the same `pack.yaml` metadata block (`name`, `description`,
@@ -149,6 +149,26 @@ token.0.replacement = %Y-%m-%dT%H:%M:%S
 The worker rewrites `interval`/`count` (or `perDayVolume`) for its share of the
 rate; `hourOfDayRate` and the other `*Rate` shaping maps are preserved verbatim
 in `per_day_gb`/`count_interval` modes (see `packs/apigw` for a diurnal example).
+
+### Token replacement: capture groups and the `%s` epoch gotcha
+
+Two behaviours of the vendored eventgen (7.2.1) matter when authoring tokens, and
+both are honoured by the in-app [preview renderer](#) too:
+
+- **Capture group replaces the group, not the whole match.** A `token.N.token`
+  regex with a capturing group has **only group 1** substituted; the literal text
+  on either side of it (inside the match) is preserved. This is what lets a JSON
+  or delimited pack rewrite a value in place: `"sourceIPAddress":"(\d+\.\d+\.\d+\.\d+)"`
+  keeps the key and quotes, `\] (\d+\.\d+\.\d+\.\d+)` keeps the `] ` before the
+  address, and `srcip=(\d...)` keeps `srcip=`. A **groupless** regex replaces the
+  whole match (use this for a bare timestamp like `\d{4}-\d{2}-\d{2}T...`).
+- **Avoid `%s` epoch timestamps.** The vendored eventgen builds an epoch for a
+  `%s` replacement as `str(epoch).rstrip("0")`, which strips trailing zeros — so
+  any epoch ending in `0` is silently corrupted (e.g. `1625097600` → `16250976`).
+  Do **not** use `%s` timestamp tokens. For a format that carries a Unix epoch
+  (e.g. VPC Flow Logs), either leave the recorded epoch (the agent stamps the HEC
+  envelope `time` to now regardless, so `_time` is correct) or template the event
+  around a human-readable timestamp field instead.
 
 ### sample vs replay mode inside eventgen.conf
 
@@ -418,3 +438,41 @@ embedded, so the worker never re-fetches:
   }
 }
 ```
+
+---
+
+## Sourcing real datasets
+
+The bundled eventgen packs (`web-access`, `aws-cloudtrail`, `aws-s3-access`,
+`aws-elb-alb`, `apigw`, `flatline`) are **synthetic** — authored in-repo, so they
+carry a clean Apache-2.0 licence, template to any volume and re-stamp to now. That
+is the recommended default for a public pack.
+
+When you want to replay a **real recorded capture** instead, add a
+[`rawreplay` pack](#rawreplay-piston-packs) pointing `replay.dataset_url` at a
+public dataset (or vendor the file and use a local `replay.dataset`). Mind the
+[`dataset_url` safety rules](#dataset_url-safety) and, above all, the licence of
+the source. Some useful public corpora, with their terms as of this writing
+(**verify before redistributing — licences change**):
+
+| Source | Contents | Format | Licence |
+|---|---|---|---|
+| [splunk/botsv3](https://github.com/splunk/botsv3) (also v1/v2) | 80+ sourcetypes: CloudTrail, VPC Flow, S3 access, GuardDuty, DNS, Sysmon, WinEventLog, Azure AD, O365 | Pre-indexed Splunk buckets + JSON export | **CC0** (public domain) |
+| [splunk/attack_data](https://github.com/splunk/attack_data) | Attack captures by MITRE ATT&CK technique; Windows/Sysmon-heavy, some nginx/auditd/O365/CloudTrail | Raw log files (Git LFS) | **Apache-2.0** |
+| [logpai/loghub](https://github.com/logpai/loghub) | 16+ system-log datasets: Apache, OpenSSH, Linux, Hadoop, HDFS, OpenStack, … | Raw log files | **Research-only** + citation (not for commercial redistribution) |
+| [NASA-HTTP](https://ita.ee.lbl.gov/html/contrib/NASA-HTTP.html) / Calgary-HTTP (ITA) | Classic web-server access logs (NCSA combined) | Raw log files | "Freely redistributable" (1995 data) |
+| [secrepo.com](https://www.secrepo.com/) | Curated security samples: web logs, network captures, threat intel | Mixed raw | **CC BY 4.0** (attribution) |
+| [flaws.cloud CloudTrail](https://summitroute.com/blog/2020/10/09/public_dataset_of_cloudtrail_logs_from_flaws_cloud/) | 1.9M real CloudTrail events (attack traffic) | Gzipped CloudTrail JSON | **Unclear** — shared for community use; do not redistribute without asking the author |
+
+Notes:
+
+- **Best clean-licence real data:** BOTSv3 (CC0) and `attack_data` (Apache-2.0).
+  BOTSv3 ships as pre-indexed Splunk buckets — extract raw events from its JSON
+  export for replay; the buckets themselves are not directly replayable.
+- **Splunk Technology Add-ons** (`Splunk_TA_aws`, `TA-apache_access_eventgen`,
+  etc.) ship their own `default/eventgen.conf` + `samples/`, but under the Splunk
+  Software Licence Agreement — fine to run locally, **not** to redistribute inside
+  your own pack. Treat them as a format reference, not a data source to vendor.
+- `attack_data` captures are large and stored via Git LFS: point `dataset_url` at
+  the `media.githubusercontent.com/media/...` raw URL, not the GitHub HTML page
+  (see the [`dataset_url` note](#rawreplay-piston-packs)).
