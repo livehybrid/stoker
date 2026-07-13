@@ -327,3 +327,41 @@ def test_alb_sample_size_and_meta():
     y = (PACKS / "aws-elb-alb" / "pack.yaml").read_text()
     assert "name: aws-elb-alb" in y
     assert "sourcetype: aws:elb:accesslogs" in y
+
+
+# ---- splunk-tutorial-web (Buttercup Games shape, access_combined_wcookie) ----
+
+def test_tutorial_web_stanza_and_tokens():
+    stanza = _single_stanza("splunk-tutorial-web", "tutorial_web.sample")
+    assert stanza["mode"] == "sample"
+    assert stanza["token.0.replacementType"] == "timestamp"
+    assert stanza["token.1.replacementType"] == "random"
+    assert stanza["token.1.replacement"] == "ipv4"
+    assert stanza["token.2.replacementType"] == "file"
+    _assert_tokens_match_every_line(stanza, "splunk-tutorial-web", "tutorial_web.sample", 3)
+
+
+def test_tutorial_web_reproduces_buttercup_shape():
+    lines = read_sample("splunk-tutorial-web", "tutorial_web.sample")
+    blob = "\n".join(lines)
+    # The tutorial data's signature features must be present.
+    assert 'HTTP 1.1"' in blob  # the space-not-slash request form
+    assert "buttercupgames.com" in blob
+    assert "JSESSIONID=" in blob
+    for token in ("productId=", "categoryId=", "cart.do?action="):
+        assert token in blob, token
+    # Real Buttercup Games SKUs / categories appear.
+    assert re.search(r"productId=[A-Z]{2}-[A-Z]{2}-[A-Z]\d{2}", blob)
+    assert re.search(r"categoryId=(STRATEGY|ARCADE|SHOOTER|SIMULATION|SPORTS|TEE|ACCESSORIES|NULL)", blob)
+    # Weighted status pool: 200 dominant, errors a minority.
+    codes = read_sample("splunk-tutorial-web", "status_codes.sample")
+    assert all(re.fullmatch(r"[1-5]\d{2}", c) for c in codes)
+    assert codes.count("200") / len(codes) > 0.4
+    assert 0 < sum(1 for c in codes if c >= "400") / len(codes) < 0.4
+
+
+def test_tutorial_web_sample_size_and_meta():
+    _assert_mean_bytes("splunk-tutorial-web", "tutorial_web.sample", 295)
+    y = (PACKS / "splunk-tutorial-web" / "pack.yaml").read_text()
+    assert "name: splunk-tutorial-web" in y
+    assert "sourcetype: access_combined_wcookie" in y

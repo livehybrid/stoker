@@ -149,6 +149,7 @@ Pick one at submit, set a rate (EPS or GB/day) and go; author your own with
 | `aws-cloudtrail` | eventgen | `aws:cloudtrail` | AWS CloudTrail JSON — S3 data events (GetObject/PutObject/DeleteObject/HeadObject/ListObjects) plus management events (ConsoleLogin, AssumeRole, RunInstances, CreateBucket, KMS). |
 | `aws-s3-access` | eventgen | `aws:s3:accesslogs` | S3 server access logs — the space-delimited per-request log, weighted REST operation mix. |
 | `aws-elb-alb` | eventgen | `aws:elb:accesslogs` | Application Load Balancer access logs — full ALB field order, weighted http/https/h2 and status mix. |
+| `splunk-tutorial-web` | eventgen | `access_combined_wcookie` | Splunk Search Tutorial-style Buttercup Games web access log — product/category/cart actions with `productId`/`categoryId`/`JSESSIONID`. Synthetic reproduction of the tutorial format, not Splunk's copyrighted files. |
 | `attack-replay` | rawreplay (Piston) | `XmlWinEventLog` | Byte-for-byte replay of a recorded Sysmon/Windows-Security attack capture, re-stamped to now. |
 
 All eventgen packs re-stamp timestamps to now, randomise source IPs and apply a
@@ -166,7 +167,8 @@ server/    FastAPI control plane: routes (agent/operator/auth/users/tokens),
            lifecycle, drivers (swarm/k8s/fake), gitsync, bundles, crypto, models
 ui/        React / Vite / TanStack Router single-page app (built into the image)
 packs/     bundled packs (see "Bundled packs"): flatline, apigw, web-access,
-           aws-cloudtrail, aws-s3-access, aws-elb-alb (eventgen) + attack-replay (Piston)
+           aws-cloudtrail, aws-s3-access, aws-elb-alb, splunk-tutorial-web
+           (eventgen) + attack-replay (Piston)
 infra/     stacks/stoker (swarm stack + deploy.py), k8s/ manifests,
            aws/stoker-eks/ Terraform
 docs/      WORKER-CONTRACT.md and design references
