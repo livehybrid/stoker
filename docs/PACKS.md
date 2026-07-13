@@ -24,7 +24,7 @@ There are **two pack kinds**, selected by the engine:
 | Purpose | *Template* events from a sample, tokens re-randomised each pass | *Replay* a recorded dataset **byte-for-byte**, re-timestamped to now |
 | Required file | `default/eventgen.conf` | `pack.yaml` with `engine: rawreplay` + a `replay:` section |
 | Payload | `samples/*` | a dataset file (`replay.dataset`) or an https `replay.dataset_url` |
-| Examples | `packs/flatline`, `packs/apigw`, `packs/web-access`, `packs/aws-cloudtrail`, `packs/aws-s3-access`, `packs/aws-elb-alb`, `packs/splunk-tutorial-web` | `packs/attack-replay` |
+| Examples | `packs/flatline`, `packs/apigw`, `packs/web-access`, `packs/aws-cloudtrail`, `packs/aws-s3-access`, `packs/aws-elb-alb`, `packs/splunk-tutorial-web`, `packs/splunk-tutorial-secure`, `packs/splunk-tutorial-vendor-sales` | `packs/attack-replay` |
 | Workers | fan-out across N | **1** (control plane forces it; `409 replay_single_worker`) |
 
 Both kinds share the same `pack.yaml` metadata block (`name`, `description`,

@@ -365,3 +365,67 @@ def test_tutorial_web_sample_size_and_meta():
     y = (PACKS / "splunk-tutorial-web" / "pack.yaml").read_text()
     assert "name: splunk-tutorial-web" in y
     assert "sourcetype: access_combined_wcookie" in y
+
+
+# ---- splunk-tutorial-secure (Buttercup Games secure.log, linux_secure) ----
+
+def test_tutorial_secure_stanza_and_tokens():
+    stanza = _single_stanza("splunk-tutorial-secure", "tutorial_secure.sample")
+    assert stanza["mode"] == "sample"
+    assert stanza["token.0.replacementType"] == "timestamp"
+    assert stanza["token.1.replacementType"] == "random"
+    assert stanza["token.1.replacement"] == "ipv4"
+    assert stanza["token.2.replacementType"] == "random"
+    assert stanza["token.2.replacement"].startswith("integer[")
+    _assert_tokens_match_every_line(stanza, "splunk-tutorial-secure", "tutorial_secure.sample", 3)
+
+
+def test_tutorial_secure_reproduces_sshd_shape():
+    lines = read_sample("splunk-tutorial-secure", "tutorial_secure.sample")
+    blob = "\n".join(lines)
+    # sshd auth events with a source IP; the tutorial's weekday/month/day/year form.
+    for line in lines:
+        assert re.match(r"^\w{3} \w{3} \d{2} \d{4} \d{2}:\d{2}:\d{2} \w+ sshd\[\d+\]: ", line), line
+        assert re.search(r"from \d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", line), line
+    assert "Failed password" in blob
+    assert "Accepted password" in blob
+    assert "invalid user" in blob
+
+
+def test_tutorial_secure_sample_size_and_meta():
+    _assert_mean_bytes("splunk-tutorial-secure", "tutorial_secure.sample", 110)
+    y = (PACKS / "splunk-tutorial-secure" / "pack.yaml").read_text()
+    assert "name: splunk-tutorial-secure" in y
+    assert "sourcetype: linux_secure" in y
+
+
+# ---- splunk-tutorial-vendor-sales (vendor_sales.log, vendor_sales) ----
+
+def test_tutorial_vendor_stanza_and_tokens():
+    stanza = _single_stanza("splunk-tutorial-vendor-sales", "tutorial_vendor_sales.sample")
+    assert stanza["mode"] == "sample"
+    assert stanza["token.0.replacementType"] == "timestamp"
+    assert stanza["token.1.replacementType"] == "random"
+    assert stanza["token.1.replacement"].startswith("integer[")
+    assert stanza["token.2.replacementType"] == "random"
+    assert stanza["token.2.replacement"].startswith("integer[")
+    _assert_tokens_match_every_line(stanza, "splunk-tutorial-vendor-sales", "tutorial_vendor_sales.sample", 3)
+
+
+def test_tutorial_vendor_reproduces_sales_shape():
+    lines = read_sample("splunk-tutorial-vendor-sales", "tutorial_vendor_sales.sample")
+    codes = set()
+    for line in lines:
+        m = re.match(r"^\[\d{2}/\w{3}/\d{4}:\d{2}:\d{2}:\d{2}\] VendorID=\d+ Code=([A-F]) AcctID=(\d+)$", line)
+        assert m, line
+        assert len(m.group(2)) == 16, "AcctID must be 16 digits: %s" % line
+        codes.add(m.group(1))
+    # The Code field (the price-lookup key) spans several values.
+    assert len(codes) >= 4, codes
+
+
+def test_tutorial_vendor_sample_size_and_meta():
+    _assert_mean_bytes("splunk-tutorial-vendor-sales", "tutorial_vendor_sales.sample", 67)
+    y = (PACKS / "splunk-tutorial-vendor-sales" / "pack.yaml").read_text()
+    assert "name: splunk-tutorial-vendor-sales" in y
+    assert "sourcetype: vendor_sales" in y
