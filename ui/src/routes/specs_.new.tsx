@@ -257,22 +257,33 @@ function JobWizard() {
   // align interval to the pack's resolution, count to its series and cap workers
   // at the series count. The engine + rate-mode fields are locked below.
   useEffect(() => {
-    if (!isMetrics) return;
-    setForm((f) => {
-      const next: FormState = {
-        ...f,
-        engine: "metrics",
-        rate_mode: "count_interval",
-      };
-      const detail = metricDetailQ.data;
-      if (detail) {
-        next.interval_s = String(detail.config.resolution_s);
-        next.rate_value = String(detail.series_count);
-        const w = Math.max(1, Math.floor(Number(f.workers) || 1));
-        if (w > detail.series_count) next.workers = String(detail.series_count);
-      }
-      return next;
-    });
+    if (isMetrics) {
+      setForm((f) => {
+        const next: FormState = {
+          ...f,
+          engine: "metrics",
+          rate_mode: "count_interval",
+        };
+        const detail = metricDetailQ.data;
+        if (detail) {
+          next.interval_s = String(detail.config.resolution_s);
+          next.rate_value = String(detail.series_count);
+          const w = Math.max(1, Math.floor(Number(f.workers) || 1));
+          if (w > detail.series_count) next.workers = String(detail.series_count);
+        }
+        return next;
+      });
+    } else {
+      // Switched to a non-metrics pack: if the engine was locked to "metrics"
+      // (from a previously-selected metric pack), revert to the default engine
+      // and rate mode so an eventgen pack is never left with engine=metrics
+      // (which the server rejects at run: "not a metrics pack").
+      setForm((f) =>
+        f.engine === "metrics"
+          ? { ...f, engine: "eventgen", rate_mode: "eps" }
+          : f,
+      );
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isMetrics, metricDetailQ.data]);
 
