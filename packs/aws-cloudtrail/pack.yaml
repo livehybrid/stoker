@@ -10,6 +10,7 @@
 # NOTE: the worker parses this with a flat two-level scalar subset of YAML;
 # keep every value on a single line.
 name: aws-cloudtrail
+tags: aws, cloud, cloudtrail, s3, security, audit, json
 engine: eventgen
 description: "AWS CloudTrail JSON (aws:cloudtrail): S3 data events (GetObject/PutObject/DeleteObject/HeadObject/ListObjects) plus management events (ConsoleLogin, AssumeRole, RunInstances, DescribeInstances, CreateBucket, PutBucketPolicy, KMS) with correlated userIdentity/requestParameters/readOnly/eventCategory; tokens re-stamp eventTime, randomise sourceIPAddress and mint a fresh eventID per record"
 estimates:

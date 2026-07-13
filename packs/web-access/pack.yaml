@@ -6,6 +6,7 @@
 # NOTE: the worker parses this with a flat two-level scalar subset of YAML;
 # keep every value on a single line.
 name: web-access
+tags: web, access, nginx, apache, access_combined
 engine: eventgen
 description: "Generic website access log (NCSA combined format, access_combined) with a realistic diurnal curve: browsers, mobiles, API clients, search bots and scanner probes across static assets, app pages and API paths, with randomizeCount jitter, a 24-key hourOfDayRate map and file-based weighted status codes"
 estimates:

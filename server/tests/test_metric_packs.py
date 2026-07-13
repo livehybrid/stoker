@@ -213,3 +213,22 @@ def test_metrics_spec_run_builds_bundle_from_config(client, db_session, settings
     bundle = db_session.execute(
         select(Bundle).where(Bundle.pack_id == mp["id"])).scalars().first()
     assert bundle is not None
+
+
+def test_pack_preview_endpoints_do_not_crash_on_a_metric_pack(client):
+    # Regression: the spec wizard's PackPicker calls GET /packs/{id}/preview when
+    # a pack is selected. A metric pack has no eventgen source dir, so linting
+    # source_path ("builder://metrics") used to 500 with "pack directory not
+    # found". Both preview endpoints must now handle a metric pack gracefully.
+    mp = client.post("/api/metric-packs",
+                     json={"name": "kpi", "config": _valid_config()}).json()
+    pid = mp["id"]
+
+    pv = client.get("/api/packs/%d/preview" % pid)
+    assert pv.status_code == 200, pv.text
+    body = pv.json()
+    assert body["stanzas"] == [] and body["lint_status"] == "ok"
+
+    pr = client.get("/api/packs/%d/preview_run" % pid)
+    assert pr.status_code == 200
+    assert pr.json()["events"] == []

@@ -13,6 +13,7 @@
 # NOTE: the worker parses this with a flat two-level scalar subset of YAML;
 # keep every value on a single line.
 name: splunk-tutorial-web
+tags: splunk, tutorial, web, access, buttercup
 engine: eventgen
 description: "Splunk Search Tutorial-style Buttercup Games web access log (access_combined_wcookie): product.screen / category.screen / cart.do actions with productId, categoryId, JSESSIONID and itemId params, the tutorial's `HTTP 1.1` form, buttercupgames.com referers and the trailing numeric field; tokens re-stamp the timestamp, randomise the client IP and apply a weighted status mix. Synthetic reproduction of the tutorial format, not Splunk's copyrighted tutorial files"
 estimates:

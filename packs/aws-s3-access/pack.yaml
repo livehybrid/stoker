@@ -9,6 +9,7 @@
 # NOTE: the worker parses this with a flat two-level scalar subset of YAML;
 # keep every value on a single line.
 name: aws-s3-access
+tags: aws, cloud, s3, access, storage
 engine: eventgen
 description: "AWS S3 server access logs (aws:s3:accesslogs): space-delimited per-request log with a weighted REST operation mix (GET/HEAD/PUT/DELETE/list), full official field order through SourceRegion; tokens re-stamp the request time, randomise the remote IP and apply a weighted HTTP status mix"
 estimates:

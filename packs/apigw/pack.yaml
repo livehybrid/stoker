@@ -4,6 +4,7 @@
 # NOTE: the worker parses this with a flat two-level scalar subset of YAML;
 # keep every value on a single line.
 name: api-gateway
+tags: web, access, api, gateway, diurnal
 engine: eventgen
 description: "API gateway access log with a realistic diurnal curve: randomizeCount jitter, a 24-key hourOfDayRate map and file-based status code replacement with a weighted mix"
 estimates:

@@ -10,6 +10,7 @@
 # NOTE: the worker parses this with a flat two-level scalar subset of YAML;
 # keep every value on a single line.
 name: aws-elb-alb
+tags: aws, cloud, elb, alb, loadbalancer, access
 engine: eventgen
 description: "AWS ALB access logs (aws:elb:accesslogs): space-delimited per-request log in the official Application Load Balancer field order through conn_trace_id, weighted http/https/h2 type and status mix; tokens re-stamp the ISO8601 response time, randomise the client IP and apply a weighted elb_status_code mix"
 estimates:

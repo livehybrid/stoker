@@ -470,6 +470,14 @@ def preview_pack(pack_id: int, db: Session = Depends(get_db)):
     pack = db.get(Pack, pack_id)
     if pack is None:
         raise HTTPException(status_code=404, detail="unknown pack")
+    # A metric pack (UI-authored builder config) has no eventgen source directory
+    # and no stanzas/samples; the metric builder owns its own preview. Return an
+    # empty, ok preview rather than linting a non-existent directory.
+    if pack.builder_config_json is not None:
+        errors = bundles.lint_metrics_config(pack.builder_config_json)
+        return PackPreview(stanzas=[], sample_lines={},
+                           lint_status="ok" if not errors else "error",
+                           lint_errors=errors)
     lint = bundles.lint_pack(pack.source_path)
     sample_lines = _preview_sample_lines(pack.source_path, lint.stanzas)
     return PackPreview(
@@ -498,6 +506,10 @@ def preview_run_pack(
     pack = db.get(Pack, pack_id)
     if pack is None:
         raise HTTPException(status_code=404, detail="unknown pack")
+    # Metric packs have no eventgen samples to render; use the metric builder's
+    # own preview (/api/metric-packs/preview) instead of this eventgen renderer.
+    if pack.builder_config_json is not None:
+        return PackPreviewRun(events=[])
     events = preview.preview_pack(pack.source_path, n=n)
     return PackPreviewRun(events=events)
 

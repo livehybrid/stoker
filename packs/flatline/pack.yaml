@@ -4,6 +4,7 @@
 # NOTE: the worker parses this with a flat two-level scalar subset of YAML;
 # keep every value on a single line.
 name: flatline
+tags: baseline, web, test, exact-rate
 engine: eventgen
 description: "Steady single-line web service log at a constant rate; no randomizeCount and no rate maps, so received EPS is a direct measure of pacing accuracy"
 estimates:
