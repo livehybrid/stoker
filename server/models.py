@@ -290,7 +290,12 @@ class RunEvent(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     run_id: Mapped[int] = mapped_column(ForeignKey("runs.id"), nullable=False)
     ts: Mapped[datetime.datetime] = _ts_column(nullable=False, default=utcnow)
-    actor: Mapped[str] = mapped_column(String(16), nullable=False, default="system")  # system|operator|agent
+    # Holds the same identity range as runs.started_by (String(255)): "system",
+    # "operator", "agent", a real username, or a "token:<name>" service-token
+    # principal. It was String(16) ("system|operator|agent") before per-actor
+    # audit attribution landed; a longer principal then overflowed it on Postgres
+    # (a 500 at provision), which SQLite's non-enforcement of varchar length hid.
+    actor: Mapped[str] = mapped_column(String(255), nullable=False, default="system")
     kind: Mapped[str] = mapped_column(String(64), nullable=False)
     detail_json: Mapped[Optional[Any]] = mapped_column(JSON_VARIANT, nullable=True)
 
