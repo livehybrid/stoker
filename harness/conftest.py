@@ -16,11 +16,29 @@ from __future__ import annotations
 
 import os
 import uuid
-from types import SimpleNamespace
 
 import pytest
 
 from clients import Splunk, StokerClient
+
+# Field names whose values are secrets: redacted in repr so a pytest failure
+# traceback (which prints fixture values) never leaks a token or password.
+_SECRET_FIELDS = frozenset({"token", "hec_token", "splunk_pass", "splunk_token"})
+
+
+class Config:
+    """Harness config. Attribute access like a namespace, but ``repr`` masks
+    secrets so they cannot leak into test output / CI logs."""
+
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+    def __repr__(self):
+        parts = []
+        for key, val in self.__dict__.items():
+            shown = "***" if (key in _SECRET_FIELDS and val) else repr(val)
+            parts.append("%s=%s" % (key, shown))
+        return "Config(%s)" % ", ".join(parts)
 
 
 def _env(*names, default=None):
@@ -47,7 +65,7 @@ def cfg():
     token = _env("STOKER_TOKEN")
     if not base or not token:
         pytest.skip("set STOKER_URL and STOKER_TOKEN (an operator stk_ token) to run the harness")
-    return SimpleNamespace(
+    return Config(
         base=base,
         token=token,
         verify_tls=_flag("STOKER_VERIFY_TLS", default=False),

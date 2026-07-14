@@ -37,10 +37,13 @@ def test_metrics_backfill_lands_in_splunk(api, cfg, make_target, make_spec, metr
         pytest.skip("set STOKER_TEST_METRIC_INDEX (a metrics-type index) for the metrics e2e")
 
     target = make_target(cfg.metric_index)
+    # Pin index + a unique source via run overrides (highest precedence): the
+    # index override beats any index a pack hard-codes, and the source isolates
+    # this run's points in the Splunk count.
     spec = make_spec(metric_pack["id"], target["id"], engine="metrics",
                      rate_mode="count_interval",
                      interval_s=int(metric_pack["config"]["resolution_s"]),
-                     overrides={"source": unique})
+                     overrides={"source": unique, "index": cfg.metric_index})
 
     run = api.wait_for_run(
         api.launch_run(spec["id"], {"backfill_window_s": cfg.backfill_window_s,
@@ -75,9 +78,12 @@ def test_eventgen_small_run_lands_in_splunk(api, cfg, make_target, make_spec, sp
         pytest.skip("eventgen pack %r not present (sync a sample-packs repo)" % cfg.eventgen_pack)
 
     target = make_target(cfg.event_index)
+    # Pin the index via a run override: a pack may hard-code its own index
+    # (e.g. flatline -> main), which a token scoped to the test index would
+    # reject at HEC; the override forces delivery to the harness index.
     spec = make_spec(pack["id"], target["id"], engine="eventgen",
                      rate_mode="eps", rate_value=cfg.eps, duration_s=cfg.duration_s,
-                     overrides={"source": unique})
+                     overrides={"source": unique, "index": cfg.event_index})
 
     run = api.wait_for_run(api.launch_run(spec["id"])["run_id"], timeout_s=cfg.poll_timeout_s)
     assert run["state"] == "completed", "run ended %s (%s)" % (run["state"], run.get("end_reason"))
