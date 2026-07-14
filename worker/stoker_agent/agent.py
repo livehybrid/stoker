@@ -214,8 +214,13 @@ class Agent(object):
                     self._engine = self._engine_factory(conf_path,
                                                         cfg.output_socket,
                                                         pack.pack_dir)
-                if gated:
-                    # warm the engine; the paused bucket holds output back
+                if gated and not is_metrics:
+                    # warm the engine; the paused bucket holds output back. NOT
+                    # for metrics: that engine either self-paces on a wall-clock
+                    # grid or (backfill) emits its whole window hot and exits, so
+                    # warming it pre-T0 pushes output into a paused pipeline (the
+                    # reader stops, the socket stalls and the backfill sweep is cut
+                    # short). Metrics always starts at T0, into an active bucket.
                     self._engine.start()
                     self._engine_started = True
 
@@ -228,8 +233,9 @@ class Agent(object):
                     if not self._drain_event.is_set():
                         self._bucket.anchor_at(anchor)
                         self._bucket.resume()
-                        if not gated and not self._engine_started:
-                            # count_interval is engine-paced: start at T0
+                        if not self._engine_started:
+                            # not warmed pre-T0 (count_interval, or any metrics
+                            # run incl. backfill): start now, at T0.
                             self._engine.start()
                             self._engine_started = True
                         self._state = "generating"
