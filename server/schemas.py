@@ -560,6 +560,19 @@ class TelemetrySlice(BaseModel):
     interval_s: float = 5
 
 
+class BackfillSlice(BaseModel):
+    """The ``backfill`` object in a slice: the historical window the worker fills.
+
+    Present only on a backfill run. ``start_s`` / ``end_s`` are epoch seconds;
+    ``resolution_s`` is the metrics step (null for eventgen, which derives its
+    window from ``end_s - start_s``). Declared here so the claim's response_model
+    does not strip it (see :func:`server.lifecycle.build_slice`)."""
+
+    start_s: float
+    end_s: float
+    resolution_s: Optional[float] = None
+
+
 class SpecSliceOut(BaseModel):
     """The claim response: the worker's share of a run.
 
@@ -581,6 +594,9 @@ class SpecSliceOut(BaseModel):
     telemetry: TelemetrySlice = Field(default_factory=TelemetrySlice)
     released: bool = False
     effective_t0: Optional[str] = None
+    # Present only on a backfill run; None otherwise. MUST be declared or the
+    # response_model silently drops the backfill window from every claim.
+    backfill: Optional[BackfillSlice] = None
 
 
 class ReadyRequest(BaseModel):

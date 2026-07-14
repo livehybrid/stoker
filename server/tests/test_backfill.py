@@ -119,6 +119,34 @@ def test_plan_backfill_honours_and_clamps_rate():
     assert p["events"] == 60 * 3               # 60 ticks x 3 series
 
 
+def test_backfill_survives_the_claim_response_model(client, db_session, settings, make_pack, fake_driver):
+    """The claim endpoint's response_model MUST carry the backfill window.
+
+    build_slice adds ``backfill`` to the slice, but FastAPI filters the claim
+    response to :class:`SpecSliceOut`; if that schema omits ``backfill`` the
+    field is silently dropped and no worker ever backfills (the field being in
+    build_slice is necessary but NOT sufficient - it must survive serialisation).
+    This drives the REAL endpoint, not build_slice directly, so it guards the
+    response_model.
+    """
+    target = _helpers.make_target(db_session, settings=settings)
+    pack = _helpers.make_pack(db_session, make_pack())
+    spec = _helpers.make_spec(db_session, pack, target, engine="eventgen",
+                              rate_mode="eps", rate_value=50.0, workers=1,
+                              fleet="fake-local")
+    db_session.commit()
+    launched = client.post("/api/specs/%d/run" % spec.id, json={"backfill_window_s": 600})
+    assert launched.status_code in (200, 201), launched.text
+    run = db_session.get(Run, launched.json()["run_id"])
+    resp = client.post("/api/agent/runs/%d/claim" % run.id,
+                       json={"holder": "w0", "hint_slot": 0},
+                       headers=_helpers.auth_header(run, settings))
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body.get("backfill"), "claim response_model stripped the backfill window"
+    assert body["backfill"]["start_s"] < body["backfill"]["end_s"]
+
+
 def test_normal_run_carries_no_backfill(client, db_session, settings, make_pack, fake_driver):
     target = _helpers.make_target(db_session, settings=settings)
     pack = _helpers.make_pack(db_session, make_pack())
