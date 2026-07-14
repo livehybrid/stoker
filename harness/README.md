@@ -25,7 +25,7 @@ API with your own login (the stack `.env` admin password may have drifted, so us
 the credentials you log into the UI with):
 
 ```bash
-export STOKER=https://stoker.cloud.livehybrid.com
+export STOKER=https://stoker.mydomain.com
 
 # log in -> session cookie
 curl -sk -c /tmp/stoker.cookies -X POST $STOKER/api/auth/login \

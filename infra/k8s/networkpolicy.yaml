@@ -58,7 +58,7 @@ spec:
         - protocol: TCP
           port: 443
     # 3. The Stoker control plane (on-prem, reached from EKS over HTTPS through
-    #    Traefik at stoker.cloud.livehybrid.com). Egress to the house uplink IP
+    #    Traefik at stoker.mydomain.com). Egress to the house uplink IP
     #    on 443 for claims / heartbeats / bundle GETs.
     - to:
         - ipBlock:

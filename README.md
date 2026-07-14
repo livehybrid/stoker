@@ -118,12 +118,12 @@ Every operator action is a REST call, so a pipeline can drive Stoker with an API
 
 ```bash
 # Mint an operator token (needs an admin session or an admin token); secret shown once
-curl -sX POST https://stoker.cloud.livehybrid.com/api/tokens \
+curl -sX POST https://stoker.mydomain.com/api/tokens \
   -H "Authorization: Bearer $STOKER_ADMIN_TOKEN" -H 'Content-Type: application/json' \
   -d '{"name":"github-ci","role":"operator","expires_in_days":90}'
 
 # Use it from CI to launch a run against an existing spec
-curl -sX POST https://stoker.cloud.livehybrid.com/api/specs/42/run \
+curl -sX POST https://stoker.mydomain.com/api/specs/42/run \
   -H "Authorization: Bearer $STOKER_CI_TOKEN" -H 'Content-Type: application/json' -d '{}'
 ```
 
@@ -131,7 +131,7 @@ A token carries its own role (a CI token can be `operator` without holding admin
 
 ## Live deployment
 
-- UI + operator API: **https://stoker.cloud.livehybrid.com** (protected by app-level auth)
+- UI + operator API: **https://stoker.mydomain.com** (protected by app-level auth)
 - LAN: **http://192.168.0.112:8091**
 - Portainer swarm stack 107, Postgres 16 backing store.
 - Images: `ghcr.io/livehybrid/stoker` (control plane) and `ghcr.io/livehybrid/stoker-worker` (worker), both multi-arch (amd64, arm64) and cosign-signed.

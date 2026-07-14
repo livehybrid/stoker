@@ -80,14 +80,14 @@ services:
         - traefik.enable=true
         - traefik.http.routers.stoker.entrypoints=websecure
         - traefik.http.routers.stoker.tls=true
-        - traefik.http.routers.stoker.rule=Host(`stoker.cloud.livehybrid.com`)
+        - traefik.http.routers.stoker.rule=Host(`${STOKER_HOST:-stoker.mydomain.com}`)
         # No Traefik basic-auth: Stoker's own app-level auth (local users +
         # trusted-proxy SSO) guards the UI/ops API. For forward-auth SSO, add
         # middlewares=authentik@docker here and set STOKER_TRUSTED_PROXIES.
         - traefik.http.routers.stoker-agent.entrypoints=websecure
         - traefik.http.routers.stoker-agent.tls=true
         - traefik.http.routers.stoker-agent.priority=100
-        - traefik.http.routers.stoker-agent.rule=Host(`stoker.cloud.livehybrid.com`) && (PathPrefix(`/api/agent`) || PathPrefix(`/api/hooks`))
+        - traefik.http.routers.stoker-agent.rule=Host(`${STOKER_HOST:-stoker.mydomain.com}`) && (PathPrefix(`/api/agent`) || PathPrefix(`/api/hooks`))
         # Rate-limit the open agent/webhook paths (internet-exposed, no basic-auth).
         - traefik.http.routers.stoker-agent.middlewares=stoker-ratelimit
         - traefik.http.middlewares.stoker-ratelimit.ratelimit.average=200
