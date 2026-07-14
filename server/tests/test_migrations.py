@@ -78,6 +78,27 @@ def test_run_migrations_is_idempotent(tmp_path):
     assert "runs" in _tables()
 
 
+def test_head_equals_models_no_pending_autogen(tmp_path):
+    """The create_all == head invariant the boot adoption relies on: after
+    migrating, ``alembic --autogenerate`` finds no table/column changes vs the
+    models. If a model gains a column without the schema tracking it, this fails.
+    """
+    _use(tmp_path, "autogen.db")
+    from alembic.autogenerate import compare_metadata
+    from alembic.migration import MigrationContext
+
+    from server import models  # noqa: F401  (register on Base.metadata)
+    from server.db import Base
+    from server.migrate import run_migrations
+
+    run_migrations()
+    with db_mod.get_engine().connect() as conn:
+        diff = compare_metadata(MigrationContext.configure(conn), Base.metadata)
+    material = [d for d in diff if isinstance(d, tuple) and d and str(d[0]).startswith(
+        ("add_table", "remove_table", "add_column", "remove_column"))]
+    assert not material, "schema drift from the models: %r" % material
+
+
 def test_baseline_upgrade_builds_schema_via_cli(tmp_path):
     """A plain ``alembic upgrade head`` on an empty DB runs the baseline and
     creates the schema (the manual CLI path, distinct from run_migrations)."""
