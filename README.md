@@ -184,7 +184,9 @@ tools/     hec_sink test collector + smoke scripts
 
 ## Documentation
 
-- [docs/WORKER-CONTRACT.md](docs/WORKER-CONTRACT.md) — the worker image's environment contract, socket protocol, pacing and drain behaviour.
+The full docs are published at **[livehybrid.github.io/stoker](https://livehybrid.github.io/stoker/)** (rendered from `docs/`).
+
+- [docs/WORKER-CONTRACT.md](docs/WORKER-CONTRACT.md) — the worker image's environment contract, socket protocol, pacing, backfill and drain behaviour.
 - [server/CONTROL-PLANE.md](server/CONTROL-PLANE.md) — the control-plane data model, agent + operator API (incl. API tokens + OpenAPI), auth and run lifecycle.
 - [docs/PACKS.md](docs/PACKS.md) — the authoritative pack-format reference (eventgen, Piston and metric packs, `dataset_url` safety, git sync).
 - [harness/README.md](harness/README.md) — the integration harness: minting an operator token, the env vars, and running the live end-to-end checks.

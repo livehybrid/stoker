@@ -8,6 +8,7 @@ dist/
 build/
 node_modules/
 ui/dist/
+site/
 .env
 *.sock
 .coverage
