@@ -1,0 +1,19 @@
+# Stoker pack: AWS S3 server access logs (sourcetype aws:s3:accesslogs). This is
+# S3's native per-request access log - space-delimited text, distinct from
+# CloudTrail's JSON. Official field order through SourceRegion: bucket owner,
+# bucket, time, remote IP, requester, request ID, operation (REST.GET.OBJECT
+# etc.), key, request URI, status, error code, bytes, object size, timings,
+# referer, user agent, and the TLS/auth trailer. Weighted operation mix
+# (GET/HEAD dominant), tokens re-stamp the time, randomise the remote IP and
+# apply a weighted status mix.
+# NOTE: the worker parses this with a flat two-level scalar subset of YAML;
+# keep every value on a single line.
+name: aws-s3-access
+tags: aws, cloud, s3, access, storage
+engine: eventgen
+description: "AWS S3 server access logs (aws:s3:accesslogs): space-delimited per-request log with a weighted REST operation mix (GET/HEAD/PUT/DELETE/list), full official field order through SourceRegion; tokens re-stamp the request time, randomise the remote IP and apply a weighted HTTP status mix"
+estimates:
+  bytes_per_event: 500
+defaults:
+  index: main
+  sourcetype: aws:s3:accesslogs

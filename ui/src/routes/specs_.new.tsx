@@ -25,6 +25,7 @@ import { EstimatePanel } from "../features/specs/EstimatePanel";
 import { localEstimate } from "../features/specs/estimate";
 import { parseApiError } from "../features/specs/errors";
 import { packLooksReplay } from "../features/specs/replay";
+import { packIsMetrics } from "../features/metrics/config";
 import { RATE_MODE_LABEL } from "../features/specs/format";
 
 // Search params: ?edit=<id> reopens a saved spec for editing; ?clone=<id>
@@ -177,7 +178,65 @@ function JobWizard() {
   );
 
   const isReplay = packLooksReplay(selectedPack);
+  const isMetrics = packIsMetrics(selectedPack);
   const bytesPerEvent = selectedPack?.est_bytes_per_event ?? null;
+
+  // Metrics packs need the metrics engine + count_interval pacing (engine-paced
+  // on a fixed grid); load the pack's config to align interval/count to it.
+  const metricDetailQ = useQuery({
+    queryKey: ["wizard-metric-pack", form.pack_id],
+    queryFn: () => api.metricPacks.get(form.pack_id as number),
+    enabled: isMetrics && form.pack_id != null,
+  });
+
+  // Backfill is a per-run option (not stored on the spec): generate the last
+  // `window` of history then finish. Replay packs cannot backfill.
+  const [backfillOn, setBackfillOn] = useState(false);
+  const [backfillAmount, setBackfillAmount] = useState("24");
+  const [backfillUnit, setBackfillUnit] = useState<"hours" | "days">("hours");
+  const [backfillRes, setBackfillRes] = useState(""); // metrics coarse step; blank = pack default
+  const backfillWindowS =
+    backfillOn && !isReplay
+      ? Math.max(1, Math.floor(Number(backfillAmount) || 0)) *
+        (backfillUnit === "days" ? 86400 : 3600)
+      : null;
+  const BACKFILL_CAP = 5000; // matches server DEFAULT_BACKFILL_CAP_EPS
+  // Client-side estimate mirroring server plan_backfill (the server recomputes at
+  // launch and is the authority). No spec id needed, so it works before saving.
+  const backfillEstimate = useMemo(() => {
+    if (!backfillWindowS) return null;
+    // Delivery rate honours the configured eps (clamped to the cap); a metrics
+    // pack (no eps) fills at the cap. Mirrors server plan_backfill.
+    const deliverEps = isMetrics
+      ? BACKFILL_CAP
+      : Math.min(
+          form.rate_mode === "eps"
+            ? Number(form.rate_value) || BACKFILL_CAP
+            : BACKFILL_CAP,
+          BACKFILL_CAP,
+        );
+    let events: number;
+    let series: number | null = null;
+    if (isMetrics) {
+      series = metricDetailQ.data?.series_count ?? 1;
+      const res =
+        Number(backfillRes) || metricDetailQ.data?.config.resolution_s || 10;
+      events = Math.ceil(backfillWindowS / res) * series;
+    } else {
+      events = Math.ceil(backfillWindowS * deliverEps);
+    }
+    const bytes = bytesPerEvent ? Math.round(events * bytesPerEvent) : null;
+    return { events, series, bytes, deliverEps, seconds: events / deliverEps };
+  }, [
+    backfillWindowS,
+    isMetrics,
+    metricDetailQ.data,
+    backfillRes,
+    form.rate_mode,
+    form.rate_value,
+    bytesPerEvent,
+  ]);
+
   const workersNum = Math.max(1, Math.floor(numOrNull(form.workers) ?? 1));
   const rateValueNum = numOrNull(form.rate_value);
 
@@ -199,6 +258,40 @@ function JobWizard() {
     if (isReplay && form.workers !== "1") patch({ workers: "1" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isReplay]);
+
+  // A metrics pack must run on the metrics engine with count_interval pacing;
+  // align interval to the pack's resolution, count to its series and cap workers
+  // at the series count. The engine + rate-mode fields are locked below.
+  useEffect(() => {
+    if (isMetrics) {
+      setForm((f) => {
+        const next: FormState = {
+          ...f,
+          engine: "metrics",
+          rate_mode: "count_interval",
+        };
+        const detail = metricDetailQ.data;
+        if (detail) {
+          next.interval_s = String(detail.config.resolution_s);
+          next.rate_value = String(detail.series_count);
+          const w = Math.max(1, Math.floor(Number(f.workers) || 1));
+          if (w > detail.series_count) next.workers = String(detail.series_count);
+        }
+        return next;
+      });
+    } else {
+      // Switched to a non-metrics pack: if the engine was locked to "metrics"
+      // (from a previously-selected metric pack), revert to the default engine
+      // and rate mode so an eventgen pack is never left with engine=metrics
+      // (which the server rejects at run: "not a metrics pack").
+      setForm((f) =>
+        f.engine === "metrics"
+          ? { ...f, engine: "eventgen", rate_mode: "eps" }
+          : f,
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isMetrics, metricDetailQ.data]);
 
   const [saving, setSaving] = useState<null | "save" | "run">(null);
   const [errText, setErrText] = useState<string | null>(null);
@@ -301,8 +394,19 @@ function JobWizard() {
     // Spec saved; now launch. A launch rejection leaves the spec saved so the
     // operator can adjust and retry from the list without losing their work.
     try {
-      const run = await api.specs.run(specId);
-      toast.success(`Run #${run.run_id} launched.`);
+      const runBody =
+        backfillWindowS != null
+          ? {
+              backfill_window_s: backfillWindowS,
+              backfill_resolution_s: backfillRes ? Number(backfillRes) : null,
+            }
+          : {};
+      const run = await api.specs.run(specId, runBody);
+      toast.success(
+        backfillWindowS != null
+          ? `Backfill run #${run.run_id} launched.`
+          : `Run #${run.run_id} launched.`,
+      );
       navigate({ to: "/runs/$runId", params: { runId: String(run.run_id) } });
     } catch (err) {
       const parsed = parseApiError(err);
@@ -380,6 +484,14 @@ function JobWizard() {
               locked to 1. The control plane enforces this at launch regardless.
             </div>
           )}
+          {isMetrics && (
+            <div className="rounded-md border border-sky-800/60 bg-sky-950/30 px-3 py-2 text-xs text-sky-200">
+              Metric pack: runs on the metrics engine, engine-paced on its
+              resolution grid. Engine and rate mode are locked to count_interval;
+              interval and count follow the pack (resolution and series count) and
+              the series matrix is sharded across workers.
+            </div>
+          )}
         </div>
       </Card>
 
@@ -399,9 +511,10 @@ function JobWizard() {
             <Field label="Engine">
               <Select
                 value={form.engine}
+                disabled={isMetrics}
                 onChange={(e) => patch({ engine: e.target.value })}
               >
-                {ENGINES.map((e) => (
+                {(isMetrics ? ["metrics"] : ENGINES).map((e) => (
                   <option key={e} value={e}>
                     {e}
                   </option>
@@ -411,6 +524,7 @@ function JobWizard() {
             <Field label="Rate mode">
               <Select
                 value={form.rate_mode}
+                disabled={isMetrics}
                 onChange={(e) => patch({ rate_mode: e.target.value as RateMode })}
               >
                 {RATE_MODES.map((m) => (
@@ -541,6 +655,105 @@ function JobWizard() {
         </div>
       </Card>
 
+      {/* Backfill (per-run): generate a window of history then finish. */}
+      {!isReplay && (
+        <Card title="Backfill (optional)">
+          <label className="flex items-center gap-2 text-sm text-slate-300">
+            <input
+              type="checkbox"
+              checked={backfillOn}
+              onChange={(e) => setBackfillOn(e.target.checked)}
+              className="h-4 w-4 rounded border-surface-muted bg-surface text-sky-500 focus:ring-sky-500"
+            />
+            Backfill historical data (generate the last N of history, then finish)
+          </label>
+          {backfillOn && (
+            <div className="mt-3 space-y-3">
+              <div className="flex flex-wrap items-end gap-3">
+                <div className="w-24">
+                  <Field label="Amount">
+                    <TextInput
+                      type="number"
+                      min={1}
+                      value={backfillAmount}
+                      onChange={(e) => setBackfillAmount(e.target.value)}
+                    />
+                  </Field>
+                </div>
+                <div className="w-28">
+                  <Field label="Unit">
+                    <Select
+                      value={backfillUnit}
+                      onChange={(e) =>
+                        setBackfillUnit(e.target.value as "hours" | "days")
+                      }
+                    >
+                      <option value="hours">hours</option>
+                      <option value="days">days</option>
+                    </Select>
+                  </Field>
+                </div>
+                {isMetrics && (
+                  <div className="w-40">
+                    <Field label="Resolution" hint="coarser = fewer points">
+                      <Select
+                        value={backfillRes}
+                        onChange={(e) => setBackfillRes(e.target.value)}
+                      >
+                        <option value="">pack default</option>
+                        <option value="60">60 s</option>
+                        <option value="300">5 min</option>
+                        <option value="900">15 min</option>
+                        <option value="3600">1 hour</option>
+                      </Select>
+                    </Field>
+                  </div>
+                )}
+              </div>
+              {backfillEstimate && (
+                <p className="text-xs text-slate-400">
+                  {"≈ "}
+                  <span className="font-medium text-slate-200">
+                    {backfillEstimate.events.toLocaleString()}
+                  </span>{" "}
+                  events
+                  {backfillEstimate.series != null && (
+                    <> {"·"} {backfillEstimate.series} series</>
+                  )}
+                  {" · ~"}
+                  <span className="font-medium text-slate-200">
+                    {backfillEstimate.seconds >= 3600
+                      ? (backfillEstimate.seconds / 3600).toFixed(1) + " h"
+                      : backfillEstimate.seconds >= 60
+                        ? (backfillEstimate.seconds / 60).toFixed(1) + " min"
+                        : Math.max(1, Math.round(backfillEstimate.seconds)) +
+                          " s"}
+                  </span>{" "}
+                  to deliver at {backfillEstimate.deliverEps.toLocaleString()} eps
+                  {backfillEstimate.bytes != null && (
+                    <>
+                      {" · "}
+                      {backfillEstimate.bytes > 1e9
+                        ? (backfillEstimate.bytes / 1e9).toFixed(1) + " GB"
+                        : backfillEstimate.bytes > 1e6
+                          ? (backfillEstimate.bytes / 1e6).toFixed(1) + " MB"
+                          : Math.round(backfillEstimate.bytes / 1e3) + " KB"}
+                    </>
+                  )}
+                </p>
+              )}
+              <p className="rounded-md border border-amber-800/50 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
+                Re-running a backfill appends duplicate points; mstats will
+                double-count. Run once, or clear the window first.
+                {isMetrics
+                  ? " Metrics backfill preserves the daily shape across the window."
+                  : " Eventgen backfill fills the window to now with uniform density."}
+              </p>
+            </div>
+          )}
+        </Card>
+      )}
+
       {/* Sticky action bar */}
       <div className="sticky bottom-0 -mx-6 border-t border-surface-muted bg-surface-soft/95 px-6 py-3 backdrop-blur">
         {errText && (
@@ -590,7 +803,7 @@ function JobWizard() {
   );
 }
 
-export const Route = createFileRoute("/specs/new")({
+export const Route = createFileRoute("/specs_/new")({
   validateSearch: (search: Record<string, unknown>): WizardSearch => {
     const out: WizardSearch = {};
     const edit = Number(search.edit);

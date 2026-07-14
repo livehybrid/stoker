@@ -82,7 +82,7 @@ spec:
             - name: STOKER_RUN_ID
               value: "<ID>"
             - name: STOKER_CONTROL_URL
-              value: "https://stoker.cloud.livehybrid.com"
+              value: "https://stoker.mydomain.com"
             - name: STOKER_RUN_JWT
               value: "<RUN_JWT>"
             - name: STOKER_TOTAL_WORKERS

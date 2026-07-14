@@ -7,6 +7,7 @@
 # NOTE: the worker parses this with a flat two-level scalar subset of YAML;
 # keep every value on a single line.
 name: attack-replay
+tags: security, windows, sysmon, attack, replay, piston
 engine: rawreplay
 description: "Replays a recorded Sysmon/Windows-Security attack_data capture byte-for-byte (credential-access + lateral-movement chain), re-stamped to now"
 replay:

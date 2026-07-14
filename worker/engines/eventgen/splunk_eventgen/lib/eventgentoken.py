@@ -488,7 +488,7 @@ class Token(object):
                     if os.path.exists(replacementFile) and os.path.isfile(
                         replacementFile
                     ):
-                        replacementFH = open(replacementFile, "rU")
+                        replacementFH = open(replacementFile, "r")
                         replacementLines = replacementFH.readlines()
                         replacementFH.close()
 

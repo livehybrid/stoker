@@ -20,7 +20,7 @@ def standalone_env(**extra):
 def managed_env(**extra):
     env = {
         "STOKER_RUN_ID": "812",
-        "STOKER_CONTROL_URL": "https://stoker.cloud.livehybrid.com",
+        "STOKER_CONTROL_URL": "https://stoker.mydomain.com",
         "STOKER_RUN_JWT": "jwt-opaque",
         "STOKER_TOTAL_WORKERS": "4",
         "STOKER_HEC_TOKEN": "tok-abc",
@@ -124,7 +124,7 @@ class TestManaged:
         cfg = load_config(managed_env())
         assert cfg.standalone is False
         assert cfg.run_id == "812"
-        assert cfg.control_url == "https://stoker.cloud.livehybrid.com"
+        assert cfg.control_url == "https://stoker.mydomain.com"
         assert cfg.run_jwt == "jwt-opaque"
         assert cfg.total_workers == 4
         assert cfg.hint_slot is None

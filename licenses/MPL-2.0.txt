@@ -1,0 +1,18 @@
+Mozilla Public License Version 2.0
+SPDX-License-Identifier: MPL-2.0
+
+The full text of the Mozilla Public License 2.0 is not reproduced verbatim here
+to avoid any transcription error in a legal text. It is published, unchanged, at
+the canonical source:
+
+    https://www.mozilla.org/en-US/MPL/2.0/
+
+In this project MPL-2.0 covers `certifi` (the CA certificate bundle), which is a
+transitive dependency of the HTTP clients, redistributed unmodified in the
+container images. `certifi` ships its own copy of the licence inside its wheel
+(`certifi-*.dist-info/`).
+
+MPL-2.0 is a file-level weak-copyleft licence: it permits use and redistribution
+within a larger work under other terms, and requires that modifications to the
+MPL-covered files themselves remain under MPL-2.0. Stoker does not modify any
+MPL-covered file.

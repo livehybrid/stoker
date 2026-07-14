@@ -44,6 +44,8 @@ from ..models import (
     utcnow,
 )
 from ..schemas import (
+    BackfillEstimate,
+    BackfillEstimateRequest,
     MetricSampleOut,
     MetricsOut,
     PackCreate,
@@ -70,6 +72,7 @@ from ..schemas import (
     TargetCreate,
     TargetOut,
     TargetTestResult,
+    TargetUpdate,
 )
 
 log = logging.getLogger("stoker.routes.api")
@@ -134,6 +137,62 @@ def get_target(target_id: int, db: Session = Depends(get_db)):
     target = db.get(Target, target_id)
     if target is None:
         raise HTTPException(status_code=404, detail="unknown target")
+    return target
+
+
+@router.patch("/targets/{target_id}", response_model=TargetOut)
+def update_target(target_id: int, body: TargetUpdate, db: Session = Depends(get_db)):
+    # type: (...) -> Any
+    """Partially update a target. Only fields present in the body change. The HEC
+    token is re-encrypted when a non-empty value is supplied (write-only, never
+    echoed); an omitted or empty token keeps the stored one. Changing the
+    endpoint, token or TLS setting resets health to ``unknown`` (re-run /test)."""
+    target = db.get(Target, target_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="unknown target")
+
+    fields = body.model_dump(exclude_unset=True)
+    if not fields:
+        return target
+
+    new_name = fields.get("name")
+    if new_name is not None and new_name != target.name:
+        clash = db.execute(
+            select(Target).where(Target.name == new_name, Target.id != target_id)
+        ).scalars().first()
+        if clash is not None:
+            raise HTTPException(
+                status_code=409, detail="a target named %r already exists" % new_name)
+        target.name = new_name
+
+    conn_changed = False
+    if fields.get("hec_url"):
+        target.hec_url = fields["hec_url"].rstrip("/")
+        conn_changed = True
+    if "token" in fields and fields["token"]:  # non-empty -> rotate; empty -> keep
+        try:
+            target.token_encrypted = crypto.encrypt(fields["token"])
+        except crypto.CryptoError as exc:
+            raise HTTPException(
+                status_code=500, detail="could not encrypt target token: %s" % exc)
+        conn_changed = True
+    if "default_index" in fields:
+        target.default_index = fields["default_index"]
+    if fields.get("env_tag"):
+        target.env_tag = fields["env_tag"]
+    if "max_concurrent_gb_day" in fields:
+        target.max_concurrent_gb_day = fields["max_concurrent_gb_day"]
+    if "verify_tls" in fields and fields["verify_tls"] is not None:
+        target.verify_tls = fields["verify_tls"]
+        conn_changed = True
+
+    if conn_changed:
+        target.health_state = "unknown"
+        target.health_detail = None
+
+    db.commit()
+    db.refresh(target)
+    log.info("updated target %s (id=%s)", target.name, target.id)
     return target
 
 
@@ -413,6 +472,14 @@ def preview_pack(pack_id: int, db: Session = Depends(get_db)):
     pack = db.get(Pack, pack_id)
     if pack is None:
         raise HTTPException(status_code=404, detail="unknown pack")
+    # A metric pack (UI-authored builder config) has no eventgen source directory
+    # and no stanzas/samples; the metric builder owns its own preview. Return an
+    # empty, ok preview rather than linting a non-existent directory.
+    if pack.builder_config_json is not None:
+        errors = bundles.lint_metrics_config(pack.builder_config_json)
+        return PackPreview(stanzas=[], sample_lines={},
+                           lint_status="ok" if not errors else "error",
+                           lint_errors=errors)
     lint = bundles.lint_pack(pack.source_path)
     sample_lines = _preview_sample_lines(pack.source_path, lint.stanzas)
     return PackPreview(
@@ -441,6 +508,10 @@ def preview_run_pack(
     pack = db.get(Pack, pack_id)
     if pack is None:
         raise HTTPException(status_code=404, detail="unknown pack")
+    # Metric packs have no eventgen samples to render; use the metric builder's
+    # own preview (/api/metric-packs/preview) instead of this eventgen renderer.
+    if pack.builder_config_json is not None:
+        return PackPreviewRun(events=[])
     events = preview.preview_pack(pack.source_path, n=n)
     return PackPreviewRun(events=events)
 
@@ -506,6 +577,38 @@ def estimate_spec(spec_id: int, db: Session = Depends(get_db)):
     pack = db.get(Pack, spec.pack_id)
     bytes_per_event = pack.est_bytes_per_event if pack is not None else None
     return _estimate(spec, bytes_per_event)
+
+
+@router.post("/specs/{spec_id}/backfill_estimate", response_model=BackfillEstimate)
+def backfill_estimate(spec_id: int, body: BackfillEstimateRequest,
+                      db: Session = Depends(get_db)):
+    # type: (...) -> Any
+    """Size a would-be backfill run (events, ~time, bytes) without launching it."""
+    spec = db.get(Spec, spec_id)
+    if spec is None:
+        raise HTTPException(status_code=404, detail="unknown spec")
+    pack = db.get(Pack, spec.pack_id)
+    series = 0
+    pack_res = None
+    if pack is not None and pack.builder_config_json is not None:
+        series = bundles.metrics_series_count(pack.builder_config_json)
+        pack_res = (pack.builder_config_json or {}).get("resolution_s")
+    live_eps = spec.rate_value if spec.rate_mode == "eps" else None
+    res = body.resolution_s or pack_res
+    plan = lifecycle.plan_backfill(spec.engine, series, live_eps, body.window_s,
+                                   res, body.cap_eps, time.time())
+    bpe = pack.est_bytes_per_event if pack is not None else None
+    return BackfillEstimate(
+        engine=spec.engine,
+        events=plan["events"],
+        bytes=int(plan["events"] * bpe) if bpe else None,
+        seconds=round(plan["seconds"], 1),
+        cap_eps=plan["cap_eps"],
+        deliver_eps=plan["deliver_eps"],
+        series=series if spec.engine == "metrics" else None,
+        warning=("Re-running a backfill appends duplicate points; mstats will "
+                 "double-count. Run once, or clear the window first."),
+    )
 
 
 @router.put("/specs/{spec_id}", response_model=SpecOut)
@@ -590,12 +693,16 @@ def run_spec(spec_id: int, body: RunLaunch, request: Request, db: Session = Depe
     # --- Submit-time validation gates (order: cheap/local first) ----------- #
 
     # 1. Lint ok: the pack must currently lint clean (a stale/broken pack is a
-    #    hard stop; 422 with the lint errors so the operator can fix it).
-    lint = bundles.lint_pack(pack.source_path)
-    if not lint.ok:
+    #    hard stop; 422 with the lint errors so the operator can fix it). A
+    #    UI-authored metrics pack has no source directory; lint its stored config.
+    if pack.builder_config_json is not None:
+        lint_errors = bundles.lint_metrics_config(pack.builder_config_json)
+    else:
+        lint_errors = bundles.lint_pack(pack.source_path).errors
+    if lint_errors:
         raise HTTPException(
             status_code=422,
-            detail={"error": "pack_lint_failed", "errors": lint.errors},
+            detail={"error": "pack_lint_failed", "errors": lint_errors},
         )
 
     # 1b. Engine/pack consistency: a rawreplay spec needs a rawreplay pack (its
@@ -615,6 +722,33 @@ def run_spec(spec_id: int, body: RunLaunch, request: Request, db: Session = Depe
                     "engine: rawreplay with a dataset" % pack.id),
             },
         )
+
+    # 1c. Metrics engine/pack consistency. A metrics pack (UI-authored builder
+    #     config) must run under the metrics engine (its bundle ships only a stub
+    #     eventgen.conf), and the metrics engine needs a metrics pack (it reads a
+    #     metricgen config). The metrics engine is also engine-paced, so it
+    #     requires count_interval pacing (an eps/per_day_gb bucket would throttle
+    #     the fixed-resolution grid).
+    is_metrics_pack = pack.builder_config_json is not None
+    is_metrics_spec = (spec.engine or "").strip() == bundles.METRICS_ENGINE
+    if is_metrics_spec and not is_metrics_pack:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "engine_pack_mismatch",
+                    "detail": "spec engine is 'metrics' but pack %s is not a "
+                              "metrics pack (no metricgen config)" % pack.id})
+    if is_metrics_pack and not is_metrics_spec:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "engine_pack_mismatch",
+                    "detail": "pack %s is a metrics pack; the spec engine must be "
+                              "'metrics'" % pack.id})
+    if is_metrics_spec and spec.rate_mode != "count_interval":
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "metrics_rate_mode",
+                    "detail": "the metrics engine is engine-paced; use "
+                              "rate_mode 'count_interval' (interval = resolution)"})
 
     # 2. replay-single-worker: replay is engine-paced and the control plane
     #    guarantees workers = 1. This covers an eventgen pack with a
@@ -678,10 +812,17 @@ def run_spec(spec_id: int, body: RunLaunch, request: Request, db: Session = Depe
         )
 
     # --- Provision (delegates to the Core lifecycle) ----------------------- #
+    backfill = None
+    if body.backfill_window_s and body.backfill_window_s > 0:
+        backfill = {"window_s": body.backfill_window_s,
+                    "resolution_s": body.backfill_resolution_s,
+                    "cap_eps": body.backfill_cap_eps}
+
     driver = get_driver(spec.fleet)
     try:
         run = lifecycle.provision_run(
-            db, spec, driver, overrides=body.overrides, started_by=_actor(request))
+            db, spec, driver, overrides=body.overrides,
+            started_by=_actor(request), backfill=backfill)
     except DriverError as exc:
         # The fleet could not be materialised (e.g. Portainer unreachable / a
         # swarm fleet with no PORTAINER_HOST). Fail loudly, never hang.

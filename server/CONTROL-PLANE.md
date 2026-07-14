@@ -270,9 +270,9 @@ Parsed once into a frozen `Settings` (`config.py`); secret fields are `repr=Fals
 `infra/stacks/stoker/` holds the deploy stack (the stoker app + `postgres:16` +
 `tiredofit/db-backup`, on the traefik + internal networks, `stop_grace_period:
 45s`) and `deploy.py` (Portainer, env from `/opt/aios/.env`). `server/Dockerfile`
-is python:3.12-slim, non-root, uvicorn, serving `ui/dist` when present. Live at
-https://stoker.cloud.livehybrid.com and LAN http://192.168.0.112:8091 (Portainer
-swarm, stack 107). Images `ghcr.io/livehybrid/stoker` +
+is python:3.12-slim, non-root, uvicorn, serving `ui/dist` when present. Reachable
+at your configured host (e.g. https://stoker.mydomain.com) and on the LAN at
+http://<swarm-node-ip>:8091 (Portainer swarm). Images `ghcr.io/livehybrid/stoker` +
 `ghcr.io/livehybrid/stoker-worker` (multi-arch, cosign-signed). Postgres 16 backing store.
 
 ## Conventions

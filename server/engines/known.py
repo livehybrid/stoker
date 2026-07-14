@@ -10,6 +10,10 @@ the worker also accepts via ``STOKER_ENGINE``).
   to now, at a chosen rate (RATE mode, agent-paced) or the recorded cadence
   (CADENCE mode, engine-paced). A rawreplay pack declares no ``eventgen.conf``;
   it declares a ``replay:`` section (dataset + mode + time_multiple).
+* ``metrics`` — generates synthetic Splunk metric data points (``event:"metric"``
+  + a ``fields`` object) over a shaped time series. A metrics pack declares a
+  ``metricgen`` config (dimensions + metrics + patterns); it is engine-paced
+  (count_interval) and shards the series matrix across workers by slot.
 """
 
 from __future__ import annotations
@@ -17,7 +21,7 @@ from __future__ import annotations
 # Ordered, most-common first. ``DEFAULT_ENGINE`` is what a spec/pack assumes
 # when nothing declares one.
 DEFAULT_ENGINE = "eventgen"
-ENGINES = ("eventgen", "rawreplay")
+ENGINES = ("eventgen", "rawreplay", "metrics")
 
 
 def is_known_engine(name):
@@ -32,4 +36,11 @@ def is_rawreplay(name):
     return name == "rawreplay"
 
 
-__all__ = ["DEFAULT_ENGINE", "ENGINES", "is_known_engine", "is_rawreplay"]
+def is_metrics(name):
+    # type: (object) -> bool
+    """True when ``name`` selects the metrics engine."""
+    return name == "metrics"
+
+
+__all__ = ["DEFAULT_ENGINE", "ENGINES", "is_known_engine", "is_rawreplay",
+           "is_metrics"]

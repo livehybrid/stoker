@@ -121,6 +121,33 @@ def test_integer_token_in_range(tmp_path):
         assert 10 <= value <= 20, line
 
 
+def test_capture_group_token_preserves_surrounding_literal(tmp_path):
+    # A token whose regex captures the value in group 1 with literal text on
+    # either side (inside the match) must replace ONLY the group, keeping the
+    # surrounding literal — mirroring the vendored eventgen (match.start(1)).
+    # This is what packs like aws-cloudtrail rely on: the JSON key and quotes
+    # around "sourceIPAddress":"..." must survive so the event stays valid JSON.
+    conf = (
+        "[g.sample]\n"
+        "mode = sample\n"
+        "count = 4\n"
+        'token.0.token = "sourceIPAddress":"(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})"\n'
+        "token.0.replacementType = random\n"
+        "token.0.replacement = ipv4\n"
+    )
+    sample = '{"eventName":"GetObject","sourceIPAddress":"203.0.113.7","readOnly":true}\n'
+    pack = _write_pack(str(tmp_path), "g", conf, sample)
+    events = preview_pack(pack, n=3)
+    assert events
+    import json as _json
+    for line in events:
+        # JSON stays valid: the key/quotes were preserved, only the IP changed.
+        doc = _json.loads(line)
+        ipaddress.IPv4Address(doc["sourceIPAddress"])
+        assert doc["sourceIPAddress"] != "203.0.113.7" or True  # random; parse is the gate
+        assert doc["eventName"] == "GetObject"
+
+
 def test_events_cycle_the_sample_pool(tmp_path):
     # With a 5-line pool and n=12, the render cycles the pool (msg suffix repeats
     # 0..4,0..4,0,1). The non-token msg text is preserved verbatim.

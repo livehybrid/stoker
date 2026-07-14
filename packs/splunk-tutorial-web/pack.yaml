@@ -1,0 +1,23 @@
+# Stoker pack: a synthetic reproduction of the Splunk Search Tutorial's
+# "Buttercup Games" web access log (sourcetype access_combined_wcookie). It mirrors
+# the tutorial data's shape - product.screen / category.screen / cart.do actions
+# with productId, categoryId, JSESSIONID and itemId params, the `HTTP 1.1` request
+# form (a space, not a slash), http://www.buttercupgames.com referers and the
+# trailing numeric field - so it lands under the same field extractions and reads
+# exactly like the data used in the tutorial.
+#
+# This is AUTHORED synthetic data, not Splunk's copyrighted tutorialdata.zip: the
+# tutorial files themselves are not open-source licensed, so they are reproduced
+# in form here rather than vendored. If you need the exact tutorial bytes for a
+# demo, add them privately as a local rawreplay `dataset:` pack.
+# NOTE: the worker parses this with a flat two-level scalar subset of YAML;
+# keep every value on a single line.
+name: splunk-tutorial-web
+tags: splunk, tutorial, web, access, buttercup
+engine: eventgen
+description: "Splunk Search Tutorial-style Buttercup Games web access log (access_combined_wcookie): product.screen / category.screen / cart.do actions with productId, categoryId, JSESSIONID and itemId params, the tutorial's `HTTP 1.1` form, buttercupgames.com referers and the trailing numeric field; tokens re-stamp the timestamp, randomise the client IP and apply a weighted status mix. Synthetic reproduction of the tutorial format, not Splunk's copyrighted tutorial files"
+estimates:
+  bytes_per_event: 295
+defaults:
+  index: main
+  sourcetype: access_combined_wcookie

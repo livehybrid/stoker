@@ -30,7 +30,9 @@ from __future__ import annotations
 
 import datetime
 import logging
+import math
 import secrets
+import time
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from sqlalchemy import select
@@ -114,9 +116,64 @@ def effective_workers(engine, workers):
 # Provisioning and the operator-driven transitions (STUBBED — Core fills).
 # --------------------------------------------------------------------------- #
 
-def provision_run(db, spec, driver, overrides=None, started_by=None, settings=None):
-    # type: (Session, Spec, ExecutionDriver, Optional[Dict[str, str]], Optional[str], Optional[Settings]) -> Run
+# Backfill delivers historical data as fast as the target accepts, up to this
+# eps ceiling, so a large window does not overwhelm Splunk. The run is a gated
+# eps run at (at most) this cap.
+DEFAULT_BACKFILL_CAP_EPS = 5000.0
+
+
+def plan_backfill(engine, series_count, live_eps, window_s, resolution_s, cap_eps, now):
+    # type: (str, int, Optional[float], float, Optional[float], Optional[float], float) -> Dict[str, Any]
+    """Size a backfill run: window, delivery rate, total events, duration backstop.
+
+    ``deliver_eps`` is the rate the backfill is delivered at: the spec's OWN eps
+    (honoured, not overridden), clamped to the ceiling ``cap_eps`` (itself capped
+    at DEFAULT_BACKFILL_CAP_EPS). A spec with no eps (metrics / count_interval)
+    delivers at the ceiling. ``events``: metrics = ceil(window/resolution) x
+    series (the fixed grid); eventgen = window x deliver_eps (the volume that rate
+    fills the window with). ``duration_s`` is a backstop deadline (1.5x the
+    delivery time + margin) so an eventgen backfill (bounded by the deadline, not
+    engine-exit) completes; metrics exits on its own when the window is done.
+    """
+    window_s = float(window_s)
+    cap = float(cap_eps) if cap_eps and cap_eps > 0 else DEFAULT_BACKFILL_CAP_EPS
+    cap = max(1.0, min(cap, DEFAULT_BACKFILL_CAP_EPS))
+    # Honour the spec's configured eps as the delivery rate, clamped to the
+    # ceiling; a spec with no eps (metrics/count_interval) uses the ceiling.
+    if live_eps and live_eps > 0:
+        deliver_eps = max(1.0, min(float(live_eps), cap))
+    else:
+        deliver_eps = cap
+    bf_res = None
+    if engine == "metrics":
+        res = float(resolution_s) if resolution_s and resolution_s > 0 else 10.0
+        bf_res = res
+        ticks = int(math.ceil(window_s / res)) if res > 0 else 0
+        events = ticks * max(1, int(series_count or 1))
+    else:
+        events = int(math.ceil(window_s * deliver_eps))
+    duration_s = max(15.0, math.ceil(events / deliver_eps * 1.5) + 15.0)
+    return {
+        "start_s": now - window_s,
+        "end_s": now,
+        "resolution_s": bf_res,
+        "cap_eps": cap,
+        "deliver_eps": deliver_eps,
+        "events": int(events),
+        "duration_s": float(duration_s),
+        "seconds": float(events / deliver_eps) if deliver_eps else 0.0,
+    }
+
+
+def provision_run(db, spec, driver, overrides=None, started_by=None, settings=None,
+                  backfill=None):
+    # type: (Session, Spec, ExecutionDriver, Optional[Dict[str, str]], Optional[str], Optional[Settings], Optional[Dict[str, Any]]) -> Run
     """Create and provision a run from a spec.
+
+    ``backfill`` (``{window_s, resolution_s?, cap_eps?}``) makes this a backfill
+    run: the effective rate is overridden to an eps delivery cap, a duration
+    backstop is set, and the historical window is frozen into the snapshot (and
+    thence the claim slice) for the worker.
 
     Full flow (contract "Provision"):
 
@@ -160,8 +217,36 @@ def provision_run(db, spec, driver, overrides=None, started_by=None, settings=No
         log.info("run for spec %s engine=%s: forcing workers %s -> 1 (replay is "
                  "single-worker)", spec.id, spec.engine, spec.workers)
 
+    # 0b. Backfill: deliver at the spec's own eps (clamped to the ceiling), freeze
+    #     the historical window, and set a duration backstop.
+    eff_rate_mode = spec.rate_mode
+    eff_rate_value = spec.rate_value
+    eff_duration_s = spec.duration_s
+    backfill_block = None
+    if backfill and backfill.get("window_s"):
+        from .models import Pack
+
+        pack = spec.pack if spec.pack is not None else db.get(Pack, spec.pack_id)
+        series = 0
+        pack_res = None
+        if pack is not None and pack.builder_config_json is not None:
+            from . import bundles
+
+            series = bundles.metrics_series_count(pack.builder_config_json)
+            pack_res = (pack.builder_config_json or {}).get("resolution_s")
+        live_eps = spec.rate_value if spec.rate_mode == "eps" else None
+        res = backfill.get("resolution_s") or pack_res
+        plan = plan_backfill(spec.engine, series, live_eps, backfill["window_s"],
+                             res, backfill.get("cap_eps"), time.time())
+        eff_rate_mode, eff_rate_value = "eps", plan["deliver_eps"]
+        eff_duration_s = plan["duration_s"]
+        backfill_block = {"start_s": plan["start_s"], "end_s": plan["end_s"],
+                          "resolution_s": plan["resolution_s"]}
+
     # 1. Freeze the non-secret snapshot (target embedded by id + non-secret fields).
-    snapshot = build_spec_snapshot(spec, target, overrides=overrides)
+    snapshot = build_spec_snapshot(spec, target, overrides=overrides,
+                                   rate_mode=eff_rate_mode, rate_value=eff_rate_value,
+                                   duration_s=eff_duration_s, backfill=backfill_block)
     if workers != spec.workers:
         snapshot["workers"] = workers
 
@@ -189,8 +274,9 @@ def provision_run(db, spec, driver, overrides=None, started_by=None, settings=No
     # preparing: snapshot frozen, bundle resolved.
     transition_run(db, run, STATE_PREPARING, actor=started_by or "operator")
 
-    # 4. Apportion shares across the slots and seed free leases.
-    shares = build_share_list(spec.rate_mode, spec.rate_value, workers)
+    # 4. Apportion shares across the slots and seed free leases (a backfill run
+    #    apportions the eps delivery cap exactly like a normal eps run).
+    shares = build_share_list(eff_rate_mode, eff_rate_value, workers)
     seed_leases(db, run, shares)
     db.flush()
 
@@ -199,7 +285,8 @@ def provision_run(db, spec, driver, overrides=None, started_by=None, settings=No
     if target.token_encrypted:
         hec_token = crypto.decrypt(target.token_encrypted, settings=settings)
     run_snapshot = build_run_snapshot(run, spec, target, hec_token,
-                                      settings=settings, workers=workers)
+                                      settings=settings, workers=workers,
+                                      duration_s=eff_duration_s)
     try:
         ref = driver.create(run_snapshot, workers)
     except Exception as exc:
@@ -224,7 +311,7 @@ def _resolve_bundle(db, spec, settings=None):
     a re-run of the same pack never rebuilds. The bundle row is added/flushed so
     ``bundle.id`` is available for the run's ``bundle_id`` foreign key.
     """
-    from .bundles import build_from_pack
+    from .bundles import build_from_metrics_config, build_from_pack
 
     pack = spec.pack
     if pack is None:
@@ -236,7 +323,14 @@ def _resolve_bundle(db, spec, settings=None):
 
     if settings is None:
         settings = get_settings()
-    built = build_from_pack(pack.source_path, bundle_dir=settings.bundle_dir)
+    # A UI-authored metrics pack has no source directory: its bundle is
+    # synthesised from the stored builder config. Every other pack builds from
+    # its on-disk source_path (a local directory or a repo clone).
+    if pack.builder_config_json is not None:
+        built = build_from_metrics_config(
+            pack.name, pack.builder_config_json, bundle_dir=settings.bundle_dir)
+    else:
+        built = build_from_pack(pack.source_path, bundle_dir=settings.bundle_dir)
 
     existing = db.execute(
         select(Bundle).where(Bundle.digest == built.digest)
@@ -1643,7 +1737,7 @@ def build_slice(run, lease, settings=None):
     overrides = resolve_overrides(snap.get("overrides"), lease.slot)
     duration_s = snap.get("duration_s")
     effective = lease.effective_t0
-    return {
+    slice_doc = {
         "run_id": run.id,
         "slot": lease.slot,
         "total_workers": total_workers,
@@ -1658,6 +1752,10 @@ def build_slice(run, lease, settings=None):
         "released": run.t0 is not None,
         "effective_t0": iso_from_dt(effective),
     }
+    # A backfill run carries the historical window for the worker (both engines).
+    if snap.get("backfill"):
+        slice_doc["backfill"] = snap["backfill"]
+    return slice_doc
 
 
 def iso_from_dt(value):
@@ -1674,28 +1772,34 @@ def iso_from_dt(value):
     return format_iso8601(value.timestamp())
 
 
-def build_spec_snapshot(spec, target, overrides=None):
-    # type: (Spec, Target, Optional[Mapping[str, str]]) -> Dict[str, Any]
+def build_spec_snapshot(spec, target, overrides=None, rate_mode=None,
+                        rate_value=None, duration_s=None, backfill=None):
+    # type: (Spec, Target, Optional[Mapping[str, str]], Optional[str], Optional[float], Optional[float], Optional[Dict[str, Any]]) -> Dict[str, Any]
     """Freeze a spec into ``spec_snapshot_json`` (non-secret only).
 
     Embeds the target by id plus non-secret fields (name, hec_url, default_index,
     verify_tls, env_tag) — **never** the token. Merges last-minute ``overrides``
     over the spec's stored overrides. A GET-body test asserts no secret material
     appears in any snapshot.
+
+    ``rate_mode`` / ``rate_value`` / ``duration_s`` override the spec's own values
+    when given (a **backfill** run overrides them to an eps delivery cap + a
+    duration backstop). ``backfill`` (``{start_s, end_s, resolution_s}``) is
+    frozen into the snapshot so ``build_slice`` can hand it to the worker.
     """
     merged_overrides = dict(spec.overrides_json or {})
     if overrides:
         merged_overrides.update(overrides)
-    return {
+    snap = {
         "spec_id": spec.id,
         "name": spec.name,
         "engine": spec.engine,
         "ref": spec.ref,
-        "rate_mode": spec.rate_mode,
-        "rate_value": spec.rate_value,
+        "rate_mode": rate_mode if rate_mode is not None else spec.rate_mode,
+        "rate_value": rate_value if rate_value is not None else spec.rate_value,
         "interval_s": spec.interval_s,
         "workers": spec.workers,
-        "duration_s": spec.duration_s,
+        "duration_s": duration_s if duration_s is not None else spec.duration_s,
         "fleet": spec.fleet,
         "strict_release": spec.strict_release,
         "overrides": merged_overrides,
@@ -1712,10 +1816,14 @@ def build_spec_snapshot(spec, target, overrides=None):
             "env_tag": target.env_tag,
         },
     }
+    if backfill is not None:
+        snap["backfill"] = backfill
+    return snap
 
 
-def build_run_snapshot(run, spec, target, hec_token, settings=None, workers=None):
-    # type: (Run, Spec, Target, Optional[str], Optional[Settings], Optional[int]) -> RunSnapshot
+def build_run_snapshot(run, spec, target, hec_token, settings=None, workers=None,
+                       duration_s=None):
+    # type: (Run, Spec, Target, Optional[str], Optional[Settings], Optional[int], Optional[float]) -> RunSnapshot
     """Build the :class:`RunSnapshot` a driver needs to launch the fleet.
 
     Projects the worker environment: ``STOKER_RUN_ID``, ``STOKER_CONTROL_URL``
@@ -1759,9 +1867,11 @@ def build_run_snapshot(run, spec, target, hec_token, settings=None, workers=None
         env["STOKER_HEC_TOKEN"] = hec_token
     driver_opts = dict(spec.driver_opts_json or {})
     # Surface the bounded duration to the driver (for a hard workload deadline).
-    # Unbounded runs (duration_s falsy) leave it absent so no deadline is set.
-    if spec.duration_s:
-        driver_opts.setdefault("duration_s", spec.duration_s)
+    # Unbounded runs (duration_s falsy) leave it absent so no deadline is set. A
+    # backfill run passes an explicit duration_s backstop that overrides the spec.
+    effective_duration = duration_s if duration_s is not None else spec.duration_s
+    if effective_duration:
+        driver_opts.setdefault("duration_s", effective_duration)
     return RunSnapshot(
         run_id=run.id,
         image=settings.worker_image,

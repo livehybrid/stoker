@@ -49,6 +49,21 @@ class TargetCreate(BaseModel):
     verify_tls: bool = True
 
 
+class TargetUpdate(BaseModel):
+    """Partial target update (PATCH). Every field is optional; only the fields
+    present in the request body are changed. ``token`` is write-only: send a new
+    value to rotate the HEC token, or omit it (or send an empty string) to keep
+    the stored one. ``max_concurrent_gb_day`` sent as null clears the cap."""
+
+    name: Optional[str] = None
+    hec_url: Optional[str] = None
+    token: Optional[str] = Field(default=None, repr=False)
+    default_index: Optional[str] = None
+    env_tag: Optional[str] = None
+    max_concurrent_gb_day: Optional[float] = None
+    verify_tls: Optional[bool] = None
+
+
 class TargetOut(BaseModel):
     """Target view. No token field exists here by construction."""
 
@@ -205,6 +220,65 @@ class PackPreview(BaseModel):
     lint_errors: List[str] = Field(default_factory=list)
 
 
+# --------------------------------------------------------------------------- #
+# Metric packs (UI-authored `metricgen` config -> engine: metrics)
+# --------------------------------------------------------------------------- #
+
+class MetricPackCreate(BaseModel):
+    """Create/update a metric pack from a builder `metricgen` config.
+
+    ``config`` is the whole ``metricgen`` object (``resolution_s``,
+    ``tz_offset_hours``, ``seed``, ``dimensions``, ``metrics``); it is validated
+    by ``bundles.lint_metrics_config`` at the route, not schema-enforced here, so
+    the flexible pattern/scale shapes stay open.
+    """
+
+    name: str
+    description: Optional[str] = None
+    config: Dict[str, Any]
+
+
+class MetricPackDetail(BaseModel):
+    """A metric pack with its builder config, for the editor."""
+
+    id: int
+    name: str
+    description: Optional[str] = None
+    engines_json: Optional[Any] = None
+    sourcetypes_json: Optional[Any] = None
+    verified: bool
+    lint_status: str
+    lint_errors_json: Optional[Any] = None
+    created_at: datetime.datetime
+    config: Dict[str, Any]
+    series_count: int
+
+
+class MetricPreviewRequest(BaseModel):
+    """Preview one metric's daily curve from an (in-progress) builder config."""
+
+    config: Dict[str, Any]
+    metric: Optional[str] = None                 # name; default = first metric
+    cell: Optional[Dict[str, str]] = None        # a dimension combo for scaling
+    points: int = 96                             # samples across 24 h
+
+
+class MetricPreviewPoint(BaseModel):
+    hour: float
+    activity: float
+    center: float
+    value: float
+
+
+class MetricPreviewResponse(BaseModel):
+    metric: str
+    unit: Optional[str] = None
+    kind: str
+    guides: Dict[str, float]                      # {min, p95, max} (cell-scaled)
+    points: List[MetricPreviewPoint]
+    series_count: int
+
+
 class PackPreviewRun(BaseModel):
     """Rendered preview events from a pack (no fleet, no HEC target).
 
@@ -319,9 +393,35 @@ class SpecEstimate(BaseModel):
 # --------------------------------------------------------------------------- #
 
 class RunLaunch(BaseModel):
-    """Body for POST /specs/{id}/run: last-minute override values."""
+    """Body for POST /specs/{id}/run: last-minute override values.
+
+    ``backfill_window_s`` (when set) launches a **backfill** run: generate the
+    last ``window`` seconds of history (events stamped at their historical time),
+    delivered at the spec's own eps clamped to ``backfill_cap_eps`` (the ceiling,
+    default DEFAULT_BACKFILL_CAP_EPS), then finish.
+    """
 
     overrides: Optional[Dict[str, str]] = None
+    backfill_window_s: Optional[int] = None
+    backfill_resolution_s: Optional[float] = None   # metrics coarse step
+    backfill_cap_eps: Optional[float] = None         # delivery ceiling (not a forced rate)
+
+
+class BackfillEstimateRequest(BaseModel):
+    window_s: int
+    resolution_s: Optional[float] = None
+    cap_eps: Optional[float] = None
+
+
+class BackfillEstimate(BaseModel):
+    engine: str
+    events: int
+    bytes: Optional[int] = None
+    seconds: float                                   # est. delivery time at deliver_eps
+    cap_eps: float                                   # the ceiling
+    deliver_eps: float                               # actual delivery rate (spec eps, clamped)
+    series: Optional[int] = None                     # metrics only
+    warning: str
 
 
 class RunCreated(BaseModel):
@@ -460,6 +560,19 @@ class TelemetrySlice(BaseModel):
     interval_s: float = 5
 
 
+class BackfillSlice(BaseModel):
+    """The ``backfill`` object in a slice: the historical window the worker fills.
+
+    Present only on a backfill run. ``start_s`` / ``end_s`` are epoch seconds;
+    ``resolution_s`` is the metrics step (null for eventgen, which derives its
+    window from ``end_s - start_s``). Declared here so the claim's response_model
+    does not strip it (see :func:`server.lifecycle.build_slice`)."""
+
+    start_s: float
+    end_s: float
+    resolution_s: Optional[float] = None
+
+
 class SpecSliceOut(BaseModel):
     """The claim response: the worker's share of a run.
 
@@ -481,6 +594,9 @@ class SpecSliceOut(BaseModel):
     telemetry: TelemetrySlice = Field(default_factory=TelemetrySlice)
     released: bool = False
     effective_t0: Optional[str] = None
+    # Present only on a backfill run; None otherwise. MUST be declared or the
+    # response_model silently drops the backfill window from every claim.
+    backfill: Optional[BackfillSlice] = None
 
 
 class ReadyRequest(BaseModel):

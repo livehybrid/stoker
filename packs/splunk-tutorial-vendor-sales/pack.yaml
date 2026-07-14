@@ -1,0 +1,20 @@
+# Stoker pack: a synthetic reproduction of the Splunk Search Tutorial's
+# vendor_sales.log (sourcetype vendor_sales). One sale per line:
+# `[DD/Mon/YYYY:HH:MM:SS] VendorID=<n> Code=<A-F> AcctID=<16 digits>`. The Code
+# field is the one the tutorial joins to the price lookup. Reads like the
+# tutorial's vendor sales data and lands under the same field extractions.
+#
+# Authored synthetic data, not Splunk's copyrighted tutorialdata.zip. If you need
+# the exact tutorial bytes for a demo, add them privately as a local rawreplay
+# `dataset:` pack.
+# NOTE: the worker parses this with a flat two-level scalar subset of YAML;
+# keep every value on a single line.
+name: splunk-tutorial-vendor-sales
+tags: splunk, tutorial, sales, vendor, lookup
+engine: eventgen
+description: "Splunk Search Tutorial-style vendor_sales.log (vendor_sales): one sale per line - [DD/Mon/YYYY:HH:MM:SS] VendorID Code (A-F, the price-lookup key) AcctID (16 digits); tokens re-stamp the timestamp and randomise the VendorID and AcctID. Synthetic reproduction of the tutorial format, not Splunk's copyrighted files"
+estimates:
+  bytes_per_event: 67
+defaults:
+  index: main
+  sourcetype: vendor_sales

@@ -52,6 +52,12 @@ def serialise_envelope(envelope):
         if value is not None:
             doc[key] = value
     doc["event"] = envelope["event"]
+    # Metric events (event == "metric") carry a `fields` object holding the
+    # metric_name:<name> measurements and dimensions. Pass it through verbatim so
+    # the same HEC event endpoint delivers metrics; log events have no `fields`.
+    fields = envelope.get("fields")
+    if fields:
+        doc["fields"] = fields
     return json.dumps(doc, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 

@@ -2,7 +2,7 @@ import { useState, type FormEvent } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 
 import { api, ApiError } from "../../lib/api";
-import type { TargetCreate, TargetOut } from "../../lib/types";
+import type { TargetCreate, TargetOut, TargetUpdate } from "../../lib/types";
 import { Field, TextInput, Select } from "../../components/Field";
 import { Button } from "../../components/Button";
 import { useToast } from "../../components/Toast";
@@ -31,32 +31,64 @@ const EMPTY: FormState = {
   verify_tls: true,
 };
 
+function fromTarget(t: TargetOut): FormState {
+  return {
+    name: t.name,
+    hec_url: t.hec_url,
+    token: "", // write-only: never echoed, so it starts blank on edit
+    default_index: t.default_index ?? "",
+    env_tag: t.env_tag,
+    max_concurrent_gb_day:
+      t.max_concurrent_gb_day != null ? String(t.max_concurrent_gb_day) : "",
+    verify_tls: t.verify_tls,
+  };
+}
+
 /**
- * Create-a-target form. The HEC token is write-only: it is sent on create and
- * never rendered back (the API stores it encrypted and never echoes it). The
- * field is cleared on success along with the rest of the form.
+ * Target form. Creates a target, or edits an existing one when `target` is
+ * given. The HEC token is write-only: on create it is required; on edit, leaving
+ * it blank keeps the stored token and entering a value rotates it. Capacity
+ * (concurrent GB/day cap) is editable in both modes.
  */
-export function NewTargetForm({ onCreated }: { onCreated?: () => void }) {
+export function NewTargetForm({
+  target,
+  onCreated,
+  onDone,
+}: {
+  target?: TargetOut;
+  onCreated?: () => void;
+  onDone?: () => void;
+}) {
+  const editing = target != null;
   const toast = useToast();
   const qc = useQueryClient();
-  const [form, setForm] = useState<FormState>(EMPTY);
+  const [form, setForm] = useState<FormState>(
+    editing ? fromTarget(target) : EMPTY,
+  );
   const [fieldError, setFieldError] = useState<string | null>(null);
 
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) =>
     setForm((prev) => ({ ...prev, [key]: value }));
 
-  const create = useMutation({
-    mutationFn: (body: TargetCreate) => api.targets.create(body),
+  const save = useMutation({
+    mutationFn: (vars: { create?: TargetCreate; update?: TargetUpdate }) =>
+      editing && vars.update
+        ? api.targets.update(target.id, vars.update)
+        : api.targets.create(vars.create as TargetCreate),
     onSuccess: (t: TargetOut) => {
-      toast.success(`Target “${t.name}” created.`);
-      setForm(EMPTY);
+      toast.success(
+        editing ? `Target “${t.name}” updated.` : `Target “${t.name}” created.`,
+      );
+      if (!editing) setForm(EMPTY);
       qc.invalidateQueries({ queryKey: ["targets"] });
       onCreated?.();
+      onDone?.();
     },
     onError: (err: unknown) => {
-      const msg =
-        err instanceof ApiError ? err.message : "Could not create the target.";
-      toast.error(msg);
+      const fallback = editing
+        ? "Could not update the target."
+        : "Could not create the target.";
+      toast.error(err instanceof ApiError ? err.message : fallback);
     },
   });
 
@@ -71,7 +103,10 @@ export function NewTargetForm({ onCreated }: { onCreated?: () => void }) {
     if (!/^https?:\/\//i.test(hecUrl)) {
       return setFieldError("HEC URL must start with http:// or https://.");
     }
-    if (!form.token.trim()) return setFieldError("A HEC token is required.");
+    // On create the token is required; on edit it is optional (blank = keep).
+    if (!editing && !form.token.trim()) {
+      return setFieldError("A HEC token is required.");
+    }
 
     let cap: number | null = null;
     if (form.max_concurrent_gb_day.trim() !== "") {
@@ -82,16 +117,30 @@ export function NewTargetForm({ onCreated }: { onCreated?: () => void }) {
       cap = parsed;
     }
 
-    const body: TargetCreate = {
-      name,
-      hec_url: hecUrl,
-      token: form.token,
-      default_index: form.default_index.trim() || null,
-      env_tag: form.env_tag,
-      max_concurrent_gb_day: cap,
-      verify_tls: form.verify_tls,
-    };
-    create.mutate(body);
+    if (editing) {
+      const update: TargetUpdate = {
+        name,
+        hec_url: hecUrl,
+        default_index: form.default_index.trim() || null,
+        env_tag: form.env_tag,
+        max_concurrent_gb_day: cap,
+        verify_tls: form.verify_tls,
+      };
+      if (form.token.trim()) update.token = form.token; // only rotate when given
+      save.mutate({ update });
+    } else {
+      save.mutate({
+        create: {
+          name,
+          hec_url: hecUrl,
+          token: form.token,
+          default_index: form.default_index.trim() || null,
+          env_tag: form.env_tag,
+          max_concurrent_gb_day: cap,
+          verify_tls: form.verify_tls,
+        },
+      });
+    }
   }
 
   return (
@@ -134,13 +183,21 @@ export function NewTargetForm({ onCreated }: { onCreated?: () => void }) {
 
         <Field
           label="HEC token"
-          hint="Write-only. Stored encrypted and never shown again."
+          hint={
+            editing
+              ? "Write-only. Leave blank to keep the current token; enter a value to rotate it."
+              : "Write-only. Stored encrypted and never shown again."
+          }
         >
           <TextInput
             type="password"
             value={form.token}
             onChange={(e) => set("token", e.target.value)}
-            placeholder="••••••••-••••-••••-••••-••••••••••••"
+            placeholder={
+              editing
+                ? "leave blank to keep current"
+                : "••••••••-••••-••••-••••-••••••••••••"
+            }
             autoComplete="new-password"
           />
         </Field>
@@ -182,19 +239,29 @@ export function NewTargetForm({ onCreated }: { onCreated?: () => void }) {
       {fieldError && <p className="text-sm text-red-400">{fieldError}</p>}
 
       <div className="flex items-center gap-3">
-        <Button type="submit" variant="primary" disabled={create.isPending}>
-          {create.isPending ? "Creating…" : "Create target"}
+        <Button type="submit" variant="primary" disabled={save.isPending}>
+          {save.isPending
+            ? editing
+              ? "Saving…"
+              : "Creating…"
+            : editing
+              ? "Save changes"
+              : "Create target"}
         </Button>
         <Button
           type="button"
           variant="ghost"
-          disabled={create.isPending}
+          disabled={save.isPending}
           onClick={() => {
-            setForm(EMPTY);
-            setFieldError(null);
+            if (editing) {
+              onDone?.();
+            } else {
+              setForm(EMPTY);
+              setFieldError(null);
+            }
           }}
         >
-          Reset
+          {editing ? "Cancel" : "Reset"}
         </Button>
       </div>
     </form>

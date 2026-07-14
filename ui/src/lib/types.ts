@@ -18,6 +18,18 @@ export interface TargetCreate {
   verify_tls?: boolean; // default true
 }
 
+// Partial update (PATCH). Only the fields present are changed; omit `token`
+// (or send "") to keep the stored HEC token, send a new value to rotate it.
+export interface TargetUpdate {
+  name?: string;
+  hec_url?: string;
+  token?: string;
+  default_index?: string | null;
+  env_tag?: string;
+  max_concurrent_gb_day?: number | null;
+  verify_tls?: boolean;
+}
+
 export interface TargetOut {
   id: number;
   name: string;
@@ -120,6 +132,97 @@ export interface PackPreviewRun {
 }
 
 // --------------------------------------------------------------------------- //
+// Metric packs (UI-authored `metricgen` config -> engine: metrics)
+// --------------------------------------------------------------------------- //
+
+export type MetricKind = "gauge" | "count" | "counter";
+
+export type PatternType =
+  | "constant"
+  | "sine"
+  | "business_hours"
+  | "business_double_hump"
+  | "ramp"
+  | "spike"
+  | "random_walk";
+
+export interface MetricDimension {
+  key: string;
+  values: string[];
+}
+
+export interface MetricPattern {
+  type: PatternType;
+  [param: string]: unknown;
+}
+
+export interface MetricDef {
+  name: string;
+  kind: MetricKind;
+  unit?: string;
+  min: number;
+  p95: number;
+  max: number;
+  noise?: number;
+  pattern: MetricPattern;
+  // scale[dimensionKey][dimensionValue] = multiplier applied to this metric's
+  // min/p95/max for series carrying that dimension value.
+  scale?: Record<string, Record<string, number>>;
+}
+
+export interface MetricgenConfig {
+  resolution_s: number;
+  tz_offset_hours?: number;
+  seed?: number;
+  sourcetype?: string;
+  dimensions: MetricDimension[];
+  metrics: MetricDef[];
+}
+
+export interface MetricPackCreate {
+  name: string;
+  description?: string | null;
+  config: MetricgenConfig;
+}
+
+export interface MetricPackDetail {
+  id: number;
+  name: string;
+  description?: string | null;
+  engines_json?: string[] | null;
+  sourcetypes_json?: string[] | null;
+  verified: boolean;
+  lint_status: string;
+  lint_errors_json?: string[] | null;
+  created_at: string;
+  config: MetricgenConfig;
+  series_count: number;
+}
+
+export interface MetricPreviewRequest {
+  config: MetricgenConfig;
+  metric?: string | null;
+  cell?: Record<string, string> | null;
+  points?: number;
+}
+
+export interface MetricPreviewPoint {
+  hour: number;
+  activity: number;
+  center: number;
+  value: number;
+}
+
+export interface MetricPreviewResponse {
+  metric: string;
+  unit?: string | null;
+  kind: string;
+  guides: { min: number; p95: number; max: number };
+  points: MetricPreviewPoint[];
+  series_count: number;
+}
+
+// --------------------------------------------------------------------------- //
 // Specs
 // --------------------------------------------------------------------------- //
 
@@ -199,6 +302,27 @@ export interface SpecEstimate {
 
 export interface RunLaunch {
   overrides?: Record<string, string> | null;
+  // Backfill: generate the last `window` seconds of history then finish.
+  backfill_window_s?: number | null;
+  backfill_resolution_s?: number | null; // metrics coarse step
+  backfill_cap_eps?: number | null; // delivery cap
+}
+
+export interface BackfillEstimateRequest {
+  window_s: number;
+  resolution_s?: number | null;
+  cap_eps?: number | null;
+}
+
+export interface BackfillEstimate {
+  engine: string;
+  events: number;
+  bytes?: number | null;
+  seconds: number;
+  cap_eps: number;
+  deliver_eps: number;
+  series?: number | null;
+  warning: string;
 }
 
 export interface RunCreated {

@@ -24,6 +24,7 @@ believe it is talking to a real swarm.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import struct
@@ -34,7 +35,10 @@ import pytest
 
 from server.drivers.base import DriverError, DriverRef, DriverStatus, RunSnapshot
 from server.drivers.fake import FakeDriver
-from server.drivers.swarm import SwarmDriver, service_name
+from server.drivers.swarm import SwarmDriver, _repo_without_tag, service_name
+
+# A stand-in registry digest the fake Portainer returns for a tag lookup.
+_FAKE_DIGEST = "sha256:" + "ab" * 32
 
 
 # --------------------------------------------------------------------------- #
@@ -57,6 +61,9 @@ class _FakePortainer:
         self.calls = []  # type: List[Dict[str, Any]]
         self._next_id = 1
         self._version = 10
+        # When True, the /distribution digest lookup 404s (registry unreachable),
+        # so the driver must fall back to the floating tag.
+        self.fail_distribution = False
 
     # -- transport entry point ------------------------------------------- #
 
@@ -83,6 +90,11 @@ class _FakePortainer:
         idx = path.find(marker)
         route = path[idx + len(marker):] if idx >= 0 else path
 
+        if route.startswith("/distribution/") and route.endswith("/json") \
+                and method == "GET":
+            if self.fail_distribution:
+                return httpx.Response(404, json={"message": "manifest unknown"})
+            return httpx.Response(200, json={"Descriptor": {"digest": _FAKE_DIGEST}})
         if route == "/services/create" and method == "POST":
             return self._create(parsed)
         if route == "/services" and method == "GET":
@@ -663,3 +675,64 @@ def test_swarm_create_rejects_zero_workers_before_any_call():
 def test_service_name_scheme():
     assert service_name(812) == "stoker-run-812"
     assert service_name("abc") == "stoker-run-abc"
+
+
+# --------------------------------------------------------------------------- #
+# Image digest pinning: a floating tag must be resolved so a fresh push is not
+# masked by a stale cached :latest on a node (the backfill-never-ran bug).
+# --------------------------------------------------------------------------- #
+
+def _created_image(portainer):
+    # type: (_FakePortainer) -> str
+    created = [c for c in portainer.calls if c["path"].endswith("/services/create")]
+    assert created, "no /services/create call recorded"
+    return created[-1]["json"]["TaskTemplate"]["ContainerSpec"]["Image"]
+
+
+def test_swarm_create_pins_floating_tag_to_registry_digest():
+    portainer = _FakePortainer()
+    driver = _swarm_with_fake(portainer)
+    snap = dataclasses.replace(
+        _snapshot(), image="ghcr.io/livehybrid/stoker-worker:latest")
+    driver.create(snap, 2)
+    # The created service references the immutable digest, not the floating tag.
+    assert _created_image(portainer) == \
+        "ghcr.io/livehybrid/stoker-worker@" + _FAKE_DIGEST
+    # A distribution digest lookup for the tag was made before create.
+    dist = [c for c in portainer.calls
+            if "/distribution/" in c["path"] and c["method"] == "GET"]
+    assert dist and "stoker-worker:latest/json" in dist[0]["path"]
+
+
+def test_swarm_create_passes_digest_pinned_image_through_untouched():
+    portainer = _FakePortainer()
+    driver = _swarm_with_fake(portainer)
+    driver.create(_snapshot(), 1)  # _snapshot image is already @sha256:deadbeef
+    assert _created_image(portainer) == \
+        "ghcr.io/livehybrid/stoker-worker@sha256:deadbeef"
+    # No registry round-trip for an already-pinned reference.
+    assert not any("/distribution/" in c["path"] for c in portainer.calls)
+
+
+def test_swarm_create_falls_back_to_tag_when_digest_lookup_fails():
+    portainer = _FakePortainer()
+    portainer.fail_distribution = True
+    driver = _swarm_with_fake(portainer)
+    snap = dataclasses.replace(
+        _snapshot(), image="ghcr.io/livehybrid/stoker-worker:latest")
+    # A failed resolution must not block the launch: fall back to the tag.
+    driver.create(snap, 1)
+    assert _created_image(portainer) == "ghcr.io/livehybrid/stoker-worker:latest"
+
+
+@pytest.mark.parametrize("ref,expected", [
+    ("ghcr.io/livehybrid/stoker-worker:latest", "ghcr.io/livehybrid/stoker-worker"),
+    ("ghcr.io/livehybrid/stoker-worker", "ghcr.io/livehybrid/stoker-worker"),
+    ("registry.local:5000/team/app:v1.2", "registry.local:5000/team/app"),
+    ("registry.local:5000/team/app", "registry.local:5000/team/app"),
+    ("ghcr.io/org/app@sha256:" + "cd" * 32, "ghcr.io/org/app"),
+    ("busybox:1.36", "busybox"),
+    ("busybox", "busybox"),
+])
+def test_repo_without_tag(ref, expected):
+    assert _repo_without_tag(ref) == expected

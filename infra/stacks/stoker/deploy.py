@@ -34,7 +34,7 @@ SWARM_ID = os.environ.get("STOKER_SWARM_ID", "9xpdzr38fl4gfswthfvz8pwg0")
 STACK_NAME = "stoker"
 SECRET_NAME = "stoker_master_key"
 ENV_KEYS = [
-    "STOKER_DB_PASSWORD", "STOKER_PUBLIC_BASE_URL", "STOKER_WORKER_IMAGE",
+    "STOKER_DB_PASSWORD", "STOKER_HOST", "STOKER_PUBLIC_BASE_URL", "STOKER_WORKER_IMAGE",
     "PORTAINER_HOST", "PORTAINER_TOKEN", "DOGFOOD_HEC_URL", "DOGFOOD_HEC_TOKEN",
     # App-level auth (see .env.example). All optional; the stack.yml supplies
     # ${VAR:-default} fallbacks, so an unset var just uses its default. (Traefik

@@ -8,6 +8,7 @@ testable without eventgen or a live control plane.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -22,7 +23,7 @@ from .config import Config
 from .control import (ControlClient, DeadManError, StandaloneControl,
                       SupersededError)
 from .engine import (STOP_GRACE_S, EngineError, EngineRunner,
-                     RawReplayRunner)
+                     MetricsRunner, RawReplayRunner)
 from .metrics import CpuTracker, Metrics, read_rss_mb
 from .pacing import TokenBucket
 from .slice import SliceError, SpecSlice, parse_iso8601
@@ -93,10 +94,26 @@ def _default_rawreplay_engine_factory(replay, socket_path, cwd=None,
         ts_strptime=replay.ts_strptime, cwd=cwd, log_dir=log_dir)
 
 
+def _default_metrics_engine_factory(config_path, socket_path, slot, total_workers,
+                                    resolution_s=None, backfill_start_s=None,
+                                    backfill_end_s=None, backfill_resolution_s=None,
+                                    cwd=None, log_dir=None):
+    # type: (str, str, int, int, Optional[float], Optional[float], Optional[float], Optional[float], Optional[str], Optional[str]) -> MetricsRunner
+    """Build the metrics engine runner from a written config file + this worker's
+    shard coordinates (slot / total_workers stride the series matrix). A backfill
+    window, when present, makes the engine emit historical points then exit."""
+    return MetricsRunner(
+        socket_path, config_path, slot, total_workers,
+        resolution_s=resolution_s, backfill_start_s=backfill_start_s,
+        backfill_end_s=backfill_end_s, backfill_resolution_s=backfill_resolution_s,
+        cwd=cwd, log_dir=log_dir)
+
+
 class Agent(object):
     def __init__(self, config, hec_factory=None, engine_factory=None,
-                 control=None, clock=time.time, rawreplay_engine_factory=None):
-        # type: (Config, Optional[Callable], Optional[Callable], Optional[Any], Callable[[], float], Optional[Callable]) -> None
+                 control=None, clock=time.time, rawreplay_engine_factory=None,
+                 metrics_engine_factory=None):
+        # type: (Config, Optional[Callable], Optional[Callable], Optional[Any], Callable[[], float], Optional[Callable], Optional[Callable]) -> None
         self._cfg = config
         self._hec_factory = hec_factory or _default_hec_factory
         self._engine_factory = engine_factory or _default_engine_factory
@@ -104,6 +121,9 @@ class Agent(object):
         # engine independently of the eventgen one (their constructors differ).
         self._rawreplay_engine_factory = (
             rawreplay_engine_factory or _default_rawreplay_engine_factory)
+        # Metrics engine: likewise injectable so tests can stub it.
+        self._metrics_engine_factory = (
+            metrics_engine_factory or _default_metrics_engine_factory)
         self._control_override = control
         self._clock = clock
         self._drain_event = threading.Event()
@@ -153,14 +173,20 @@ class Agent(object):
                 gated = sl.rate_mode != "count_interval"
                 share_eps = self._gating_eps(sl, pack.estimates)
                 is_rawreplay = sl.engine == "rawreplay"
-                if not is_rawreplay:
+                is_metrics = sl.engine == "metrics"
+                if not is_rawreplay and not is_metrics:
                     # eventgen: rewrite the pack's conf for this worker's share.
+                    # A backfill window turns it into an eventgen backfill run.
+                    backfill_window_s = None
+                    if sl.backfill_start_s is not None and sl.backfill_end_s is not None:
+                        backfill_window_s = sl.backfill_end_s - sl.backfill_start_s
                     confrewrite.rewrite_file(
                         pack.conf_path, conf_path, sl.rate_mode, sl.rate_value,
                         cfg.overdrive, pack.samples_dir,
-                        slot=sl.slot, total_workers=sl.total_workers)
-                # PISTON: for rawreplay the conf-rewrite is skipped entirely; the
-                # engine reads its dataset + pacing from the pack's replay config.
+                        slot=sl.slot, total_workers=sl.total_workers,
+                        backfill_window_s=backfill_window_s)
+                # PISTON / metrics: the conf-rewrite is skipped entirely; those
+                # engines read their config from the pack (replay / metricgen).
 
                 self._hec = self._hec_factory(
                     sl.hec_url, cfg.hec_token, gzip_enabled=sl.hec_gzip,
@@ -182,12 +208,19 @@ class Agent(object):
                 if is_rawreplay:
                     self._engine = self._build_rawreplay_engine(sl, pack,
                                                                 gated, workdir)
+                elif is_metrics:
+                    self._engine = self._build_metrics_engine(sl, pack, workdir)
                 else:
                     self._engine = self._engine_factory(conf_path,
                                                         cfg.output_socket,
                                                         pack.pack_dir)
-                if gated:
-                    # warm the engine; the paused bucket holds output back
+                if gated and not is_metrics:
+                    # warm the engine; the paused bucket holds output back. NOT
+                    # for metrics: that engine either self-paces on a wall-clock
+                    # grid or (backfill) emits its whole window hot and exits, so
+                    # warming it pre-T0 pushes output into a paused pipeline (the
+                    # reader stops, the socket stalls and the backfill sweep is cut
+                    # short). Metrics always starts at T0, into an active bucket.
                     self._engine.start()
                     self._engine_started = True
 
@@ -200,8 +233,9 @@ class Agent(object):
                     if not self._drain_event.is_set():
                         self._bucket.anchor_at(anchor)
                         self._bucket.resume()
-                        if not gated and not self._engine_started:
-                            # count_interval is engine-paced: start at T0
+                        if not self._engine_started:
+                            # not warmed pre-T0 (count_interval, or any metrics
+                            # run incl. backfill): start now, at T0.
                             self._engine.start()
                             self._engine_started = True
                         self._state = "generating"
@@ -280,6 +314,38 @@ class Agent(object):
         resolved = _RawReplayView(replay, mode)
         return self._rawreplay_engine_factory(
             resolved, self._cfg.output_socket, pack.pack_dir, log_dir=log_dir)
+
+    def _build_metrics_engine(self, sl, pack, workdir):
+        # type: (SpecSlice, Any, str) -> Any
+        """Build the metrics engine runner for a metrics slice.
+
+        The pack must carry a resolved ``metricgen`` config; its absence on a
+        metrics run is a hard configuration error (EngineError -> setup-failure
+        drains with EXIT_CONFIG). The config is written to the workdir as JSON for
+        the engine to read (STOKER_METRICS_CONFIG); this worker's slot /
+        total_workers stride the series matrix so the fleet partitions it without
+        overlap. Metrics runs are engine-paced (count_interval / ungated), like
+        rawreplay cadence: the engine emits on its own resolution grid.
+        """
+        metricgen = getattr(pack, "metricgen", None)
+        if not metricgen:
+            raise EngineError(
+                "engine=metrics but the pack declares no metricgen config "
+                "(expected a `metricgen` block with a metrics list in stoker.json)")
+        config_path = os.path.join(workdir, "metrics-config.json")
+        try:
+            with open(config_path, "w", encoding="utf-8") as fh:
+                json.dump(metricgen, fh)
+        except OSError as exc:
+            raise EngineError("cannot write metrics config: %s" % exc)
+        log_dir = os.path.join(workdir, "metrics-logs")
+        resolution = metricgen.get("resolution_s")
+        return self._metrics_engine_factory(
+            config_path, self._cfg.output_socket, sl.slot, sl.total_workers,
+            resolution_s=resolution, backfill_start_s=sl.backfill_start_s,
+            backfill_end_s=sl.backfill_end_s,
+            backfill_resolution_s=sl.backfill_resolution_s,
+            cwd=pack.pack_dir, log_dir=log_dir)
 
     def _gating_eps(self, sl, estimates):
         # type: (SpecSlice, Dict[str, Any]) -> Optional[float]

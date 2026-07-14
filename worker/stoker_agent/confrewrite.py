@@ -172,9 +172,21 @@ def _fmt_number(value):
 
 
 def rewrite(parser, rate_mode, share_value, overdrive, sample_dir,
-            slot=0, total_workers=1, weights=None):
-    # type: (configparser.RawConfigParser, str, Optional[float], float, str, int, int, Optional[Sequence[float]]) -> configparser.RawConfigParser
-    """Apply the contract's rewrite rules in place and return the parser."""
+            slot=0, total_workers=1, weights=None, backfill_window_s=None):
+    # type: (configparser.RawConfigParser, str, Optional[float], float, str, int, int, Optional[Sequence[float]], Optional[float]) -> configparser.RawConfigParser
+    """Apply the contract's rewrite rules in place and return the parser.
+
+    ``backfill_window_s`` (when set) turns this into an eventgen **backfill** run:
+    each paced stanza's timestamp window is widened to ``earliest = -<window>s``,
+    ``latest = now`` so the sample's timestamp token stamps every generated event
+    a historical time across ``[now-window, now]`` (the event text timestamp and
+    the HEC ``_time`` agree). The run generates at the paced cap and is bounded by
+    the agent's duration deadline (the control plane sizes it to the backfill
+    volume). This populates the window uniformly; the diurnal shape across the
+    window is not reproduced (metrics backfill does that). We use this rather than
+    eventgen's native ``backfill`` rater, which is non-functional in this vendored
+    tree.
+    """
     _strip_output_keys(parser)
 
     for section in parser.sections():
@@ -200,6 +212,13 @@ def rewrite(parser, rate_mode, share_value, overdrive, sample_dir,
         _rewrite_count_interval(parser, paced, slot, total_workers)
     else:
         raise ConfRewriteError("unknown rate mode %r" % rate_mode)
+
+    if backfill_window_s and backfill_window_s > 0:
+        for section in paced:
+            # Widen the timestamp window so the sample's timestamp token stamps a
+            # historical time across [now-window, now] for every event.
+            parser.set(section, "earliest", "-%ds" % int(backfill_window_s))
+            parser.set(section, "latest", "now")
     return parser
 
 
@@ -255,11 +274,12 @@ def _rewrite_count_interval(parser, sections, slot, total_workers):
 
 
 def rewrite_file(src, dst, rate_mode, share_value, overdrive, sample_dir,
-                 slot=0, total_workers=1, weights=None):
-    # type: (str, str, str, Optional[float], float, str, int, int, Optional[Sequence[float]]) -> str
+                 slot=0, total_workers=1, weights=None, backfill_window_s=None):
+    # type: (str, str, str, Optional[float], float, str, int, int, Optional[Sequence[float]], Optional[float]) -> str
     """Load src, rewrite, write the private copy to dst. Returns dst."""
     parser = load_conf(src)
     rewrite(parser, rate_mode, share_value, overdrive, sample_dir,
-            slot=slot, total_workers=total_workers, weights=weights)
+            slot=slot, total_workers=total_workers, weights=weights,
+            backfill_window_s=backfill_window_s)
     write_conf(parser, dst)
     return dst

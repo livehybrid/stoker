@@ -26,8 +26,10 @@ import ipaddress
 import json
 import logging
 import os
+import shutil
 import socket
 import tarfile
+import tempfile
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlsplit
 
@@ -50,6 +52,23 @@ _REDIRECT_STATUSES = frozenset((301, 302, 303, 307, 308))
 # time (`dataset_url:`). CADENCE mode reproduces the recorded inter-event gaps;
 # RATE mode emits hot and lets the agent token bucket pace + loop the dataset.
 RAWREPLAY_ENGINE = "rawreplay"
+METRICS_ENGINE = "metrics"
+# A metrics pack's dimension cross-product must stay bounded (each combo is a
+# runtime series emitted every resolution tick). Rejected past this at lint.
+_MAX_METRIC_SERIES = 5000
+# The default metric sourcetype (a metrics-type index sourcetype).
+_DEFAULT_METRIC_SOURCETYPE = "stoker:metric"
+# Stub eventgen.conf shipped inside a metrics bundle. The metrics engine reads
+# its config from stoker.json's `metricgen` block and the agent skips the
+# conf-rewrite; this file exists only to satisfy the worker's pack-root file
+# contract (fetch_bundle requires default/eventgen.conf) and is never executed.
+_METRICS_STUB_CONF = (
+    "# Auto-generated stub for a metrics pack (engine=metrics). The metrics\n"
+    "# engine reads its config from stoker.json's `metricgen` block; this file\n"
+    "# exists only to satisfy the pack-root file contract and is never run.\n"
+    "[stub]\n"
+    "mode = sample\n"
+)
 _REPLAY_MODES = ("rate", "cadence")
 _DEFAULT_TIME_MULTIPLE = 1.0
 # Where a fetched `dataset_url` payload lands inside the built bundle (so the
@@ -488,6 +507,180 @@ def lint_rawreplay_pack(pack_dir):
         declared_bytes_per_event=declared_bpe,
         replay=replay,
     )
+
+
+# --------------------------------------------------------------------------- #
+# metrics pack: lint + build from a UI-authored config
+# --------------------------------------------------------------------------- #
+
+def metrics_series_count(config):
+    # type: (Dict[str, Any]) -> int
+    """Size of the dimension cross-product (the number of runtime series)."""
+    dims = config.get("dimensions") or [] if isinstance(config, dict) else []
+    count = 1
+    for d in dims:
+        if isinstance(d, dict) and isinstance(d.get("values"), list) and d["values"]:
+            count *= len(d["values"])
+    return count
+
+
+def lint_metrics_config(config):
+    # type: (Dict[str, Any]) -> List[str]
+    """Validate a metrics pack's ``metricgen`` config; return a list of errors.
+
+    Shape: ``{resolution_s, tz_offset_hours?, seed?, sourcetype?, dimensions?,
+    metrics: [ {name, kind, min, p95, max, noise?, pattern:{type,...}, scale?} ]}``.
+    Checks the resolution, the dimension cross-product size, and each metric's
+    name uniqueness, kind, min<=p95<=max ordering, noise, pattern type and scale
+    references. The value/pattern maths itself lives in ``metricpatterns``.
+    """
+    from . import metricpatterns
+
+    errors = []  # type: List[str]
+    if not isinstance(config, dict):
+        return ["metricgen config must be an object"]
+
+    res = config.get("resolution_s", 10)
+    try:
+        if float(res) <= 0:
+            errors.append("resolution_s must be > 0")
+    except (TypeError, ValueError):
+        errors.append("resolution_s must be a number")
+
+    dim_keys = set()  # type: set
+    dims = config.get("dimensions", [])
+    if dims and not isinstance(dims, list):
+        errors.append("dimensions must be a list")
+    elif isinstance(dims, list):
+        for i, d in enumerate(dims):
+            if not isinstance(d, dict):
+                errors.append("dimension %d must be an object" % i)
+                continue
+            key = d.get("key")
+            vals = d.get("values")
+            if not key or not isinstance(key, str):
+                errors.append("dimension %d needs a non-empty string key" % i)
+            else:
+                dim_keys.add(key)
+            if not isinstance(vals, list) or not vals:
+                errors.append("dimension %r needs a non-empty values list" % key)
+        n_series = metrics_series_count(config)
+        if n_series > _MAX_METRIC_SERIES:
+            errors.append("dimension cross-product is %d series (max %d); reduce "
+                          "dimensions or values" % (n_series, _MAX_METRIC_SERIES))
+
+    metrics = config.get("metrics")
+    if not isinstance(metrics, list) or not metrics:
+        errors.append("metrics must be a non-empty list")
+        return errors
+
+    seen = set()  # type: set
+    for i, m in enumerate(metrics):
+        if not isinstance(m, dict):
+            errors.append("metric %d must be an object" % i)
+            continue
+        name = m.get("name")
+        label = name if isinstance(name, str) and name else ("#%d" % i)
+        if not name or not isinstance(name, str):
+            errors.append("metric %s needs a non-empty string name" % label)
+        elif name in seen:
+            errors.append("duplicate metric name %r" % name)
+        else:
+            seen.add(name)
+        kind = m.get("kind", "gauge")
+        if kind not in metricpatterns.VALUE_KINDS:
+            errors.append("metric %r: kind must be one of %s"
+                          % (label, ", ".join(metricpatterns.VALUE_KINDS)))
+        try:
+            vmin = float(m.get("min", 0))
+            p95 = float(m.get("p95", m.get("max", 1)))
+            vmax = float(m.get("max", p95))
+            if not (vmin <= p95 <= vmax):
+                errors.append("metric %r: require min <= p95 <= max (got %s / %s / %s)"
+                              % (label, vmin, p95, vmax))
+        except (TypeError, ValueError):
+            errors.append("metric %r: min/p95/max must be numbers" % label)
+        try:
+            if float(m.get("noise", 0.1)) < 0:
+                errors.append("metric %r: noise must be >= 0" % label)
+        except (TypeError, ValueError):
+            errors.append("metric %r: noise must be a number" % label)
+        pattern = m.get("pattern") or {}
+        ptype = (pattern.get("type") if isinstance(pattern, dict) else None) or "constant"
+        if ptype not in metricpatterns.PATTERN_TYPES:
+            errors.append("metric %r: unknown pattern type %r (known: %s)"
+                          % (label, ptype, ", ".join(metricpatterns.PATTERN_TYPES)))
+        scale = m.get("scale") or {}
+        if scale and isinstance(scale, dict):
+            for dk, table in scale.items():
+                if dk not in dim_keys:
+                    errors.append("metric %r: scale references unknown dimension %r"
+                                  % (label, dk))
+                if not isinstance(table, dict):
+                    errors.append("metric %r: scale[%r] must be an object mapping "
+                                  "value -> multiplier" % (label, dk))
+    return errors
+
+
+def build_from_metrics_config(name, config, bundle_dir=None, settings=None):
+    # type: (str, Dict[str, Any], Optional[str], Optional[Any]) -> BuiltBundle
+    """Build a content-addressed bundle for a UI-authored metrics pack.
+
+    The pack has no source directory: its ``metricgen`` config (validated by
+    :func:`lint_metrics_config`) is written into a synthesised ``stoker.json`` and
+    a stub ``default/eventgen.conf`` so the built bundle satisfies the worker's
+    pack-root file contract. Identical config -> identical digest (dedup), like
+    every other bundle.
+    """
+    errors = lint_metrics_config(config)
+    if errors:
+        raise BundleError("metrics pack %r failed lint: %s" % (name, "; ".join(errors)))
+
+    if settings is None:
+        from .config import get_settings
+
+        settings = get_settings()
+    if bundle_dir is None:
+        bundle_dir = settings.bundle_dir
+
+    n_metrics = len(config.get("metrics") or [])
+    # Rough multi-metric envelope size: base + per-measurement key/value.
+    est_bpe = round(120.0 + 45.0 * n_metrics, 1)
+    sourcetype = config.get("sourcetype") or _DEFAULT_METRIC_SOURCETYPE
+    manifest = {
+        "name": name,
+        "engine": METRICS_ENGINE,
+        "estimates": {"bytes_per_event": est_bpe},
+        "stanzas": [],
+        "sourcetypes": [sourcetype],
+        "metricgen": config,
+    }
+
+    tmp = tempfile.mkdtemp(prefix="stoker-metricpack-")
+    try:
+        # A FIXED pack-dir basename so the archive arcnames (prefixed with the
+        # basename) are stable across builds -> reproducible digest / dedup. The
+        # real pack name lives in the manifest, not the arcname prefix.
+        pack_dir = os.path.join(tmp, "metricpack")
+        os.makedirs(os.path.join(pack_dir, "default"))
+        with open(os.path.join(pack_dir, CONF_RELPATH), "w", encoding="utf-8") as fh:
+            fh.write(_METRICS_STUB_CONF)
+        data = build_tarball_bytes(pack_dir, manifest)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    digest = hashlib.sha256(data).hexdigest()
+    os.makedirs(bundle_dir, exist_ok=True)
+    path = os.path.join(bundle_dir, "%s.tgz" % digest)
+    if os.path.isfile(path) and os.path.getsize(path) == len(data):
+        log.info("metrics bundle %s already present (dedup)", digest[:12])
+        return BuiltBundle(digest=digest, path=path, size_bytes=len(data), reused=True)
+    tmp_path = path + ".tmp.%d" % os.getpid()
+    with open(tmp_path, "wb") as fh:
+        fh.write(data)
+    os.replace(tmp_path, path)
+    log.info("built metrics bundle %s (%d bytes) for pack %r", digest[:12], len(data), name)
+    return BuiltBundle(digest=digest, path=path, size_bytes=len(data), reused=False)
 
 
 def _safe_join_pack(pack_dir, name):

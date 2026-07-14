@@ -135,6 +135,11 @@ class Pack(Base):
     repo_id: Mapped[Optional[int]] = mapped_column(ForeignKey("repos.id"), nullable=True)
     # The repo head SHA this pack was last indexed at (null for a local pack).
     indexed_sha: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    # UI-authored builder config (currently metrics packs): the `metricgen`
+    # object the bundle is synthesised from. Null for a normal (directory/repo)
+    # pack. When set, the pack has no meaningful source_path and its bundle is
+    # built via bundles.build_from_metrics_config rather than from disk.
+    builder_config_json: Mapped[Optional[Any]] = mapped_column(JSON_VARIANT, nullable=True)
     created_at: Mapped[datetime.datetime] = _ts_column(nullable=False, default=utcnow)
 
     bundles: Mapped[list["Bundle"]] = relationship(back_populates="pack")
@@ -285,7 +290,12 @@ class RunEvent(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     run_id: Mapped[int] = mapped_column(ForeignKey("runs.id"), nullable=False)
     ts: Mapped[datetime.datetime] = _ts_column(nullable=False, default=utcnow)
-    actor: Mapped[str] = mapped_column(String(16), nullable=False, default="system")  # system|operator|agent
+    # Holds the same identity range as runs.started_by (String(255)): "system",
+    # "operator", "agent", a real username, or a "token:<name>" service-token
+    # principal. It was String(16) ("system|operator|agent") before per-actor
+    # audit attribution landed; a longer principal then overflowed it on Postgres
+    # (a 500 at provision), which SQLite's non-enforcement of varchar length hid.
+    actor: Mapped[str] = mapped_column(String(255), nullable=False, default="system")
     kind: Mapped[str] = mapped_column(String(64), nullable=False)
     detail_json: Mapped[Optional[Any]] = mapped_column(JSON_VARIANT, nullable=True)
 

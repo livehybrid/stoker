@@ -1,0 +1,15 @@
+Stoker
+Copyright 2026 Will Searle and the Stoker contributors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product includes software developed by third parties:
+
+  * splunk_eventgen 7.2.1 (Apache License 2.0), vendored under
+    worker/engines/eventgen/. The upstream licence is kept verbatim at
+    worker/engines/eventgen/LICENSE.upstream and the modifications made are
+    documented in worker/engines/eventgen/VENDOR.md.
+
+The open-source dependencies redistributed in the Stoker container images, and
+their licences, are inventoried in licenses/THIRD-PARTY-LICENSES.md, with the
+full licence texts under licenses/.

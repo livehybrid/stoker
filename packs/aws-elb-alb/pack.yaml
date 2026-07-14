@@ -1,0 +1,20 @@
+# Stoker pack: AWS Application Load Balancer access logs (sourcetype
+# aws:elb:accesslogs). Space-delimited, one request per line, in the official ALB
+# field order through conn_trace_id: type, ISO8601 response time, load balancer
+# id, client:port, target:port, the three processing times, elb/target status,
+# bytes, the quoted request line, user agent, TLS cipher/protocol, target group
+# ARN, trace id, domain, chosen cert, rule priority, request creation time,
+# actions, and the trailing classification fields. Weighted type + status mix;
+# tokens re-stamp the response time, randomise the client IP and apply a weighted
+# status mix.
+# NOTE: the worker parses this with a flat two-level scalar subset of YAML;
+# keep every value on a single line.
+name: aws-elb-alb
+tags: aws, cloud, elb, alb, loadbalancer, access
+engine: eventgen
+description: "AWS ALB access logs (aws:elb:accesslogs): space-delimited per-request log in the official Application Load Balancer field order through conn_trace_id, weighted http/https/h2 type and status mix; tokens re-stamp the ISO8601 response time, randomise the client IP and apply a weighted elb_status_code mix"
+estimates:
+  bytes_per_event: 640
+defaults:
+  index: main
+  sourcetype: aws:elb:accesslogs

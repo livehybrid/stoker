@@ -50,6 +50,29 @@ def test_serialise_envelope_drops_nulls_and_requires_event():
         serialise_envelope({"host": "h"})
 
 
+def test_serialise_envelope_passes_metric_fields_through():
+    # A metric envelope (event == "metric") carries a `fields` object with the
+    # metric_name:<name> measurements and dimensions; it must survive verbatim.
+    import json
+    line = serialise_envelope({
+        "time": 1783900000.0, "index": "metrics_idx", "sourcetype": "stoker:metric",
+        "host": None, "source": None, "event": "metric",
+        "fields": {"metric_name:cpu.usage": 42.1, "product": "search"},
+    })
+    doc = json.loads(line.decode("utf-8"))
+    assert doc["event"] == "metric"
+    assert doc["index"] == "metrics_idx"
+    assert doc["fields"] == {"metric_name:cpu.usage": 42.1, "product": "search"}
+
+
+def test_serialise_envelope_omits_absent_fields_for_log_events():
+    # A normal log event has no `fields`; the key must not appear.
+    import json
+    line = serialise_envelope({"time": None, "index": "main", "event": "log line"})
+    doc = json.loads(line.decode("utf-8"))
+    assert "fields" not in doc
+
+
 def test_batching_by_size():
     with HecSink(token=TOKEN) as sink:
         client = make_client(

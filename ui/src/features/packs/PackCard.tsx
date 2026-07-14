@@ -4,6 +4,7 @@ import type { PackOut } from "../../lib/types";
 import { Badge, StatusBadge } from "../../components/Badge";
 import { Button } from "../../components/Button";
 import { formatBytes, formatGbDay, shortSha } from "../format";
+import { packIsMetrics } from "../metrics/config";
 
 // A pack card: lint + verified badges, sourcetypes, estimated bytes/event and
 // declared GB/day, with Preview and "New job from pack" (design section 10.4).
@@ -20,6 +21,8 @@ function asStringList(v: unknown): string[] {
 export function PackCard({ pack, onPreview }: Props) {
   const sourcetypes = asStringList(pack.sourcetypes_json);
   const engines = asStringList(pack.engines_json);
+  const tags = asStringList(pack.tags_json);
+  const isMetric = packIsMetrics(pack);
 
   return (
     <section className="flex flex-col rounded-lg border border-surface-muted bg-surface-soft p-4 shadow-sm">
@@ -35,7 +38,9 @@ export function PackCard({ pack, onPreview }: Props) {
           )}
         </div>
         <div className="flex shrink-0 flex-col items-end gap-1">
-          <StatusBadge state={pack.lint_status} />
+          {/* Only surface lint state when it is a problem; a clean pack shows the
+              "verified" badge, so an extra "ok" pill was just noise. */}
+          {pack.lint_status !== "ok" && <StatusBadge state={pack.lint_status} />}
           {pack.verified ? (
             <Badge tone="green">verified</Badge>
           ) : (
@@ -44,7 +49,7 @@ export function PackCard({ pack, onPreview }: Props) {
         </div>
       </div>
 
-      {(sourcetypes.length > 0 || engines.length > 0) && (
+      {(sourcetypes.length > 0 || engines.length > 0 || tags.length > 0) && (
         <div className="mt-3 flex flex-wrap gap-1">
           {engines.map((e) => (
             <Badge key={`e-${e}`} tone="sky">
@@ -54,6 +59,11 @@ export function PackCard({ pack, onPreview }: Props) {
           {sourcetypes.map((s) => (
             <Badge key={`s-${s}`} tone="neutral">
               {s}
+            </Badge>
+          ))}
+          {tags.map((t) => (
+            <Badge key={`t-${t}`} tone="amber">
+              {t}
             </Badge>
           ))}
         </div>
@@ -94,9 +104,17 @@ export function PackCard({ pack, onPreview }: Props) {
           {pack.indexed_sha ? `indexed ${shortSha(pack.indexed_sha)}` : "local pack"}
         </span>
         <div className="flex items-center gap-2">
-          <Button variant="secondary" onClick={() => onPreview(pack)}>
-            Preview
-          </Button>
+          {isMetric ? (
+            // A metric pack has no eventgen stanzas to preview; edit it in the
+            // builder instead.
+            <Link to="/metric-packs/new" search={{ edit: pack.id }}>
+              <Button variant="secondary">Edit</Button>
+            </Link>
+          ) : (
+            <Button variant="secondary" onClick={() => onPreview(pack)}>
+              Preview
+            </Button>
+          )}
           {/* Pre-selects this pack in the wizard via its ?pack=<id> search
               param (validated by src/routes/specs.new.tsx). */}
           <Link to="/specs/new" search={{ pack: pack.id }}>

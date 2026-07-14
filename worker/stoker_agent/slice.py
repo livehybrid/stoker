@@ -66,6 +66,12 @@ class SpecSlice:
     telemetry_interval_s: float
     released: bool
     effective_t0: Optional[float]   # epoch; pacing anchor for re-issued leases
+    # Backfill (both engines): emit a historical window [start, end) then finish.
+    # None on start/end = a normal live run. The run is gated at a delivery cap
+    # (rate_mode eps) and completes when the engine exits after the window.
+    backfill_start_s: Optional[float] = None   # epoch (window start)
+    backfill_end_s: Optional[float] = None     # epoch (window end)
+    backfill_resolution_s: Optional[float] = None  # metrics step (default: pack resolution)
 
     @classmethod
     def from_claim(cls, doc):
@@ -114,6 +120,11 @@ class SpecSlice:
         duration = doc.get("duration_s")
         duration_s = float(duration) if duration else None
 
+        backfill = doc.get("backfill") or {}
+        bf_start = backfill.get("start_s")
+        bf_end = backfill.get("end_s")
+        bf_res = backfill.get("resolution_s")
+
         return cls(
             run_id=doc.get("run_id"),
             slot=int(doc.get("slot", 0)),
@@ -136,6 +147,9 @@ class SpecSlice:
             telemetry_interval_s=float(telemetry.get("interval_s", 5)),
             released=bool(doc.get("released", False)),
             effective_t0=effective_t0,
+            backfill_start_s=float(bf_start) if bf_start is not None else None,
+            backfill_end_s=float(bf_end) if bf_end is not None else None,
+            backfill_resolution_s=float(bf_res) if bf_res is not None else None,
         )
 
     @classmethod
@@ -155,6 +169,17 @@ class SpecSlice:
             overrides["host"] = cfg.host_field
         if cfg.source:
             overrides["source"] = cfg.source
+
+        def _envf(key):
+            import os
+            raw = os.environ.get(key)
+            if raw is None or not raw.strip():
+                return None
+            try:
+                return float(raw)
+            except ValueError:
+                raise SliceError("%s must be a number, got %r" % (key, raw))
+
         return cls(
             run_id="standalone",
             slot=cfg.slot,
@@ -177,6 +202,9 @@ class SpecSlice:
             telemetry_interval_s=cfg.heartbeat_s,
             released=False,
             effective_t0=None,
+            backfill_start_s=_envf("STOKER_BACKFILL_START_S"),
+            backfill_end_s=_envf("STOKER_BACKFILL_END_S"),
+            backfill_resolution_s=_envf("STOKER_BACKFILL_RESOLUTION_S"),
         )
 
     def hec_defaults(self):
