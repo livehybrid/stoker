@@ -397,13 +397,14 @@ class RunLaunch(BaseModel):
 
     ``backfill_window_s`` (when set) launches a **backfill** run: generate the
     last ``window`` seconds of history (events stamped at their historical time),
-    delivered at ``backfill_cap_eps`` (default cap), then finish.
+    delivered at the spec's own eps clamped to ``backfill_cap_eps`` (the ceiling,
+    default DEFAULT_BACKFILL_CAP_EPS), then finish.
     """
 
     overrides: Optional[Dict[str, str]] = None
     backfill_window_s: Optional[int] = None
     backfill_resolution_s: Optional[float] = None   # metrics coarse step
-    backfill_cap_eps: Optional[float] = None         # delivery cap
+    backfill_cap_eps: Optional[float] = None         # delivery ceiling (not a forced rate)
 
 
 class BackfillEstimateRequest(BaseModel):
@@ -416,8 +417,9 @@ class BackfillEstimate(BaseModel):
     engine: str
     events: int
     bytes: Optional[int] = None
-    seconds: float                                   # est. delivery time at the cap
-    cap_eps: float
+    seconds: float                                   # est. delivery time at deliver_eps
+    cap_eps: float                                   # the ceiling
+    deliver_eps: float                               # actual delivery rate (spec eps, clamped)
     series: Optional[int] = None                     # metrics only
     warning: str
 

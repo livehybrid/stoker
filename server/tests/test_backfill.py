@@ -37,6 +37,7 @@ def test_backfill_estimate_metrics(client, db_session, settings):
     assert b["series"] == 2                    # _valid_config: 2 products
     assert b["events"] == 60 * 2               # 3600/60 = 60 ticks x 2 series
     assert b["cap_eps"] == 5000.0
+    assert b["deliver_eps"] == 5000.0          # metrics has no eps -> fills at the cap
     assert b["bytes"] and b["bytes"] > 0
     assert "duplicate" in b["warning"].lower()
 
@@ -52,7 +53,9 @@ def test_backfill_estimate_eventgen(client, db_session, settings, make_pack):
     assert r.status_code == 200, r.text
     b = r.json()
     assert b["engine"] == "eventgen"
-    assert b["events"] == 600 * 100            # window x live eps
+    assert b["deliver_eps"] == 100.0           # honours the spec's eps (< cap)
+    assert b["events"] == 600 * 100            # window x deliver_eps
+    assert b["seconds"] == 600.0               # events / deliver_eps (not / cap)
     assert b["series"] is None
 
 
@@ -70,7 +73,7 @@ def test_metrics_backfill_run_overrides_rate_and_carries_window(
     r = db_session.get(Run, run.json()["run_id"])
     snap = r.spec_snapshot_json
     assert snap["rate_mode"] == "eps"          # overridden from count_interval
-    assert snap["rate_value"] == 5000.0        # delivery cap
+    assert snap["rate_value"] == 5000.0        # metrics has no eps -> fills at the cap
     assert snap["backfill"]["start_s"] < snap["backfill"]["end_s"]
     assert snap["backfill"]["resolution_s"] == 60
     assert snap["duration_s"] and snap["duration_s"] > 0
@@ -93,8 +96,27 @@ def test_eventgen_backfill_run_provisions(client, db_session, settings, make_pac
     assert run.status_code in (200, 201), run.text
     snap = db_session.get(Run, run.json()["run_id"]).spec_snapshot_json
     assert snap["rate_mode"] == "eps"
+    assert snap["rate_value"] == 100.0         # honours the spec's eps (not forced to the cap)
     assert snap["backfill"]["start_s"] < snap["backfill"]["end_s"]
     assert snap["duration_s"] and snap["duration_s"] > 0
+
+
+def test_plan_backfill_honours_and_clamps_rate():
+    """The delivery-rate policy, unit-tested directly (submit-time ceilings make a
+    high-total-eps spec awkward to build via the API, so assert the sizer here)."""
+    now = 1_000_000.0
+    # eventgen, eps below the cap -> delivered at the spec eps
+    p = lifecycle.plan_backfill("eventgen", 0, 10.0, 3600, None, None, now)
+    assert p["deliver_eps"] == 10.0
+    assert p["events"] == 3600 * 10            # window x deliver_eps
+    assert p["seconds"] == 3600.0              # events / deliver_eps (not / cap)
+    # eps above the cap -> clamped down, never exceeded
+    p = lifecycle.plan_backfill("eventgen", 0, 50_000.0, 3600, None, None, now)
+    assert p["deliver_eps"] == lifecycle.DEFAULT_BACKFILL_CAP_EPS
+    # no eps (metrics / count_interval) -> fills at the cap
+    p = lifecycle.plan_backfill("metrics", 3, None, 3600, 60, None, now)
+    assert p["deliver_eps"] == lifecycle.DEFAULT_BACKFILL_CAP_EPS
+    assert p["events"] == 60 * 3               # 60 ticks x 3 series
 
 
 def test_normal_run_carries_no_backfill(client, db_session, settings, make_pack, fake_driver):

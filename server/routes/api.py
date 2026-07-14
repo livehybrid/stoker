@@ -604,6 +604,7 @@ def backfill_estimate(spec_id: int, body: BackfillEstimateRequest,
         bytes=int(plan["events"] * bpe) if bpe else None,
         seconds=round(plan["seconds"], 1),
         cap_eps=plan["cap_eps"],
+        deliver_eps=plan["deliver_eps"],
         series=series if spec.engine == "metrics" else None,
         warning=("Re-running a backfill appends duplicate points; mstats will "
                  "double-count. Run once, or clear the window first."),

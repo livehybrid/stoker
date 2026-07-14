@@ -205,6 +205,16 @@ function JobWizard() {
   // launch and is the authority). No spec id needed, so it works before saving.
   const backfillEstimate = useMemo(() => {
     if (!backfillWindowS) return null;
+    // Delivery rate honours the configured eps (clamped to the cap); a metrics
+    // pack (no eps) fills at the cap. Mirrors server plan_backfill.
+    const deliverEps = isMetrics
+      ? BACKFILL_CAP
+      : Math.min(
+          form.rate_mode === "eps"
+            ? Number(form.rate_value) || BACKFILL_CAP
+            : BACKFILL_CAP,
+          BACKFILL_CAP,
+        );
     let events: number;
     let series: number | null = null;
     if (isMetrics) {
@@ -213,14 +223,10 @@ function JobWizard() {
         Number(backfillRes) || metricDetailQ.data?.config.resolution_s || 10;
       events = Math.ceil(backfillWindowS / res) * series;
     } else {
-      const rate =
-        form.rate_mode === "eps"
-          ? Number(form.rate_value) || BACKFILL_CAP
-          : BACKFILL_CAP;
-      events = Math.ceil(backfillWindowS * rate);
+      events = Math.ceil(backfillWindowS * deliverEps);
     }
     const bytes = bytesPerEvent ? Math.round(events * bytesPerEvent) : null;
-    return { events, series, bytes, seconds: events / BACKFILL_CAP };
+    return { events, series, bytes, deliverEps, seconds: events / deliverEps };
   }, [
     backfillWindowS,
     isMetrics,
@@ -716,9 +722,14 @@ function JobWizard() {
                   )}
                   {" · ~"}
                   <span className="font-medium text-slate-200">
-                    {Math.max(1, Math.round(backfillEstimate.seconds))} s
+                    {backfillEstimate.seconds >= 3600
+                      ? (backfillEstimate.seconds / 3600).toFixed(1) + " h"
+                      : backfillEstimate.seconds >= 60
+                        ? (backfillEstimate.seconds / 60).toFixed(1) + " min"
+                        : Math.max(1, Math.round(backfillEstimate.seconds)) +
+                          " s"}
                   </span>{" "}
-                  to deliver at {BACKFILL_CAP} eps
+                  to deliver at {backfillEstimate.deliverEps.toLocaleString()} eps
                   {backfillEstimate.bytes != null && (
                     <>
                       {" · "}

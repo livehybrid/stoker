@@ -320,6 +320,7 @@ export interface BackfillEstimate {
   bytes?: number | null;
   seconds: number;
   cap_eps: number;
+  deliver_eps: number;
   series?: number | null;
   warning: string;
 }

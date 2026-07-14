@@ -124,17 +124,26 @@ DEFAULT_BACKFILL_CAP_EPS = 5000.0
 
 def plan_backfill(engine, series_count, live_eps, window_s, resolution_s, cap_eps, now):
     # type: (str, int, Optional[float], float, Optional[float], Optional[float], float) -> Dict[str, Any]
-    """Size a backfill run: window, delivery cap, total events, duration backstop.
+    """Size a backfill run: window, delivery rate, total events, duration backstop.
 
-    ``events``: metrics = ceil(window/resolution) x series; eventgen = window x
-    the effective live eps. ``duration_s`` is a backstop deadline (1.5x the
-    delivery time + margin) so an eventgen backfill (which is bounded by the
-    deadline, not engine-exit) always completes. Metrics exits on its own when the
-    window is done; the backstop just guards against a stall.
+    ``deliver_eps`` is the rate the backfill is delivered at: the spec's OWN eps
+    (honoured, not overridden), clamped to the ceiling ``cap_eps`` (itself capped
+    at DEFAULT_BACKFILL_CAP_EPS). A spec with no eps (metrics / count_interval)
+    delivers at the ceiling. ``events``: metrics = ceil(window/resolution) x
+    series (the fixed grid); eventgen = window x deliver_eps (the volume that rate
+    fills the window with). ``duration_s`` is a backstop deadline (1.5x the
+    delivery time + margin) so an eventgen backfill (bounded by the deadline, not
+    engine-exit) completes; metrics exits on its own when the window is done.
     """
     window_s = float(window_s)
     cap = float(cap_eps) if cap_eps and cap_eps > 0 else DEFAULT_BACKFILL_CAP_EPS
     cap = max(1.0, min(cap, DEFAULT_BACKFILL_CAP_EPS))
+    # Honour the spec's configured eps as the delivery rate, clamped to the
+    # ceiling; a spec with no eps (metrics/count_interval) uses the ceiling.
+    if live_eps and live_eps > 0:
+        deliver_eps = max(1.0, min(float(live_eps), cap))
+    else:
+        deliver_eps = cap
     bf_res = None
     if engine == "metrics":
         res = float(resolution_s) if resolution_s and resolution_s > 0 else 10.0
@@ -142,17 +151,17 @@ def plan_backfill(engine, series_count, live_eps, window_s, resolution_s, cap_ep
         ticks = int(math.ceil(window_s / res)) if res > 0 else 0
         events = ticks * max(1, int(series_count or 1))
     else:
-        rate = float(live_eps) if live_eps and live_eps > 0 else cap
-        events = int(math.ceil(window_s * rate))
-    duration_s = max(15.0, math.ceil(events / cap * 1.5) + 15.0)
+        events = int(math.ceil(window_s * deliver_eps))
+    duration_s = max(15.0, math.ceil(events / deliver_eps * 1.5) + 15.0)
     return {
         "start_s": now - window_s,
         "end_s": now,
         "resolution_s": bf_res,
         "cap_eps": cap,
+        "deliver_eps": deliver_eps,
         "events": int(events),
         "duration_s": float(duration_s),
-        "seconds": float(events / cap) if cap else 0.0,
+        "seconds": float(events / deliver_eps) if deliver_eps else 0.0,
     }
 
 
@@ -208,8 +217,8 @@ def provision_run(db, spec, driver, overrides=None, started_by=None, settings=No
         log.info("run for spec %s engine=%s: forcing workers %s -> 1 (replay is "
                  "single-worker)", spec.id, spec.engine, spec.workers)
 
-    # 0b. Backfill: override the effective rate to an eps delivery cap, freeze the
-    #     historical window, and set a duration backstop.
+    # 0b. Backfill: deliver at the spec's own eps (clamped to the ceiling), freeze
+    #     the historical window, and set a duration backstop.
     eff_rate_mode = spec.rate_mode
     eff_rate_value = spec.rate_value
     eff_duration_s = spec.duration_s
@@ -229,7 +238,7 @@ def provision_run(db, spec, driver, overrides=None, started_by=None, settings=No
         res = backfill.get("resolution_s") or pack_res
         plan = plan_backfill(spec.engine, series, live_eps, backfill["window_s"],
                              res, backfill.get("cap_eps"), time.time())
-        eff_rate_mode, eff_rate_value = "eps", plan["cap_eps"]
+        eff_rate_mode, eff_rate_value = "eps", plan["deliver_eps"]
         eff_duration_s = plan["duration_s"]
         backfill_block = {"start_s": plan["start_s"], "end_s": plan["end_s"],
                           "resolution_s": plan["resolution_s"]}
