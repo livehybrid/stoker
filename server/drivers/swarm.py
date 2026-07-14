@@ -168,10 +168,18 @@ class SwarmDriver(object):
         # type: (RunSnapshot, int) -> DriverRef
         if workers < 1:
             raise DriverError("workers must be >= 1")
-        spec = self._service_spec(run, workers)
+        # Pin the image to a digest so the fleet always runs the intended build.
+        # Swarm does NOT re-pull a floating tag (…:latest) when a node already has
+        # that tag cached, so a freshly pushed worker can silently run stale code
+        # (a new engine feature never reaches the fleet). Resolving the tag to its
+        # current registry digest here makes every run reference an immutable
+        # repo@sha256:… that each node fetches if absent. Best-effort: on any
+        # resolution failure we fall back to the tag (a create is never blocked).
+        image = self._resolve_image(run.image)
+        spec = self._service_spec(run, workers, image=image)
         name = spec["Name"]
         log.info("swarm create service %s desired=%d image=%s",
-                 name, workers, run.image)
+                 name, workers, image)
         resp = self._request("POST", "/services/create", json_body=spec)
         body = _json(resp)
         service_id = body.get("ID") or body.get("Id") or ""
@@ -182,6 +190,36 @@ class SwarmDriver(object):
             id=str(service_id),
             raw={"run_id": run.run_id, "name": name, "endpoint": self._endpoint},
         )
+
+    def _resolve_image(self, image):
+        # type: (str) -> str
+        """Resolve a floating image tag to an immutable ``repo@sha256:…`` digest.
+
+        Uses Docker's ``GET /distribution/{name}/json`` (proxied by Portainer),
+        which queries the registry for the tag's manifest digest WITHOUT pulling.
+        An image that is already digest-pinned (``@sha256:``) is returned as-is.
+        Any failure (registry unreachable, private image with no swarm creds, an
+        unexpected body) logs a warning and returns the original reference: the
+        fleet then keeps swarm's default tag behaviour rather than failing to
+        launch. The returned string is what the ContainerSpec.Image becomes.
+        """
+        if not image or "@sha256:" in image:
+            return image
+        try:
+            resp = self._request("GET", "/distribution/%s/json" % image, ok=(200,))
+            digest = (_json(resp).get("Descriptor") or {}).get("digest")
+        except DriverError as exc:
+            log.warning("swarm: could not resolve image %s to a digest (%s); "
+                        "using the floating tag — a node may run a stale cached "
+                        "image", image, exc)
+            return image
+        if not isinstance(digest, str) or not digest.startswith("sha256:"):
+            log.warning("swarm: distribution lookup for %s returned no usable "
+                        "digest (%r); using the floating tag", image, digest)
+            return image
+        pinned = "%s@%s" % (_repo_without_tag(image), digest)
+        log.info("swarm: pinned image %s -> %s", image, pinned)
+        return pinned
 
     def scale(self, ref, workers):
         # type: (DriverRef, int) -> None
@@ -335,14 +373,17 @@ class SwarmDriver(object):
 
     # -- spec construction ------------------------------------------------ #
 
-    def _service_spec(self, run, workers):
-        # type: (RunSnapshot, int) -> Dict[str, Any]
+    def _service_spec(self, run, workers, image=None):
+        # type: (RunSnapshot, int, Optional[str]) -> Dict[str, Any]
         """Build the Docker Swarm ``ServiceSpec`` for a run's fleet.
 
         Env is projected as a Docker ``["K=V", ...]`` list from the snapshot;
         labels carry ``stoker.run=<id>`` on both the service and the container so
         boot reconciliation can find owned tasks. ``StopGracePeriod`` is in
         nanoseconds (Docker's unit). Placement spreads tasks across nodes.
+        ``image`` overrides ``run.image`` (the digest-pinned reference from
+        :meth:`_resolve_image`); it defaults to ``run.image`` for callers/tests
+        that pass an already-resolved snapshot.
         """
         run_label = str(run.run_id)
         labels = dict(run.labels or {})
@@ -352,7 +393,7 @@ class SwarmDriver(object):
         stop_grace_ns = int(run.stop_grace_s) * 1_000_000_000
 
         container_spec = {
-            "Image": run.image,
+            "Image": image or run.image,
             "Env": env_list,
             "Labels": dict(labels),
             "StopGracePeriod": stop_grace_ns,
@@ -395,6 +436,22 @@ class SwarmDriver(object):
 # --------------------------------------------------------------------------- #
 # Module-level helpers (pure; unit-tested via the mocked transport path).
 # --------------------------------------------------------------------------- #
+
+def _repo_without_tag(ref):
+    # type: (str) -> str
+    """Strip a trailing ``:tag`` from an image reference, leaving ``registry/repo``.
+
+    A registry port colon (``host:5000/repo``) is preserved: only a colon that
+    comes *after* the last ``/`` is a tag separator. A reference already carrying
+    a ``@digest`` is returned up to (not including) the ``@``.
+    """
+    ref = ref.split("@", 1)[0]
+    slash = ref.rfind("/")
+    colon = ref.rfind(":")
+    if colon > slash:
+        return ref[:colon]
+    return ref
+
 
 def _env_list(env):
     # type: (Optional[Dict[str, str]]) -> List[str]
