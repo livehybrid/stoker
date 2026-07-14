@@ -6,6 +6,8 @@ socket, and a fake HEC sink that records everything. Delivered volume
 must match rate x duration within 1 %.
 """
 
+import json
+import math
 import sys
 import threading
 import time
@@ -273,6 +275,92 @@ def test_await_release_self_evicts_on_deadman():
     assert t0 is None
     assert agent._exit_code == EXIT_DEADMAN
     assert agent._drain_event.is_set()
+
+
+def _metric_pack(tmp_path):
+    """A tiny metric pack (stoker.json metricgen): 2 series, 1 metric, 10s grid."""
+    pack = tmp_path / "mpack"
+    (pack / "default").mkdir(parents=True)
+    # metric bundles ship a stub eventgen.conf as a fallback; the agent ignores
+    # it for the metrics engine but the bundle loader expects the pack shape.
+    (pack / "default" / "eventgen.conf").write_text("[metrics]\nmode = metrics\n")
+    (pack / "stoker.json").write_text(json.dumps({
+        "name": "mtest",
+        "metricgen": {
+            "resolution_s": 10,
+            "seed": 1,
+            "dimensions": [{"key": "svc", "values": ["a", "b"]}],
+            "metrics": [{"name": "t.count", "kind": "count",
+                         "min": 1, "p95": 5, "max": 9}],
+        },
+    }))
+    return str(pack)
+
+
+@pytest.mark.timeout(90)
+def test_metrics_backfill_delivers_full_sweep(tmp_path, monkeypatch):
+    """Regression: a metrics backfill must NOT be warmed pre-T0.
+
+    The metrics engine emits its whole window HOT and exits (unlike eventgen,
+    which the agent paces). A backfill run is gated (eps at the cap), and warming
+    a gated engine pre-T0 pushed the hot sweep into a paused pipeline: the socket
+    reader stalled and the sweep was cut short to a handful of points. Started at
+    T0 into an active bucket, the full grid (ceil(window/res) x series) lands.
+    This drives the REAL metrics engine end to end, so it fails if the warm/T0
+    gating regresses.
+    """
+    window, res, series = 300, 30, 2
+    now = time.time()
+    env = {
+        "STOKER_STANDALONE": "1",
+        "STOKER_ENGINE": "metrics",
+        "STOKER_BUNDLE": _metric_pack(tmp_path),
+        "STOKER_HEC_URL": "http://fake-hec:8088",
+        "STOKER_HEC_TOKEN": "tok",
+        "STOKER_INDEX": "m",
+        # eps mode -> gated (exactly how the control plane launches a backfill).
+        "STOKER_RATE_MODE": "eps",
+        "STOKER_RATE_VALUE": "5000",
+        "STOKER_DURATION_S": "25",   # backstop; the engine exits on its own first
+        "STOKER_OUTPUT_SOCKET": str(tmp_path / "out.sock"),
+        "STOKER_METRICS_PORT": "0",
+        "STOKER_HEARTBEAT_S": "1",
+    }
+    # SpecSlice.from_standalone reads the backfill window from os.environ (via
+    # _envf), not the load_config dict, so set it there (a real worker's process
+    # env carries it). This is what turns the run into a backfill.
+    monkeypatch.setenv("STOKER_BACKFILL_START_S", repr(now - window))
+    monkeypatch.setenv("STOKER_BACKFILL_END_S", repr(now))
+    monkeypatch.setenv("STOKER_BACKFILL_RESOLUTION_S", str(res))
+    cfg = load_config(env)
+    sinks = []
+
+    def hec_factory(url, token, gzip_enabled, verify_tls, ack):
+        sink = FakeHec(url, token, gzip_enabled, verify_tls, ack)
+        sinks.append(sink)
+        return sink
+
+    # Default metrics_engine_factory -> the real `python -m stoker_metrics`.
+    agent = Agent(cfg, hec_factory=hec_factory)
+    result = []
+    thread = threading.Thread(target=lambda: result.append(agent.run()))
+    thread.start()
+    thread.join(75)
+    assert not thread.is_alive(), "agent did not finish"
+    assert result == [0]
+
+    delivered = len(sinks[0])
+    ticks = math.ceil(window / res)  # ~10
+    # The full sweep is ticks x series (+/- one grid-alignment tick). The bug
+    # delivered only a handful, so a generous floor still separates them.
+    assert delivered >= (ticks - 1) * series, (
+        "metrics backfill delivered %d points; expected the full sweep "
+        "(~%d) - was it cut short pre-T0?" % (delivered, ticks * series))
+    # Metric envelopes, stamped at historical times across the window.
+    assert sinks[0].events[0]["event"] == "metric"
+    stamps = [e["time"] for e in sinks[0].events if e.get("time")]
+    assert max(stamps) - min(stamps) >= window - 2 * res, \
+        "points are not spread across the historical window (grid, not backfill?)"
 
 
 @pytest.mark.timeout(60)
