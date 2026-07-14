@@ -16,6 +16,11 @@ passlib[bcrypt]
 bcrypt<4.1
 itsdangerous
 
+# Schema migrations. init_db() runs Alembic on boot: an unmanaged DB (fresh or a
+# legacy create_all schema) is create_all'd then stamped at head; a managed DB is
+# upgraded. See server/migrations/.
+alembic>=1.13
+
 # Postgres driver for prod DATABASE_URL (postgresql+psycopg://...).
 # Optional locally: SQLite needs no driver. Kept here so the image can talk
 # to Postgres; pip resolves a wheel on 3.12.
