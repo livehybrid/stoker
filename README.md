@@ -155,12 +155,16 @@ Pick one at submit, set a rate (EPS or GB/day) and go; author your own with
 | `splunk-tutorial-secure` | eventgen | `linux_secure` | Splunk Search Tutorial-style secure.log — Linux sshd auth events (Failed/Accepted password, invalid user), brute-force heavy. |
 | `splunk-tutorial-vendor-sales` | eventgen | `vendor_sales` | Splunk Search Tutorial-style vendor_sales.log — `VendorID`/`Code`/`AcctID` sales records (the tutorial's lookup dataset). |
 | `attack-replay` | rawreplay (Piston) | `XmlWinEventLog` | Byte-for-byte replay of a recorded Sysmon/Windows-Security attack capture, re-stamped to now. |
+| `web-store-metrics` | metrics | `stoker:metric` | Synthetic web-store KPIs as Splunk **metric** points (request/error counts, CPU, checkout latency) across service × region, with day-shaped patterns (a business double-hump, error spikes, a CPU sine). Deliver to a metrics-type index. |
 
 All eventgen packs re-stamp timestamps to now, randomise source IPs and apply a
-realistic weighted status/event mix. Want real recorded captures instead of
-synthetic templates? See ["Sourcing real datasets"](docs/PACKS.md#sourcing-real-datasets)
-for public corpora (BOTSv3, attack_data, NASA-HTTP, …) you can wire in as
-`rawreplay` `dataset_url` packs.
+realistic weighted status/event mix. The `web-store-metrics` pack is a **metric**
+pack (a `metricgen` block in `stoker.json`); author your own in the UI or as a
+directory pack, and see [docs/PACKS.md](docs/PACKS.md#metric-packs-metricgen).
+Want real recorded captures instead of synthetic templates? See
+["Sourcing real datasets"](docs/PACKS.md#sourcing-real-datasets) for public
+corpora (BOTSv3, attack_data, NASA-HTTP, …) you can wire in as `rawreplay`
+`dataset_url` packs.
 
 ## Repo layout
 
@@ -173,7 +177,7 @@ ui/        React / Vite / TanStack Router single-page app (built into the image)
 packs/     bundled packs (see "Bundled packs"): flatline, apigw, web-access,
            aws-cloudtrail, aws-s3-access, aws-elb-alb, splunk-tutorial-web,
            splunk-tutorial-secure, splunk-tutorial-vendor-sales (eventgen)
-           + attack-replay (Piston)
+           + attack-replay (Piston) + web-store-metrics (metrics)
 infra/     stacks/stoker (swarm stack + deploy.py), k8s/ manifests,
            aws/stoker-eks/ Terraform
 docs/      WORKER-CONTRACT.md, PACKS.md and design references

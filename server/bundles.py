@@ -101,6 +101,10 @@ class LintResult:
     # rawreplay only: the validated replay config (dataset/dataset_url, mode,
     # time_multiple, sourcetype, source). ``None`` for an eventgen pack.
     replay: Optional[Dict[str, Any]] = None
+    # metrics only: the validated ``metricgen`` config. The indexer stores it as
+    # the pack's ``builder_config_json`` so a git-synced / directory metric pack
+    # is first-class downstream, exactly like a UI-authored one. ``None`` otherwise.
+    metricgen: Optional[Dict[str, Any]] = None
 
     @property
     def engine(self):
@@ -232,6 +236,83 @@ def is_rawreplay_pack(pack_dir):
     return False
 
 
+def _read_stoker_json(pack_dir):
+    # type: (str) -> Dict[str, Any]
+    """Read a pack's ``stoker.json`` (exact JSON), ``{}`` when absent.
+
+    The flat ``pack.yaml`` subset cannot carry nested lists, so a metric pack's
+    ``metricgen`` block (dimensions/metrics) lives here. The worker reads the same
+    file for a standalone metrics run.
+    """
+    path = os.path.join(pack_dir, "stoker.json")
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError) as exc:
+        raise BundleError("cannot read stoker.json in %r: %s" % (pack_dir, exc))
+    return doc if isinstance(doc, dict) else {}
+
+
+def read_metricgen(pack_dir):
+    # type: (str) -> Optional[Dict[str, Any]]
+    """A pack's ``metricgen`` block (from stoker.json) with a metrics list, or None."""
+    block = _read_stoker_json(pack_dir).get("metricgen")
+    if isinstance(block, dict) and block.get("metrics"):
+        return block
+    return None
+
+
+def is_metrics_pack(pack_dir):
+    # type: (str) -> bool
+    """True when ``pack_dir`` is a directory metrics pack.
+
+    Detected from a ``metricgen`` block in stoker.json, or ``engine: metrics`` in
+    pack.yaml. Mirrors :func:`is_rawreplay_pack`: it lets the linter/bundler pick
+    the metrics code path over the eventgen one (there is no eventgen.conf).
+    """
+    if read_metricgen(pack_dir) is not None:
+        return True
+    pack_yaml = _read_pack_yaml(pack_dir)
+    return (isinstance(pack_yaml, dict)
+            and str(pack_yaml.get("engine") or "").strip().lower() == METRICS_ENGINE)
+
+
+def lint_metrics_pack(pack_dir):
+    # type: (str) -> LintResult
+    """Lint a directory metrics pack (``engine: metrics`` + a ``metricgen`` block).
+
+    No eventgen.conf; the ``metricgen`` (from stoker.json) is validated by
+    :func:`lint_metrics_config`. On success the validated config rides back on
+    ``LintResult.metricgen`` so the indexer can store it as the pack's builder
+    config, making a git-synced metric pack first-class (same downstream path as a
+    UI-authored one).
+    """
+    metricgen = read_metricgen(pack_dir)
+    if metricgen is None:
+        return LintResult(
+            False,
+            ["engine: metrics but no `metricgen` block with a metrics list in "
+             "stoker.json"],
+            [], [METRICS_ENGINE], [], 0, None, None, None)
+    errors = lint_metrics_config(metricgen)
+    ok = len(errors) == 0
+    n_metrics = len(metricgen.get("metrics") or [])
+    return LintResult(
+        ok=ok,
+        errors=errors,
+        stanzas=[],
+        engines=[METRICS_ENGINE],
+        sourcetypes=[metricgen.get("sourcetype") or _DEFAULT_METRIC_SOURCETYPE],
+        stanza_count=0,
+        est_bytes_per_event=round(120.0 + 45.0 * n_metrics, 1),
+        declared_per_day_gb=None,
+        declared_bytes_per_event=None,
+        metricgen=metricgen if ok else None,
+    )
+
+
 def lint_pack(pack_dir):
     # type: (str) -> LintResult
     """Lint a local pack directory per the contract's pack rules.
@@ -250,6 +331,8 @@ def lint_pack(pack_dir):
     """
     if os.path.isdir(pack_dir) and is_rawreplay_pack(pack_dir):
         return lint_rawreplay_pack(pack_dir)
+    if os.path.isdir(pack_dir) and is_metrics_pack(pack_dir):
+        return lint_metrics_pack(pack_dir)
 
     errors = []  # type: List[str]
     stanzas = []  # type: List[str]

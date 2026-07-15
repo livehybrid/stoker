@@ -406,6 +406,12 @@ def _upsert_pack(db, repo, name, rel, pack_dir, head_sha, lint, errors,
     pack.description = _pack_description(pack_dir)
     pack.tags_json = _pack_tags(pack_dir)
     pack.engines_json = lint.engines
+    # A directory metric pack (metricgen in stoker.json) is stored the same way a
+    # UI-authored one is: its validated config becomes builder_config_json, so
+    # every downstream path (bundle build, run gate, preview, backfill) treats it
+    # as a metric pack. None for eventgen/rawreplay leaves the column untouched.
+    if lint.metricgen is not None:
+        pack.builder_config_json = lint.metricgen
     pack.sourcetypes_json = lint.sourcetypes
     pack.stanza_count = lint.stanza_count
     pack.est_bytes_per_event = lint.est_bytes_per_event

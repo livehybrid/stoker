@@ -1,0 +1,10 @@
+# Stoker metric pack: synthetic web-store KPIs emitted as Splunk metric points.
+# The metrics engine reads its config from stoker.json's `metricgen` block (a
+# flat pack.yaml cannot carry the nested dimensions/metrics lists). Runs on the
+# `metrics` engine; deliver to a metrics-type index. See docs/PACKS.md.
+name: web-store-metrics
+tags: metrics, web, kpi, ecommerce
+engine: metrics
+description: "Web-store KPIs as Splunk metrics (requests, errors, CPU, checkout latency) across service x region, with day-shaped patterns: a business double-hump, error spikes and a CPU sine."
+estimates:
+  bytes_per_event: 300

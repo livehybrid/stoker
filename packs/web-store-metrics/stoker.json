@@ -1,0 +1,60 @@
+{
+  "name": "web-store-metrics",
+  "engine": "metrics",
+  "sourcetypes": ["stoker:metric"],
+  "metricgen": {
+    "resolution_s": 10,
+    "seed": 42,
+    "sourcetype": "stoker:metric",
+    "dimensions": [
+      {"key": "service", "values": ["checkout", "search", "cart", "catalogue"]},
+      {"key": "region", "values": ["eu-west-1", "us-east-1"]}
+    ],
+    "metrics": [
+      {
+        "name": "store.requests",
+        "kind": "count",
+        "unit": "requests",
+        "min": 5,
+        "p95": 800,
+        "max": 1500,
+        "noise": 0.15,
+        "pattern": {"type": "business_double_hump", "morning_peak_h": 10, "afternoon_peak_h": 15, "lunch_dip": 0.45},
+        "scale": {
+          "service": {"checkout": 0.6, "search": 1.6, "cart": 0.4, "catalogue": 1.0},
+          "region": {"eu-west-1": 1.0, "us-east-1": 0.7}
+        }
+      },
+      {
+        "name": "store.errors",
+        "kind": "count",
+        "unit": "errors",
+        "min": 0,
+        "p95": 6,
+        "max": 50,
+        "noise": 0.3,
+        "pattern": {"type": "spike", "baseline": 0.05, "amplitude": 0.9, "spikes_h": [3, 13, 20]}
+      },
+      {
+        "name": "host.cpu.usage",
+        "kind": "gauge",
+        "unit": "percent",
+        "min": 4,
+        "p95": 68,
+        "max": 96,
+        "noise": 0.18,
+        "pattern": {"type": "sine", "peak_h": 14}
+      },
+      {
+        "name": "store.checkout.latency.ms",
+        "kind": "gauge",
+        "unit": "ms",
+        "min": 40,
+        "p95": 240,
+        "max": 950,
+        "noise": 0.22,
+        "pattern": {"type": "business_double_hump", "morning_peak_h": 10, "afternoon_peak_h": 15}
+      }
+    ]
+  }
+}

@@ -22,9 +22,9 @@ There are **three pack kinds**, selected by the engine:
 | | eventgen (default) | rawreplay (Piston) | metrics |
 |---|---|---|---|
 | Purpose | *Template* events from a sample, tokens re-randomised each pass | *Replay* a recorded dataset **byte-for-byte**, re-timestamped to now | *Generate* Splunk **metric** data points over a shaped time series |
-| Required file | `default/eventgen.conf` | `pack.yaml` with `engine: rawreplay` + a `replay:` section | a `metricgen` config (UI/API-authored, stored in the control plane) |
-| Payload | `samples/*` | a dataset file (`replay.dataset`) or an https `replay.dataset_url` | dimensions + metrics + patterns (no files) |
-| Examples | `packs/flatline`, `packs/apigw`, `packs/web-access`, `packs/aws-cloudtrail`, `packs/aws-s3-access`, `packs/aws-elb-alb`, `packs/splunk-tutorial-web`, `packs/splunk-tutorial-secure`, `packs/splunk-tutorial-vendor-sales` | `packs/attack-replay` | authored in the **metric builder** UI |
+| Required file | `default/eventgen.conf` | `pack.yaml` with `engine: rawreplay` + a `replay:` section | a `metricgen` config: `stoker.json` in a directory pack, or UI/API-authored |
+| Payload | `samples/*` | a dataset file (`replay.dataset`) or an https `replay.dataset_url` | dimensions + metrics + patterns (no sample files) |
+| Examples | `packs/flatline`, `packs/apigw`, `packs/web-access`, `packs/aws-cloudtrail`, `packs/aws-s3-access`, `packs/aws-elb-alb`, `packs/splunk-tutorial-web`, `packs/splunk-tutorial-secure`, `packs/splunk-tutorial-vendor-sales` | `packs/attack-replay` | `packs/web-store-metrics`, or the **metric builder** UI |
 | Workers | fan-out across N | **1** (control plane forces it; `409 replay_single_worker`) | fan-out across N (the series matrix is sharded by slot) |
 
 Both kinds share the same `pack.yaml` metadata block (`name`, `description`,
@@ -346,12 +346,24 @@ wired an untrusted repo plus a rawreplay pack.
 ## Metric packs (metricgen)
 
 A **metric pack** generates synthetic Splunk **metric** data points (`event:"metric"`
-+ a `fields` object) over a shaped time series, instead of log events. Unlike the
-other kinds it is not a directory of files: it is authored in the **metric builder**
-UI (or `POST /api/metric-packs`) and its `metricgen` config is stored in the control
-plane, then synthesised into a bundle (`bundles.build_from_metrics_config`) that
-flows through specs/runs like any other pack. See [WORKER-CONTRACT.md](WORKER-CONTRACT.md#metrics-engine)
-for the engine side.
++ a `fields` object) over a shaped time series, instead of log events. Its
+`metricgen` config is synthesised into a bundle (`bundles.build_from_metrics_config`)
+that flows through specs/runs like any other pack. See
+[WORKER-CONTRACT.md](WORKER-CONTRACT.md#metrics-engine) for the engine side.
+
+You can author a metric pack two ways, and they converge on the same stored
+`metricgen` config:
+
+- **In the UI / API** — the **metric builder** (or `POST /api/metric-packs`)
+  stores the config directly.
+- **As a directory pack** — a directory with `engine: metrics` in `pack.yaml`
+  and the `metricgen` block in `stoker.json` (the flat `pack.yaml` subset cannot
+  carry the nested `dimensions`/`metrics` lists). This is a normal pack: it is
+  git-synced or registered like any other, lints via `bundles.lint_pack`, and its
+  validated `metricgen` is stored as the pack's builder config so every downstream
+  path treats it identically to a UI-authored one. It also runs standalone
+  (`STOKER_ENGINE=metrics`, `STOKER_BUNDLE=<dir>`). The bundled
+  [`packs/web-store-metrics`](../packs/web-store-metrics) is such a pack.
 
 ### The `metricgen` config
 
@@ -424,8 +436,9 @@ for the engine side.
   [WORKER-CONTRACT.md](WORKER-CONTRACT.md#backfill). Re-running a backfill
   duplicates points, so run each window once.
 
-> Metric packs are not git-synced (they have no directory); author them in the UI
-> or via `POST /api/metric-packs {name, config}`. The preview endpoint
+> Author a metric pack in the UI / `POST /api/metric-packs {name, config}`, or as a
+> directory pack (`engine: metrics` + a `metricgen` block in `stoker.json`) that is
+> git-synced or registered like any other. The preview endpoint
 > (`POST /api/metric-packs/preview`) computes a metric's 24 h curve without
 > running anything.
 

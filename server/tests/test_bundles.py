@@ -87,6 +87,73 @@ def test_lint_measures_bytes_per_event_when_undeclared(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Lint: directory metric packs (metricgen in stoker.json).
+# --------------------------------------------------------------------------- #
+
+def _write_metric_pack(root, name="mpack", metricgen=None):
+    # type: (str, str, dict) -> str
+    import json as _json
+
+    if metricgen is None:
+        metricgen = {
+            "resolution_s": 10,
+            "dimensions": [{"key": "svc", "values": ["a", "b"]}],
+            "metrics": [{"name": "req.count", "kind": "count",
+                         "min": 1, "p95": 50, "max": 100,
+                         "pattern": {"type": "sine"}}],
+        }
+    pack_dir = os.path.join(root, name)
+    os.makedirs(os.path.join(pack_dir, "default"))
+    with open(os.path.join(pack_dir, "default", "eventgen.conf"), "w") as fh:
+        fh.write("[stub]\nmode = sample\n")
+    with open(os.path.join(pack_dir, "stoker.json"), "w") as fh:
+        _json.dump({"name": name, "engine": "metrics", "metricgen": metricgen}, fh)
+    with open(os.path.join(pack_dir, "pack.yaml"), "w") as fh:
+        fh.write("name: %s\nengine: metrics\n" % name)
+    return pack_dir
+
+
+def test_lint_directory_metrics_pack(tmp_path):
+    from server.bundles import is_metrics_pack
+
+    pack = _write_metric_pack(str(tmp_path))
+    assert is_metrics_pack(pack)
+    result = lint_pack(pack)
+    assert result.ok, result.errors
+    assert result.engines == ["metrics"]
+    assert result.stanza_count == 0
+    # the validated metricgen rides back so the indexer can store it as the
+    # pack's builder config (first-class, like a UI-authored metric pack).
+    assert result.metricgen is not None
+    assert len(result.metricgen["metrics"]) == 1
+
+
+def test_lint_directory_metrics_pack_bad_config(tmp_path):
+    # min > max must fail the metricgen lint (surfaced through lint_pack).
+    bad = {
+        "resolution_s": 10,
+        "dimensions": [{"key": "svc", "values": ["a"]}],
+        "metrics": [{"name": "x", "kind": "gauge", "min": 100, "p95": 5, "max": 1}],
+    }
+    result = lint_pack(_write_metric_pack(str(tmp_path), "badm", bad))
+    assert not result.ok
+    assert result.metricgen is None  # not returned when invalid
+
+
+def test_lint_metrics_engine_without_metricgen_fails(tmp_path):
+    # pack.yaml says engine: metrics but there is no metricgen block.
+    pack_dir = os.path.join(str(tmp_path), "nogen")
+    os.makedirs(os.path.join(pack_dir, "default"))
+    with open(os.path.join(pack_dir, "default", "eventgen.conf"), "w") as fh:
+        fh.write("[stub]\nmode = sample\n")
+    with open(os.path.join(pack_dir, "pack.yaml"), "w") as fh:
+        fh.write("name: nogen\nengine: metrics\n")
+    result = lint_pack(pack_dir)
+    assert not result.ok
+    assert any("metricgen" in e for e in result.errors)
+
+
+# --------------------------------------------------------------------------- #
 # Lint: broken packs (each specific failure).
 # --------------------------------------------------------------------------- #
 

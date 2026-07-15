@@ -420,6 +420,9 @@ def register_pack(body: PackCreate, db: Session = Depends(get_db)):
         description=body.description,
         tags_json=[],
         engines_json=lint.engines,
+        # A directory metric pack's validated metricgen becomes its builder config
+        # (same downstream path as a UI-authored metric pack); None for others.
+        builder_config_json=lint.metricgen,
         sourcetypes_json=lint.sourcetypes,
         stanza_count=lint.stanza_count,
         est_bytes_per_event=lint.est_bytes_per_event,

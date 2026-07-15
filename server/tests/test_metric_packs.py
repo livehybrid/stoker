@@ -35,6 +35,48 @@ def _valid_config(**over):
     return cfg
 
 
+# ---- directory metric packs (metricgen in stoker.json) ----
+
+def _write_dir_metric_pack(root, config):
+    import json
+    import os
+    pack_dir = os.path.join(str(root), "dirmetric")
+    os.makedirs(os.path.join(pack_dir, "default"))
+    with open(os.path.join(pack_dir, "default", "eventgen.conf"), "w") as fh:
+        fh.write("[stub]\nmode = sample\n")
+    with open(os.path.join(pack_dir, "stoker.json"), "w") as fh:
+        json.dump({"name": "dirmetric", "engine": "metrics", "metricgen": config}, fh)
+    with open(os.path.join(pack_dir, "pack.yaml"), "w") as fh:
+        fh.write("name: dirmetric\nengine: metrics\n")
+    return pack_dir
+
+
+def test_register_directory_metric_pack_is_first_class(client, tmp_path):
+    """A directory metric pack registered via POST /api/packs is stored with its
+    metricgen as builder_config_json, so it behaves like a UI-authored one: the
+    metric-pack detail endpoint (which reads builder_config_json) resolves it."""
+    pack_dir = _write_dir_metric_pack(tmp_path, _valid_config())
+    reg = client.post("/api/packs", json={"name": "dirmetric", "source_path": pack_dir})
+    assert reg.status_code == 201, reg.text
+    pid = reg.json()["id"]
+    assert reg.json()["engines_json"] == ["metrics"]
+    detail = client.get("/api/metric-packs/%d" % pid)
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["series_count"] == 2  # one dim, two values
+
+
+def test_shipped_web_store_metrics_pack_is_valid():
+    """Guard the bundled sample metric pack: it lints as a metrics pack, its
+    metricgen validates, and a bundle builds from it."""
+    pack_dir = str(_REPO / "packs" / "web-store-metrics")
+    lint = bundles.lint_pack(pack_dir)
+    assert lint.ok, lint.errors
+    assert lint.engines == ["metrics"]
+    assert lint.metricgen is not None
+    assert bundles.metrics_series_count(lint.metricgen) == 8  # 4 services x 2 regions
+    assert bundles.lint_metrics_config(lint.metricgen) == []
+
+
 # ---- vendored pattern module drift guard ----
 
 def test_metricpatterns_is_byte_identical_to_worker():
