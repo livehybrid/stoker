@@ -65,16 +65,31 @@ def test_register_directory_metric_pack_is_first_class(client, tmp_path):
     assert detail.json()["series_count"] == 2  # one dim, two values
 
 
-def test_shipped_web_store_metrics_pack_is_valid():
-    """Guard the bundled sample metric pack: it lints as a metrics pack, its
-    metricgen validates, and a bundle builds from it."""
-    pack_dir = str(_REPO / "packs" / "web-store-metrics")
+_SHIPPED_METRIC_PACKS = sorted(
+    p.name for p in (_REPO / "packs").iterdir()
+    if p.is_dir() and bundles.is_metrics_pack(str(p)))
+
+
+@pytest.mark.parametrize("pack_name", _SHIPPED_METRIC_PACKS)
+def test_shipped_metric_pack_is_valid(pack_name, tmp_path):
+    """Every bundled metric pack lints as a metrics pack, its metricgen
+    validates, and a content-addressed bundle builds from it."""
+    pack_dir = str(_REPO / "packs" / pack_name)
     lint = bundles.lint_pack(pack_dir)
-    assert lint.ok, lint.errors
+    assert lint.ok, (pack_name, lint.errors)
     assert lint.engines == ["metrics"]
     assert lint.metricgen is not None
-    assert bundles.metrics_series_count(lint.metricgen) == 8  # 4 services x 2 regions
     assert bundles.lint_metrics_config(lint.metricgen) == []
+    assert bundles.metrics_series_count(lint.metricgen) >= 1
+    bundles.build_from_metrics_config(pack_name, lint.metricgen, bundle_dir=str(tmp_path))
+
+
+def test_operational_metric_pack_set_ships():
+    """The starter set of operational metric packs is present."""
+    assert set(_SHIPPED_METRIC_PACKS) >= {
+        "web-store-metrics", "host-infra-metrics", "api-service-red-metrics",
+        "k8s-workload-metrics", "database-metrics", "message-queue-metrics",
+        "network-interface-metrics"}
 
 
 # ---- vendored pattern module drift guard ----

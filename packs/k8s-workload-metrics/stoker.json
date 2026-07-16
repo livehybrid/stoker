@@ -1,0 +1,102 @@
+{
+  "name": "k8s-workload-metrics",
+  "engine": "metrics",
+  "sourcetypes": [
+    "stoker:metric"
+  ],
+  "metricgen": {
+    "resolution_s": 10,
+    "seed": 303,
+    "sourcetype": "stoker:metric",
+    "dimensions": [
+      {
+        "key": "namespace",
+        "values": [
+          "payments",
+          "search",
+          "web",
+          "jobs"
+        ]
+      },
+      {
+        "key": "workload",
+        "values": [
+          "api",
+          "worker"
+        ]
+      }
+    ],
+    "metrics": [
+      {
+        "name": "k8s.container.cpu.cores",
+        "kind": "gauge",
+        "unit": "cores",
+        "min": 0.02,
+        "p95": 1.2,
+        "max": 4,
+        "noise": 0.2,
+        "pattern": {
+          "type": "business_double_hump"
+        }
+      },
+      {
+        "name": "k8s.container.memory.mb",
+        "kind": "gauge",
+        "unit": "MB",
+        "min": 64,
+        "p95": 512,
+        "max": 1800,
+        "noise": 0.12,
+        "pattern": {
+          "type": "random_walk",
+          "baseline": 0.35,
+          "step": 0.03
+        }
+      },
+      {
+        "name": "k8s.pod.restarts.total",
+        "kind": "counter",
+        "unit": "restarts",
+        "min": 0,
+        "p95": 1,
+        "max": 6,
+        "noise": 0.5,
+        "pattern": {
+          "type": "spike",
+          "baseline": 0.02,
+          "amplitude": 0.8,
+          "spikes_h": [
+            5,
+            17
+          ]
+        }
+      },
+      {
+        "name": "k8s.workload.replicas.ready",
+        "kind": "gauge",
+        "unit": "replicas",
+        "min": 1,
+        "p95": 6,
+        "max": 20,
+        "noise": 0.1,
+        "pattern": {
+          "type": "business_hours",
+          "start_h": 8,
+          "end_h": 20
+        }
+      },
+      {
+        "name": "k8s.container.net.rx.kbps",
+        "kind": "gauge",
+        "unit": "kbps",
+        "min": 10,
+        "p95": 3000,
+        "max": 30000,
+        "noise": 0.2,
+        "pattern": {
+          "type": "business_hours"
+        }
+      }
+    ]
+  }
+}

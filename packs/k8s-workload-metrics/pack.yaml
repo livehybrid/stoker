@@ -1,0 +1,9 @@
+# Stoker metric pack: the metrics engine reads its config from
+# stoker.json's `metricgen` block. Runs on the `metrics` engine;
+# deliver to a metrics-type index. See docs/PACKS.md.
+name: k8s-workload-metrics
+tags: metrics, kubernetes, container, ops
+engine: metrics
+description: "Kubernetes workload metrics (container CPU/memory, pod restarts, ready replicas, network) across namespace x workload, with HPA-style scaling and restart spikes."
+estimates:
+  bytes_per_event: 345

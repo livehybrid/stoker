@@ -1,0 +1,106 @@
+{
+  "name": "api-service-red-metrics",
+  "engine": "metrics",
+  "sourcetypes": [
+    "stoker:metric"
+  ],
+  "metricgen": {
+    "resolution_s": 10,
+    "seed": 202,
+    "sourcetype": "stoker:metric",
+    "dimensions": [
+      {
+        "key": "service",
+        "values": [
+          "checkout",
+          "catalogue",
+          "auth",
+          "search"
+        ]
+      },
+      {
+        "key": "method",
+        "values": [
+          "GET",
+          "POST"
+        ]
+      }
+    ],
+    "metrics": [
+      {
+        "name": "http.requests.total",
+        "kind": "count",
+        "unit": "requests",
+        "min": 5,
+        "p95": 900,
+        "max": 2500,
+        "noise": 0.15,
+        "pattern": {
+          "type": "business_double_hump"
+        },
+        "scale": {
+          "service": {
+            "checkout": 0.7,
+            "catalogue": 1.4,
+            "auth": 0.5,
+            "search": 1.0
+          }
+        }
+      },
+      {
+        "name": "http.errors.5xx.total",
+        "kind": "count",
+        "unit": "errors",
+        "min": 0,
+        "p95": 8,
+        "max": 120,
+        "noise": 0.4,
+        "pattern": {
+          "type": "spike",
+          "baseline": 0.03,
+          "amplitude": 0.9,
+          "spikes_h": [
+            2,
+            14
+          ]
+        }
+      },
+      {
+        "name": "http.latency.p50.ms",
+        "kind": "gauge",
+        "unit": "ms",
+        "min": 4,
+        "p95": 60,
+        "max": 400,
+        "noise": 0.2,
+        "pattern": {
+          "type": "business_double_hump"
+        }
+      },
+      {
+        "name": "http.latency.p95.ms",
+        "kind": "gauge",
+        "unit": "ms",
+        "min": 20,
+        "p95": 240,
+        "max": 1200,
+        "noise": 0.25,
+        "pattern": {
+          "type": "business_double_hump"
+        }
+      },
+      {
+        "name": "http.latency.p99.ms",
+        "kind": "gauge",
+        "unit": "ms",
+        "min": 50,
+        "p95": 600,
+        "max": 3000,
+        "noise": 0.3,
+        "pattern": {
+          "type": "business_double_hump"
+        }
+      }
+    ]
+  }
+}

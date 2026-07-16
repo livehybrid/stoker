@@ -1,0 +1,116 @@
+{
+  "name": "database-metrics",
+  "engine": "metrics",
+  "sourcetypes": [
+    "stoker:metric"
+  ],
+  "metricgen": {
+    "resolution_s": 10,
+    "seed": 404,
+    "sourcetype": "stoker:metric",
+    "dimensions": [
+      {
+        "key": "cluster",
+        "values": [
+          "orders-db",
+          "users-db",
+          "analytics-db"
+        ]
+      },
+      {
+        "key": "role",
+        "values": [
+          "primary",
+          "replica"
+        ]
+      }
+    ],
+    "metrics": [
+      {
+        "name": "db.connections.active",
+        "kind": "gauge",
+        "unit": "connections",
+        "min": 2,
+        "p95": 120,
+        "max": 500,
+        "noise": 0.15,
+        "pattern": {
+          "type": "business_double_hump"
+        }
+      },
+      {
+        "name": "db.queries.per_sec",
+        "kind": "count",
+        "unit": "queries",
+        "min": 10,
+        "p95": 2500,
+        "max": 12000,
+        "noise": 0.2,
+        "pattern": {
+          "type": "business_double_hump"
+        },
+        "scale": {
+          "cluster": {
+            "analytics-db": 0.4
+          }
+        }
+      },
+      {
+        "name": "db.cache.hit_ratio.pct",
+        "kind": "gauge",
+        "unit": "percent",
+        "min": 78,
+        "p95": 97,
+        "max": 99.9,
+        "noise": 0.05,
+        "pattern": {
+          "type": "sine",
+          "peak_h": 3,
+          "trough": 0.6
+        }
+      },
+      {
+        "name": "db.replication.lag.seconds",
+        "kind": "gauge",
+        "unit": "seconds",
+        "min": 0,
+        "p95": 2,
+        "max": 45,
+        "noise": 0.4,
+        "pattern": {
+          "type": "spike",
+          "baseline": 0.05,
+          "amplitude": 0.9,
+          "spikes_h": [
+            10,
+            15,
+            21
+          ]
+        },
+        "scale": {
+          "role": {
+            "primary": 0.0,
+            "replica": 1.0
+          }
+        }
+      },
+      {
+        "name": "db.slow_queries.total",
+        "kind": "count",
+        "unit": "queries",
+        "min": 0,
+        "p95": 3,
+        "max": 40,
+        "noise": 0.4,
+        "pattern": {
+          "type": "spike",
+          "baseline": 0.03,
+          "spikes_h": [
+            11,
+            16
+          ]
+        }
+      }
+    ]
+  }
+}

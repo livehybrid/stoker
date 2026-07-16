@@ -362,8 +362,15 @@ You can author a metric pack two ways, and they converge on the same stored
   git-synced or registered like any other, lints via `bundles.lint_pack`, and its
   validated `metricgen` is stored as the pack's builder config so every downstream
   path treats it identically to a UI-authored one. It also runs standalone
-  (`STOKER_ENGINE=metrics`, `STOKER_BUNDLE=<dir>`). The bundled
-  [`packs/web-store-metrics`](../packs/web-store-metrics) is such a pack.
+  (`STOKER_ENGINE=metrics`, `STOKER_BUNDLE=<dir>`). The bundled metric packs are
+  such packs: [`web-store-metrics`](../packs/web-store-metrics) (a business
+  example) plus a starter set for common operational domains —
+  [`host-infra-metrics`](../packs/host-infra-metrics),
+  [`api-service-red-metrics`](../packs/api-service-red-metrics),
+  [`k8s-workload-metrics`](../packs/k8s-workload-metrics),
+  [`database-metrics`](../packs/database-metrics),
+  [`message-queue-metrics`](../packs/message-queue-metrics) and
+  [`network-interface-metrics`](../packs/network-interface-metrics).
 
 ### The `metricgen` config
 

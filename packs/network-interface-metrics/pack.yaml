@@ -1,0 +1,9 @@
+# Stoker metric pack: the metrics engine reads its config from
+# stoker.json's `metricgen` block. Runs on the `metrics` engine;
+# deliver to a metrics-type index. See docs/PACKS.md.
+name: network-interface-metrics
+tags: metrics, network, snmp, ops
+engine: metrics
+description: "Network interface metrics (in/out throughput, utilisation, errors, discards) across device x interface, business-hours shaped with error spikes."
+estimates:
+  bytes_per_event: 345

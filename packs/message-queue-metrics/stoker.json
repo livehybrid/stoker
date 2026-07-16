@@ -1,0 +1,96 @@
+{
+  "name": "message-queue-metrics",
+  "engine": "metrics",
+  "sourcetypes": [
+    "stoker:metric"
+  ],
+  "metricgen": {
+    "resolution_s": 10,
+    "seed": 505,
+    "sourcetype": "stoker:metric",
+    "dimensions": [
+      {
+        "key": "topic",
+        "values": [
+          "orders",
+          "events",
+          "audit",
+          "deadletter"
+        ]
+      },
+      {
+        "key": "consumer_group",
+        "values": [
+          "billing",
+          "analytics"
+        ]
+      }
+    ],
+    "metrics": [
+      {
+        "name": "mq.messages.published.per_sec",
+        "kind": "count",
+        "unit": "messages",
+        "min": 1,
+        "p95": 1500,
+        "max": 8000,
+        "noise": 0.2,
+        "pattern": {
+          "type": "business_hours",
+          "start_h": 7,
+          "end_h": 21
+        },
+        "scale": {
+          "topic": {
+            "deadletter": 0.02
+          }
+        }
+      },
+      {
+        "name": "mq.messages.consumed.per_sec",
+        "kind": "count",
+        "unit": "messages",
+        "min": 1,
+        "p95": 1450,
+        "max": 8000,
+        "noise": 0.2,
+        "pattern": {
+          "type": "business_hours",
+          "start_h": 7,
+          "end_h": 21
+        }
+      },
+      {
+        "name": "mq.consumer.lag.messages",
+        "kind": "gauge",
+        "unit": "messages",
+        "min": 0,
+        "p95": 500,
+        "max": 50000,
+        "noise": 0.5,
+        "pattern": {
+          "type": "spike",
+          "baseline": 0.05,
+          "amplitude": 0.95,
+          "spikes_h": [
+            9,
+            14,
+            19
+          ]
+        }
+      },
+      {
+        "name": "mq.queue.depth.messages",
+        "kind": "gauge",
+        "unit": "messages",
+        "min": 0,
+        "p95": 2000,
+        "max": 40000,
+        "noise": 0.3,
+        "pattern": {
+          "type": "business_double_hump"
+        }
+      }
+    ]
+  }
+}

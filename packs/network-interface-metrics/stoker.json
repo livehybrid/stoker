@@ -1,0 +1,108 @@
+{
+  "name": "network-interface-metrics",
+  "engine": "metrics",
+  "sourcetypes": [
+    "stoker:metric"
+  ],
+  "metricgen": {
+    "resolution_s": 10,
+    "seed": 606,
+    "sourcetype": "stoker:metric",
+    "dimensions": [
+      {
+        "key": "device",
+        "values": [
+          "core-sw-01",
+          "edge-rtr-01",
+          "dc-fw-01",
+          "tor-sw-05"
+        ]
+      },
+      {
+        "key": "interface",
+        "values": [
+          "uplink",
+          "downlink"
+        ]
+      }
+    ],
+    "metrics": [
+      {
+        "name": "net.if.in.mbps",
+        "kind": "gauge",
+        "unit": "mbps",
+        "min": 1,
+        "p95": 600,
+        "max": 10000,
+        "noise": 0.2,
+        "pattern": {
+          "type": "business_hours",
+          "start_h": 7,
+          "end_h": 20
+        }
+      },
+      {
+        "name": "net.if.out.mbps",
+        "kind": "gauge",
+        "unit": "mbps",
+        "min": 1,
+        "p95": 450,
+        "max": 10000,
+        "noise": 0.2,
+        "pattern": {
+          "type": "business_hours",
+          "start_h": 7,
+          "end_h": 20
+        }
+      },
+      {
+        "name": "net.if.utilization.pct",
+        "kind": "gauge",
+        "unit": "percent",
+        "min": 1,
+        "p95": 55,
+        "max": 98,
+        "noise": 0.15,
+        "pattern": {
+          "type": "business_hours",
+          "start_h": 7,
+          "end_h": 20
+        }
+      },
+      {
+        "name": "net.if.errors.per_sec",
+        "kind": "count",
+        "unit": "errors",
+        "min": 0,
+        "p95": 2,
+        "max": 200,
+        "noise": 0.5,
+        "pattern": {
+          "type": "spike",
+          "baseline": 0.02,
+          "spikes_h": [
+            4,
+            13
+          ]
+        }
+      },
+      {
+        "name": "net.if.discards.per_sec",
+        "kind": "count",
+        "unit": "discards",
+        "min": 0,
+        "p95": 1,
+        "max": 100,
+        "noise": 0.5,
+        "pattern": {
+          "type": "spike",
+          "baseline": 0.02,
+          "spikes_h": [
+            13,
+            18
+          ]
+        }
+      }
+    ]
+  }
+}

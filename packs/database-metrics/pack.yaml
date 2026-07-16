@@ -1,0 +1,9 @@
+# Stoker metric pack: the metrics engine reads its config from
+# stoker.json's `metricgen` block. Runs on the `metrics` engine;
+# deliver to a metrics-type index. See docs/PACKS.md.
+name: database-metrics
+tags: metrics, database, sql, ops
+engine: metrics
+description: "Database metrics (active connections, queries/sec, cache hit ratio, replication lag, slow queries) across cluster x role, with load-shaped curves and lag spikes on replicas."
+estimates:
+  bytes_per_event: 345

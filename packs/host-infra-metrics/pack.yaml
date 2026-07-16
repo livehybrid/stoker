@@ -1,0 +1,9 @@
+# Stoker metric pack: the metrics engine reads its config from
+# stoker.json's `metricgen` block. Runs on the `metrics` engine;
+# deliver to a metrics-type index. See docs/PACKS.md.
+name: host-infra-metrics
+tags: metrics, infrastructure, host, ops
+engine: metrics
+description: "Host/server infrastructure metrics (CPU, memory, disk, load, network) across host x region, with a CPU sine, a slow disk ramp and a memory random-walk."
+estimates:
+  bytes_per_event: 345

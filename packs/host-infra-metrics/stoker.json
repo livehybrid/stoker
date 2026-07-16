@@ -1,0 +1,105 @@
+{
+  "name": "host-infra-metrics",
+  "engine": "metrics",
+  "sourcetypes": [
+    "stoker:metric"
+  ],
+  "metricgen": {
+    "resolution_s": 10,
+    "seed": 101,
+    "sourcetype": "stoker:metric",
+    "dimensions": [
+      {
+        "key": "host",
+        "values": [
+          "web-01",
+          "web-02",
+          "db-01",
+          "cache-01"
+        ]
+      },
+      {
+        "key": "region",
+        "values": [
+          "eu-west",
+          "us-east"
+        ]
+      }
+    ],
+    "metrics": [
+      {
+        "name": "host.cpu.usage.pct",
+        "kind": "gauge",
+        "unit": "percent",
+        "min": 2,
+        "p95": 55,
+        "max": 98,
+        "noise": 0.2,
+        "pattern": {
+          "type": "sine",
+          "peak_h": 14
+        },
+        "scale": {
+          "region": {
+            "eu-west": 1.2,
+            "us-east": 0.8
+          }
+        }
+      },
+      {
+        "name": "host.memory.used.pct",
+        "kind": "gauge",
+        "unit": "percent",
+        "min": 32,
+        "p95": 70,
+        "max": 94,
+        "noise": 0.1,
+        "pattern": {
+          "type": "random_walk",
+          "baseline": 0.62,
+          "step": 0.03
+        }
+      },
+      {
+        "name": "host.disk.used.pct",
+        "kind": "gauge",
+        "unit": "percent",
+        "min": 45,
+        "p95": 66,
+        "max": 90,
+        "noise": 0.05,
+        "pattern": {
+          "type": "ramp",
+          "from": 0.55,
+          "to": 0.72
+        }
+      },
+      {
+        "name": "host.load.avg1m",
+        "kind": "gauge",
+        "unit": "load",
+        "min": 0.1,
+        "p95": 3.5,
+        "max": 14,
+        "noise": 0.25,
+        "pattern": {
+          "type": "business_double_hump"
+        }
+      },
+      {
+        "name": "host.net.throughput.mbps",
+        "kind": "gauge",
+        "unit": "mbps",
+        "min": 1,
+        "p95": 420,
+        "max": 1000,
+        "noise": 0.2,
+        "pattern": {
+          "type": "business_hours",
+          "start_h": 7,
+          "end_h": 20
+        }
+      }
+    ]
+  }
+}

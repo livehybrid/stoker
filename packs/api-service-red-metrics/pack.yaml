@@ -1,0 +1,9 @@
+# Stoker metric pack: the metrics engine reads its config from
+# stoker.json's `metricgen` block. Runs on the `metrics` engine;
+# deliver to a metrics-type index. See docs/PACKS.md.
+name: api-service-red-metrics
+tags: metrics, api, service, red, ops
+engine: metrics
+description: "Service RED metrics (request rate, 5xx error rate, latency p50/p95/p99) across service x method, day-shaped with a business double-hump and error spikes."
+estimates:
+  bytes_per_event: 345

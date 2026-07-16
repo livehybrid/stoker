@@ -156,10 +156,18 @@ Pick one at submit, set a rate (EPS or GB/day) and go; author your own with
 | `splunk-tutorial-vendor-sales` | eventgen | `vendor_sales` | Splunk Search Tutorial-style vendor_sales.log — `VendorID`/`Code`/`AcctID` sales records (the tutorial's lookup dataset). |
 | `attack-replay` | rawreplay (Piston) | `XmlWinEventLog` | Byte-for-byte replay of a recorded Sysmon/Windows-Security attack capture, re-stamped to now. |
 | `web-store-metrics` | metrics | `stoker:metric` | Synthetic web-store KPIs as Splunk **metric** points (request/error counts, CPU, checkout latency) across service × region, with day-shaped patterns (a business double-hump, error spikes, a CPU sine). Deliver to a metrics-type index. |
+| `host-infra-metrics` | metrics | `stoker:metric` | Host/server infrastructure metrics (CPU, memory, disk, load, network) across host × region — a CPU sine, a slow disk ramp, a memory random-walk. |
+| `api-service-red-metrics` | metrics | `stoker:metric` | Service RED metrics (request rate, 5xx errors, latency p50/p95/p99) across service × method, with a business double-hump and error spikes. |
+| `k8s-workload-metrics` | metrics | `stoker:metric` | Kubernetes workload metrics (container CPU/memory, pod restarts, ready replicas, network) across namespace × workload, with HPA-style scaling and restart spikes. |
+| `database-metrics` | metrics | `stoker:metric` | Database metrics (connections, queries/sec, cache hit ratio, replication lag, slow queries) across cluster × role, with lag spikes on replicas. |
+| `message-queue-metrics` | metrics | `stoker:metric` | Message-queue/streaming metrics (publish/consume rates, consumer lag, queue depth) across topic × consumer group, with lag bursts. |
+| `network-interface-metrics` | metrics | `stoker:metric` | Network interface metrics (in/out throughput, utilisation, errors, discards) across device × interface, business-hours shaped with error spikes. |
 
 All eventgen packs re-stamp timestamps to now, randomise source IPs and apply a
-realistic weighted status/event mix. The `web-store-metrics` pack is a **metric**
-pack (a `metricgen` block in `stoker.json`); author your own in the UI or as a
+realistic weighted status/event mix. The `*-metrics` packs are **metric** packs
+(a `metricgen` block in `stoker.json`) covering common operational domains
+(infrastructure, services/RED, Kubernetes, databases, messaging, network) plus
+the `web-store-metrics` business example; author your own in the UI or as a
 directory pack, and see [docs/PACKS.md](docs/PACKS.md#metric-packs-metricgen).
 Want real recorded captures instead of synthetic templates? See
 ["Sourcing real datasets"](docs/PACKS.md#sourcing-real-datasets) for public
@@ -177,7 +185,8 @@ ui/        React / Vite / TanStack Router single-page app (built into the image)
 packs/     bundled packs (see "Bundled packs"): flatline, apigw, web-access,
            aws-cloudtrail, aws-s3-access, aws-elb-alb, splunk-tutorial-web,
            splunk-tutorial-secure, splunk-tutorial-vendor-sales (eventgen)
-           + attack-replay (Piston) + web-store-metrics (metrics)
+           + attack-replay (Piston) + web-store-metrics and a starter set of
+           operational metric packs (host/service/k8s/db/mq/network) (metrics)
 infra/     stacks/stoker (swarm stack + deploy.py), k8s/ manifests,
            aws/stoker-eks/ Terraform
 docs/      WORKER-CONTRACT.md, PACKS.md and design references
