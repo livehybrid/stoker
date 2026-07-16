@@ -220,6 +220,7 @@ async def _lifespan(app):
 
     with SessionLocal() as db:
         auth_mod.bootstrap_admin(db, get_settings())
+        _warn_if_bootstrap_open(db, get_settings())
     app.state.drivers = _build_drivers_map()
     task = asyncio.create_task(_supervisor_loop(app), name="stoker-supervisor")
     app.state.supervisor_task = task
@@ -243,6 +244,31 @@ async def _lifespan(app):
             with contextlib.suppress(asyncio.CancelledError):
                 await bg
         log.info("control plane stopped; background loops cancelled")
+
+
+def _warn_if_bootstrap_open(db, settings):
+    # type: (Any, Any) -> None
+    """Log a loud warning when the instance boots in the open first-run window.
+
+    With zero users, no trusted proxy and no env admin, the auth guard stands
+    down so the first admin can be created via ``/api/auth/setup`` — which means
+    the operator API is reachable UNAUTHENTICATED by anyone who can reach it,
+    until setup runs. That is fine on a trusted LAN but dangerous if the instance
+    is network-exposed. Warn loudly and point at the one-line fix. Runs after
+    ``bootstrap_admin``, so an env admin has already closed the window (no warn).
+    """
+    from . import auth as auth_mod
+
+    try:
+        if not settings.auth_disabled and auth_mod.setup_needed(db, settings):
+            log.warning(
+                "SECURITY: no users, no trusted proxy and no STOKER_ADMIN_USER — "
+                "the operator API is UNAUTHENTICATED until the first admin is "
+                "created at /api/auth/setup. Create it immediately, or set "
+                "STOKER_ADMIN_USER / STOKER_ADMIN_PASSWORD to close this window "
+                "at boot — especially if this instance is network-exposed.")
+    except Exception:  # pragma: no cover - defensive; a warning must never break boot
+        pass
 
 
 def _is_auth_exempt(path):
@@ -316,8 +342,10 @@ def _install_auth_middleware(app):
     body and the UI redirects to login. Before any admin exists and with no proxy
     trust configured, the instance is in first-run mode: the guard stands down so
     the first admin can be created via ``/api/auth/setup`` (the API is otherwise
-    open only in that bootstrap window). ``/api/users`` additionally requires the
-    admin role, enforced in the route via ``require_admin``.
+    open only in that bootstrap window — the lifespan logs a loud warning while
+    it is open, and setting the env admin closes it at boot). ``/api/users``
+    additionally requires the admin role, enforced in the route via
+    ``require_admin``.
     """
     from . import auth as auth_mod
 
@@ -333,7 +361,7 @@ def _install_auth_middleware(app):
         def _resolve():
             with SessionLocal() as db:
                 if not auth_mod.auth_active(db, settings):
-                    return "bootstrap"  # first-run: no admin yet, guard stands down
+                    return "bootstrap"  # first-run: no admin yet
                 user = auth_mod.resolve_user(request, db, settings)
                 if user is None or not user.active:
                     return None
@@ -341,6 +369,11 @@ def _install_auth_middleware(app):
 
         outcome = await asyncio.to_thread(_resolve)
         if outcome == "bootstrap":
+            # First-run window (zero users, no proxy trust): the guard stands
+            # down so the first admin can be created via ``/api/auth/setup``. This
+            # window is open by design; the lifespan logs a loud warning while it
+            # is, and setting STOKER_ADMIN_USER/PASSWORD closes it entirely at
+            # boot (see _warn_if_bootstrap_open + SECURITY.md).
             return await call_next(request)
         if outcome is None:
             return JSONResponse(

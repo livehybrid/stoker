@@ -112,6 +112,39 @@ def verify_password(password, password_hash):
         return False
 
 
+# A precomputed bcrypt hash of an unknowable random secret. It is verified
+# against on a login MISS purely to spend the same bcrypt time as a hit, so login
+# latency is not an oracle for whether a username exists. It can never match any
+# real password.
+_DUMMY_HASH = None  # type: Optional[str]
+
+
+def _dummy_hash():
+    # type: () -> str
+    global _DUMMY_HASH
+    if _DUMMY_HASH is None:
+        _DUMMY_HASH = _context().hash(secrets.token_urlsafe(16))
+    return _DUMMY_HASH
+
+
+def verify_password_constant(password, password_hash):
+    # type: (str, Optional[str]) -> bool
+    """Like :func:`verify_password` but always spends bcrypt time.
+
+    When ``password_hash`` is null/absent (unknown or passwordless user), a plain
+    :func:`verify_password` short-circuits and returns immediately — measurably
+    faster than a real bcrypt check, which lets an attacker enumerate valid
+    usernames by response time. This runs a throwaway bcrypt verify against a
+    dummy hash in that case so the miss and the hit cost the same, then returns
+    False. Use this on the login path; the result is otherwise identical.
+    """
+    if password_hash:
+        return verify_password(password, password_hash)
+    # No stored credential: burn an equivalent bcrypt verify and discard it.
+    verify_password(password, _dummy_hash())
+    return False
+
+
 # --------------------------------------------------------------------------- #
 # API tokens (non-interactive bearer credentials for CI/CD)
 # --------------------------------------------------------------------------- #

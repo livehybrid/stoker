@@ -604,5 +604,6 @@ class Agent(object):
             summary["discarded_s"] = round(self._bucket.discarded_s, 3)
         log_tail = self._engine.log_tail() if self._engine is not None else []
         if control is not None and sl is not None:
-            control.final(sl.slot, summary, log_tail, deadline=drain_deadline)
+            control.final(sl.slot, summary, log_tail, deadline=drain_deadline,
+                          lease_id=sl.lease_id)
         log.info("drain complete: %s", summary)

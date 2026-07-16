@@ -21,10 +21,12 @@ from typing import Any, Optional
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -259,14 +261,30 @@ class MetricSample(Base):
     """One heartbeat's counters, appended per successful heartbeat."""
 
     __tablename__ = "metric_samples"
+    # A long soak appends one row per slot every ~5 s, so this table grows
+    # unbounded. Index the hot access paths so they never full-scan it: the
+    # per-run/slot latest-sample read (supervisor + dogfood aggregate + UI) hits
+    # the composite, and the maintenance roll-up/prune (which scans by ``ts``)
+    # hits the time index. Postgres does not auto-index foreign keys, so the
+    # composite's leading ``run_id`` also serves the by-run cascade/read.
+    __table_args__ = (
+        Index("ix_metric_samples_run_slot_ts", "run_id", "slot", "ts"),
+        Index("ix_metric_samples_ts", "ts"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     run_id: Mapped[int] = mapped_column(ForeignKey("runs.id"), nullable=False)
     slot: Mapped[int] = mapped_column(Integer, nullable=False)
     ts: Mapped[datetime.datetime] = _ts_column(nullable=False, default=utcnow)
 
-    events_total: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    bytes_total: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Cumulative, monotonic counters (the agent reports a running total each
+    # heartbeat). BigInteger, NOT Integer: on Postgres a 32-bit column overflows
+    # at ~2.1e9 (bytes_total crosses 2.1 GB in minutes of load, events_total on a
+    # long high-eps soak), and the failing INSERT would 500 every subsequent
+    # heartbeat and abort the run. SQLite renders BigInteger as its dynamic
+    # INTEGER, so the test backend is unaffected either way.
+    events_total: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    bytes_total: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     eps: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     bps: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     hec_2xx: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
@@ -286,6 +304,12 @@ class RunEvent(Base):
     """Append-only audit trail; every state transition writes one row."""
 
     __tablename__ = "run_events"
+    # Append-only and never pruned, so it grows for the life of the instance.
+    # Index (run_id, ts) so the per-run audit reads (UI run detail, the
+    # last-transition and auth-failed-slot lookups) never full-scan it.
+    __table_args__ = (
+        Index("ix_run_events_run_ts", "run_id", "ts"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     run_id: Mapped[int] = mapped_column(ForeignKey("runs.id"), nullable=False)

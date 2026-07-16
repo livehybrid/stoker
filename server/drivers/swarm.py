@@ -105,7 +105,11 @@ class SwarmDriver(object):
         settings = get_settings()
         host = config.get("portainer_host") or settings.portainer_host
         endpoint = config.get("portainer_endpoint") or settings.portainer_endpoint
-        verify = bool(config.get("verify_tls", False))
+        # Per-fleet verify_tls wins; otherwise the process default
+        # (PORTAINER_VERIFY_TLS, itself defaulting False for self-signed homelab
+        # Portainers). Set it in production so the tier-0 API key is not sent over
+        # an unverified TLS channel.
+        verify = bool(config.get("verify_tls", settings.portainer_verify_tls))
         return cls(
             host=host,
             token=settings.portainer_token,
@@ -407,12 +411,62 @@ class SwarmDriver(object):
             "Placement": placement,
         }  # type: Dict[str, Any]
 
+        # Optional CPU/memory bounds. A load generator is otherwise unbounded on
+        # its swarm node; honouring driver_opts.resources caps it.
+        resources = self._resources(run)
+        if resources:
+            task_template["Resources"] = resources
+
         return {
             "Name": service_name(run.run_id),
             "Labels": labels,
             "TaskTemplate": task_template,
             "Mode": {"Replicated": {"Replicas": int(workers)}},
         }
+
+    def _resources(self, run):
+        # type: (RunSnapshot) -> Dict[str, Any]
+        """Render a swarm ``TaskTemplate.Resources`` from ``driver_opts.resources``.
+
+        Shape (every part optional)::
+
+            {"resources": {"limits":       {"cpus": 2.0, "memory_mb": 1024},
+                           "reservations": {"cpus": 0.5, "memory_mb": 256}}}
+
+        ``cpus`` maps to Docker ``NanoCPUs`` (1 CPU = 1e9) and ``memory_mb`` to
+        ``MemoryBytes``. Missing/partial/invalid values are dropped, so an absent
+        or malformed block simply yields no Resources (an unbounded task, the
+        prior behaviour) rather than an error.
+        """
+        opts = run.driver_opts or {}
+        spec_res = opts.get("resources")
+        if not isinstance(spec_res, dict):
+            return {}
+        out = {}  # type: Dict[str, Any]
+        for our_key, swarm_key in (("limits", "Limits"), ("reservations", "Reservations")):
+            block = spec_res.get(our_key)
+            if not isinstance(block, dict):
+                continue
+            rendered = {}  # type: Dict[str, Any]
+            cpus = block.get("cpus")
+            if cpus is not None:
+                try:
+                    nanocpus = int(float(cpus) * 1_000_000_000)
+                    if nanocpus > 0:
+                        rendered["NanoCPUs"] = nanocpus
+                except (TypeError, ValueError):
+                    pass
+            mem_mb = block.get("memory_mb")
+            if mem_mb is not None:
+                try:
+                    mem_bytes = int(float(mem_mb) * 1024 * 1024)
+                    if mem_bytes > 0:
+                        rendered["MemoryBytes"] = mem_bytes
+                except (TypeError, ValueError):
+                    pass
+            if rendered:
+                out[swarm_key] = rendered
+        return out
 
     def _placement(self, run):
         # type: (RunSnapshot) -> Dict[str, Any]

@@ -650,6 +650,10 @@ class HeartbeatCommand(BaseModel):
 
 class FinalRequest(BaseModel):
     slot: int
+    # The holder's lease id, so the control plane can fence a superseded worker's
+    # final (its slot reclaimed after a lapse) exactly as ready/heartbeat do.
+    # Optional for backward compatibility with a worker that predates the field.
+    lease_id: Optional[str] = None
     summary: Dict[str, Any] = Field(default_factory=dict)
     log_tail: List[str] = Field(default_factory=list)
 

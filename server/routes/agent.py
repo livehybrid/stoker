@@ -175,7 +175,8 @@ def final(
     the lifecycle implementation; on success returns ``{}``.
     """
     run = _load_run(db, run_id)
-    lifecycle.record_final(db, run, body.slot, body.summary, body.log_tail)
+    lifecycle.record_final(db, run, body.slot, body.summary, body.log_tail,
+                           lease_id=body.lease_id)
     db.commit()
     return {}
 

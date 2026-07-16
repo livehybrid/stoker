@@ -828,8 +828,15 @@ def run_spec(spec_id: int, body: RunLaunch, request: Request, db: Session = Depe
             started_by=_actor(request), backfill=backfill)
     except DriverError as exc:
         # The fleet could not be materialised (e.g. Portainer unreachable / a
-        # swarm fleet with no PORTAINER_HOST). Fail loudly, never hang.
-        db.rollback()
+        # swarm fleet with no PORTAINER_HOST). provision_run has already moved the
+        # run to FAILED (end_reason=provision-failed); COMMIT so that failed run
+        # and its audit trail survive. Rolling back would erase the attempt
+        # entirely — losing the operator-visible record and the failed-run marker
+        # boot reconciliation's stray sweep uses to reap any half-created fleet.
+        try:
+            db.commit()
+        except Exception:  # pragma: no cover - defensive: fall back to a clean slate
+            db.rollback()
         log.error("provision failed for spec %s on fleet %s: %s", spec_id, spec.fleet, exc)
         raise HTTPException(
             status_code=502,

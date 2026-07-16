@@ -90,6 +90,12 @@ STOP_GRACE_S = 45              # SIGTERM budget handed to the driver
 AUTO_ABORT_LOST_FRACTION = 0.5  # >50% leases lost ...
 AUTO_ABORT_LOST_S = 300.0       # ... sustained for 5 min -> fail
 JWT_REFRESH_FRACTION = 0.2      # roll the JWT within 20% of expiry
+# A run that completes naturally (workers self-exit and report final) never
+# passes through draining, so the drain reap never destroys its fleet. The
+# supervisor reaps such fleets right after they terminalise; this window only
+# bounds the per-tick scan (normally a fleet is reaped on the very next tick),
+# with boot reconciliation's stray sweep as the long-stop backstop.
+TERMINAL_REAP_WINDOW_S = 3600.0
 
 # Engines the control plane forces to a single worker: replay (rawreplay/Piston)
 # reproduces a recorded dataset and cannot be rate-sharded across a fleet, so the
@@ -330,7 +336,8 @@ def _resolve_bundle(db, spec, settings=None):
         built = build_from_metrics_config(
             pack.name, pack.builder_config_json, bundle_dir=settings.bundle_dir)
     else:
-        built = build_from_pack(pack.source_path, bundle_dir=settings.bundle_dir)
+        built = build_from_pack(_pack_build_dir(db, pack, settings),
+                                bundle_dir=settings.bundle_dir)
 
     existing = db.execute(
         select(Bundle).where(Bundle.digest == built.digest)
@@ -346,6 +353,40 @@ def _resolve_bundle(db, spec, settings=None):
     db.add(bundle)
     db.flush()
     return bundle
+
+
+def _pack_build_dir(db, pack, settings):
+    # type: (Session, Any, Settings) -> str
+    """The directory a pack's bundle is built from.
+
+    For a repo-synced pack this is the IMMUTABLE per-SHA snapshot materialised at
+    ``pack.indexed_sha`` (via :func:`server.gitsync.sync.resolve_pack_dir`), NOT
+    the live clone path in ``pack.source_path``. A webhook resync can
+    ``git reset --hard`` the clone while a build reads it, so building from the
+    mutable tree risks a torn or wrong bundle (and a wrong content-addressed
+    digest); the pinned snapshot makes the bundle deterministic for the indexed
+    SHA regardless of branch movement, and also denies a resync the chance to
+    swap in a different pack payload between indexing and the build. A local
+    (non-repo) pack has no snapshot and uses its source_path. Any failure to
+    materialise the snapshot (clone missing, git error) falls back to
+    source_path, so a build is never blocked — the prior behaviour.
+    """
+    if not pack.repo_id or not pack.indexed_sha:
+        return pack.source_path
+    from .models import Repo
+
+    repo = pack.repo if pack.repo is not None else db.get(Repo, pack.repo_id)
+    if repo is None:
+        return pack.source_path
+    try:
+        from .gitsync import sync as gitsync
+
+        return gitsync.resolve_pack_dir(repo, pack, settings=settings)
+    except Exception as exc:
+        log.warning("run bundle for pack %s: could not materialise the pinned "
+                    "snapshot at %s (%s); building from the live clone path",
+                    pack.id, (pack.indexed_sha or "")[:12], exc)
+        return pack.source_path
 
 
 def stop_run(db, run, driver, force=False, actor="operator"):
@@ -540,6 +581,13 @@ def supervisor_tick(db, drivers, boot_time):
             _supervise_run(db, run, drivers, boot_time, now)
         except Exception as exc:  # one bad run must not stall the whole estate
             log.warning("supervisor: run %s tick error: %s", run.id, exc)
+    # Reap the fleet of any run that terminalised without going through draining
+    # (a natural completion whose workers self-exited), so a completed run never
+    # leaks its swarm service until the next boot sweep.
+    try:
+        _reap_terminal_fleets(db, drivers, now)
+    except Exception as exc:  # pragma: no cover - defensive; reap must not stall
+        log.warning("supervisor: terminal-fleet reap error: %s", exc)
 
 
 def _supervise_run(db, run, drivers, boot_time, now):
@@ -735,6 +783,47 @@ def _destroy_fleet(db, run, drivers, why):
     except Exception as exc:
         log.warning("run %s driver.destroy failed (%s): %s", run.id, why, exc)
         append_event(db, run, "driver_error", {"op": "destroy", "error": str(exc)})
+
+
+def _has_event(db, run, kind):
+    # type: (Session, Run, str) -> bool
+    """True when the run's audit trail already holds an event of ``kind``."""
+    return db.execute(
+        select(RunEvent.id)
+        .where(RunEvent.run_id == run.id, RunEvent.kind == kind)
+        .limit(1)
+    ).first() is not None
+
+
+def _reap_terminal_fleets(db, drivers, now):
+    # type: (Session, Optional[Mapping[str, ExecutionDriver]], datetime.datetime) -> None
+    """Destroy the fleet of a recently-terminalised run that was never reaped.
+
+    A run that reached completed/stopped/failed by natural worker exit (all
+    leases DONE while running/releasing) never passes through draining, so
+    :func:`_reap_draining` never destroys its fleet — the workers self-exited but
+    the swarm service/workload object lingers. This finds such runs (terminal
+    within :data:`TERMINAL_REAP_WINDOW_S`, still carrying a ``DriverRef`` and with
+    no ``fleet_destroyed`` event yet) and destroys the workload. Idempotent and
+    best-effort: the ``fleet_destroyed`` event :func:`_destroy_fleet` writes on
+    success drops the run from the next scan; a transient destroy failure is
+    retried on later ticks; and boot reconciliation's stray sweep is the final
+    backstop for anything missed.
+    """
+    if not drivers:
+        return
+    cutoff = _as_aware(now) - datetime.timedelta(seconds=TERMINAL_REAP_WINDOW_S)
+    stmt = select(Run).where(
+        Run.state.in_(tuple(TERMINAL_STATES)),
+        Run.ended_at.isnot(None),
+        Run.ended_at >= cutoff,
+    )
+    for run in db.execute(stmt).scalars().all():
+        if driver_ref_of(run) is None:
+            continue
+        if _has_event(db, run, "fleet_destroyed"):
+            continue
+        _destroy_fleet(db, run, drivers, "post-completion-reap")
 
 
 def _auth_failed_slots(db, run):
@@ -1249,20 +1338,37 @@ def _maybe_mark_running(db, run):
         transition_run(db, run, STATE_RUNNING)
 
 
-def record_final(db, run, slot, summary, log_tail):
-    # type: (Session, Run, int, Mapping[str, Any], Sequence[str]) -> None
+def record_final(db, run, slot, summary, log_tail, lease_id=None):
+    # type: (Session, Run, int, Mapping[str, Any], Sequence[str], Optional[str]) -> None
     """Record a worker's final report and finalise its lease.
 
     Store ``final_log_tail``, fold ``summary`` into ``runs.totals_json`` (via
     :func:`fold_totals`), mark the lease ``done``. When all leases are done/lost
     move the run to its terminal state as the drain reason dictates (via
     :func:`maybe_complete_run`).
+
+    Fences on ``lease_id`` exactly as :func:`mark_ready` / :func:`record_heartbeat`
+    do: a caller whose ``lease_id`` is no longer the slot holder (a superseded
+    worker whose slot was reclaimed by a new holder after a lapse) is ignored, so
+    it can neither fold its stale totals nor finalise (and prematurely complete)
+    the current holder's lease. ``lease_id`` is optional for backward
+    compatibility with a worker that predates the field: absent, the prior
+    best-effort-by-slot behaviour stands.
     """
     from fastapi import HTTPException
 
     lease = find_lease(db, run, slot)
     if lease is None:
         raise HTTPException(status_code=409, detail="unknown slot")
+
+    if lease_id is not None and not is_lease_holder(lease, lease_id):
+        # Superseded worker: its slot now belongs to a different lease_id. Ignore
+        # its final rather than corrupt the live holder's lease/totals. Returns a
+        # clean 200 (the worker is exiting regardless) instead of a 409 that would
+        # only trigger its terminal-path retries.
+        log.info("run %s slot %s final ignored: lease %s is not the slot holder",
+                 run.id, slot, lease_id)
+        return
 
     # Idempotent: a duplicate final (retried POST) must not double-fold totals.
     already_final = lease.state == LEASE_DONE
@@ -1367,12 +1473,14 @@ def maybe_complete_run(db, run):
     """
     if run.state in TERMINAL_STATES:
         return False
-    # Completion only applies once a run has been released (running) or is
-    # winding down (draining). Before T0 (pending/preparing/provisioning/
-    # releasing) a lost or free lease is normal churn — a lapsed worker may
-    # recover or a replacement may claim its slot — so the run must not
-    # terminate on it; the release gate and auto-abort own the pre-T0 path.
-    if run.state not in (STATE_RUNNING, STATE_DRAINING):
+    # Completion applies once a run has been released (releasing/running) or is
+    # winding down (draining). ``releasing`` is included so a worker that reports
+    # its final while the run is still releasing (an engine that runs and exits
+    # in the T0 window, e.g. a crash-at-start, before any heartbeat promoted the
+    # run to running) does not wedge the run in releasing forever. Before release
+    # (pending/preparing/provisioning) a lost or free lease is normal churn, so
+    # the run must not terminate on it; the release gate owns that path.
+    if run.state not in (STATE_RUNNING, STATE_RELEASING, STATE_DRAINING):
         return False
     leases = get_run_leases(db, run)
     if not leases:
@@ -1388,6 +1496,18 @@ def maybe_complete_run(db, run):
         return False  # at least one worker still live
     if not any(l.state in (LEASE_DONE, LEASE_LOST) for l in leases):
         return False  # nothing has actually run/resolved yet
+
+    # A running/releasing run whose only resolved leases are LOST (no worker has
+    # finished cleanly) must not terminalise here: a lost lease can still recover
+    # on its next heartbeat, and a genuinely dead fleet is failed by the auto-
+    # abort grace (>AUTO_ABORT_LOST_FRACTION lost for AUTO_ABORT_LOST_S). Without
+    # this, a single transient heartbeat gap lapses the sole lease of a 1-worker
+    # run to lost and this would fail the run instantly — defeating both the
+    # documented lost-lease recovery and the 5-minute grace. A DRAINING run is
+    # already past that grace (its reap declares stragglers lost), so it still
+    # completes on a lost-only set.
+    if run.state != STATE_DRAINING and not any(l.state == LEASE_DONE for l in leases):
+        return False
 
     reason = run.end_reason
     terminal = _terminal_state_for(run, reason, leases)

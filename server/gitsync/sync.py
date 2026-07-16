@@ -399,6 +399,18 @@ def _upsert_pack(db, repo, name, rel, pack_dir, head_sha, lint, errors,
         select(Pack).where(Pack.repo_id == repo.id, Pack.name == name)
     ).scalars().first()
 
+    # A pack row is keyed on (repo_id, name), so two DIFFERENT directories in the
+    # repo that declare the same name collide: the later one silently overwrites
+    # the earlier row (repointing source_path), shadowing the first pack. Surface
+    # it so the repo author can rename one rather than lose a pack unnoticed.
+    if (existing is not None and existing.source_path
+            and existing.source_path != pack_dir):
+        log.warning(
+            "repo %s: two packs resolve to the same name %r (%s then %s); the "
+            "later wins and the earlier is shadowed — give them distinct names "
+            "in pack.yaml/stoker.json to keep both",
+            repo.id, name, existing.source_path, pack_dir)
+
     pack = existing or Pack(name=name)
     pack.name = name
     pack.repo_id = repo.id

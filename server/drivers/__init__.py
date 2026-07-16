@@ -93,11 +93,14 @@ def _build(attrs):
         from .fake import FakeDriver
 
         return FakeDriver()
-    log.warning("unknown driver %r for fleet %s; falling back to FakeDriver",
-                driver_name, attrs["name"])
-    from .fake import FakeDriver
-
-    return FakeDriver()
+    # An unknown driver name is a misconfiguration. Falling back to the FakeDriver
+    # would fabricate a healthy-looking fleet that generates NO load, so a typo in
+    # a fleet's driver ("swam") would silently produce runs that appear to succeed
+    # while doing nothing. Fail loudly instead: a swarm run then 502s at provision
+    # and boot skips the fleet with a logged warning.
+    raise DriverError(
+        "unknown fleet driver %r for fleet %s (expected one of: swarm, k8s, fake)"
+        % (driver_name, attrs["name"]))
 
 
 def register_driver(name, driver):

@@ -21,7 +21,16 @@ log = logging.getLogger("stoker.config")
 # postgresql+psycopg:// URL via DATABASE_URL.
 DEFAULT_DATABASE_URL = "sqlite:///./stoker.db"
 DEFAULT_JWT_TTL_S = 3600
+# Portainer environment (endpoint) id. There is no universal value: it is the id
+# of YOUR Portainer environment, so it must be set per install (the swarm fleet
+# 404s at provision if it is wrong). 6 is only the author's; treat it as a
+# placeholder and override with PORTAINER_ENDPOINT / the fleet config.
 DEFAULT_PORTAINER_ENDPOINT = 6
+# Verify the Portainer server's TLS certificate. Default False because a homelab
+# Portainer usually serves a self-signed cert; set PORTAINER_VERIFY_TLS=1 (and a
+# CA the host trusts) in production so the tier-0 API key is not sent over an
+# unverified channel. A per-fleet ``verify_tls`` in the fleet config overrides it.
+DEFAULT_PORTAINER_VERIFY_TLS = False
 DEFAULT_BUNDLE_DIR = "/data/bundles"
 DEFAULT_REPO_CLONE_DIR = "/data/repos"
 DEFAULT_PORT = 8080
@@ -88,6 +97,10 @@ class Settings:
     # Where repo clones live in the control-plane volume (git-sync, stage 3).
     # Defaulted and last so existing Settings(...) call sites stay valid.
     repo_clone_dir: str = DEFAULT_REPO_CLONE_DIR
+    # Verify the Portainer TLS certificate (env PORTAINER_VERIFY_TLS). Defaulted
+    # so existing Settings(...) call sites stay valid; a per-fleet ``verify_tls``
+    # still overrides it in SwarmDriver.from_fleet_config.
+    portainer_verify_tls: bool = DEFAULT_PORTAINER_VERIFY_TLS
 
     # --- Auth (all defaulted so existing Settings(...) call sites stay valid) --
     # Bootstrap admin from the environment: if both are set and the user is
@@ -283,6 +296,8 @@ def load_settings(env=None):
         portainer_host=_get(env, "PORTAINER_HOST"),
         portainer_token=_get(env, "PORTAINER_TOKEN"),
         portainer_endpoint=_get_int(env, "PORTAINER_ENDPOINT", DEFAULT_PORTAINER_ENDPOINT),
+        portainer_verify_tls=_get_bool(env, "PORTAINER_VERIFY_TLS",
+                                       DEFAULT_PORTAINER_VERIFY_TLS),
         bundle_dir=_get(env, "BUNDLE_DIR", DEFAULT_BUNDLE_DIR) or DEFAULT_BUNDLE_DIR,
         repo_clone_dir=_get(env, "REPO_CLONE_DIR", DEFAULT_REPO_CLONE_DIR) or DEFAULT_REPO_CLONE_DIR,
         dogfood_hec_url=_get(env, "DOGFOOD_HEC_URL"),

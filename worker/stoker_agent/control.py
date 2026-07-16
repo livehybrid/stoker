@@ -154,16 +154,19 @@ class ControlClient(object):
         self._record_ack()
         return doc
 
-    def final(self, slot, summary, log_tail, deadline=None):
-        # type: (int, Dict[str, Any], list, Optional[float]) -> bool
+    def final(self, slot, summary, log_tail, deadline=None, lease_id=None):
+        # type: (int, Dict[str, Any], list, Optional[float], Optional[str]) -> bool
         """Best-effort final POST; never blocks exit past `deadline`.
 
         `deadline` is a monotonic-clock instant (the agent's drain deadline);
         each attempt's request timeout is clamped to the time left and no
         attempt starts once it has passed, so a dead control plane cannot push
-        the drain over the SIGTERM budget.
+        the drain over the SIGTERM budget. `lease_id` lets the control plane
+        fence a superseded worker's final (ignored server-side if the slot was
+        reclaimed).
         """
-        body = {"slot": slot, "summary": summary, "log_tail": log_tail}
+        body = {"slot": slot, "lease_id": lease_id,
+                "summary": summary, "log_tail": log_tail}
         for attempt in range(3):
             timeout = self._timeout
             if deadline is not None:
@@ -237,8 +240,8 @@ class StandaloneControl(object):
             return {"command": "release", "t0": format_iso8601(t0)}
         return {"command": "continue"}
 
-    def final(self, slot, summary, log_tail, deadline=None):
-        # type: (int, Dict[str, Any], list, Optional[float]) -> bool
+    def final(self, slot, summary, log_tail, deadline=None, lease_id=None):
+        # type: (int, Dict[str, Any], list, Optional[float], Optional[str]) -> bool
         self._out.write("[stoker] final %s\n"
                         % json.dumps({"slot": slot, "summary": summary},
                                      sort_keys=True, default=str))

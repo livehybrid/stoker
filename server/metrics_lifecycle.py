@@ -56,9 +56,17 @@ _LIVE_LEASE_STATES = ("claimed", "ready", "running")
 # last:  a monotonic cumulative counter -> keep the final value in the bucket.
 # mean:  an instantaneous gauge -> average across the bucket's samples.
 # sum:   a per-interval delta -> add across the bucket.
-_ROLLUP_LAST = ("events_total", "bytes_total", "queue_depth")
+#
+# The agent reports EVERY HEC counter (2xx/4xx/5xx/timeouts/retries) as a running
+# cumulative total, exactly like events_total/bytes_total (see the worker's
+# hec_client: the counters only ever ``+=`` and are never reset per heartbeat).
+# So they roll up as ``last`` — summing them across a bucket would multiply the
+# true value by the sample count (~12x at a 60 s bucket / 5 s heartbeat). There
+# are no genuinely per-interval delta columns, so _ROLLUP_SUM is empty.
+_ROLLUP_LAST = ("events_total", "bytes_total", "queue_depth",
+                "hec_2xx", "hec_4xx", "hec_5xx", "hec_timeouts", "retries")
 _ROLLUP_MEAN = ("eps", "bps", "lag_s", "rss_mb", "cpu_pct")
-_ROLLUP_SUM = ("hec_2xx", "hec_4xx", "hec_5xx", "hec_timeouts", "retries")
+_ROLLUP_SUM = ()
 
 
 # --------------------------------------------------------------------------- #

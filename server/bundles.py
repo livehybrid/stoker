@@ -56,6 +56,11 @@ METRICS_ENGINE = "metrics"
 # A metrics pack's dimension cross-product must stay bounded (each combo is a
 # runtime series emitted every resolution tick). Rejected past this at lint.
 _MAX_METRIC_SERIES = 5000
+# ...and so must the metric count: the per-tick emit is series x metrics data
+# points, so an uncapped metric list defeats the series cap. Bound both the
+# metric count and their product (the per-tick datapoint volume).
+_MAX_METRICS_PER_PACK = 250
+_MAX_METRIC_DATAPOINTS = 250_000
 # The default metric sourcetype (a metrics-type index sourcetype).
 _DEFAULT_METRIC_SOURCETYPE = "stoker:metric"
 # Stub eventgen.conf shipped inside a metrics bundle. The metrics engine reads
@@ -656,6 +661,14 @@ def lint_metrics_config(config):
     if not isinstance(metrics, list) or not metrics:
         errors.append("metrics must be a non-empty list")
         return errors
+    if len(metrics) > _MAX_METRICS_PER_PACK:
+        errors.append("too many metrics: %d (max %d); reduce the metric list"
+                      % (len(metrics), _MAX_METRICS_PER_PACK))
+    n_datapoints = metrics_series_count(config) * len(metrics)
+    if n_datapoints > _MAX_METRIC_DATAPOINTS:
+        errors.append("per-tick datapoint volume is %d (series x metrics; max %d); "
+                      "reduce dimensions, values or metrics"
+                      % (n_datapoints, _MAX_METRIC_DATAPOINTS))
 
     seen = set()  # type: set
     for i, m in enumerate(metrics):
@@ -894,9 +907,31 @@ def _iter_pack_files(pack_dir, extra_relpaths=None):
     base = os.path.basename(os.path.normpath(pack_dir))
     members = []  # type: List[Tuple[str, str]]
     seen = set()  # type: set
+    root_real = os.path.realpath(pack_dir)
+
+    def _safe(full):
+        # type: (str) -> bool
+        """True when ``full`` is a real file inside the pack tree.
+
+        Packs come from UNTRUSTED git repos. A symlink under the pack (e.g.
+        ``samples/x -> /etc/passwd`` or the control plane's master-key file) would
+        otherwise be read and embedded into the bundle by the tar builder, which
+        any worker can download — an arbitrary-file-read exfiltration. Reject any
+        symlink, and any path whose real location escapes the pack root.
+        """
+        if os.path.islink(full):
+            log.warning("pack %s: skipping symlink %s (not bundled)", base, full)
+            return False
+        real = os.path.realpath(full)
+        if real == root_real or real.startswith(root_real + os.sep):
+            return True
+        log.warning("pack %s: skipping %s (escapes the pack root)", base, full)
+        return False
 
     def _add(full, rel):
         # type: (str, str) -> None
+        if not _safe(full):
+            return
         arc = os.path.join(base, rel)
         if arc in seen:
             return
@@ -908,8 +943,11 @@ def _iter_pack_files(pack_dir, extra_relpaths=None):
         if os.path.isfile(full):
             _add(full, rel)
     samples_dir = os.path.join(pack_dir, "samples")
-    if os.path.isdir(samples_dir):
-        for root, _dirs, files in os.walk(samples_dir):
+    if os.path.isdir(samples_dir) and not os.path.islink(samples_dir):
+        # followlinks defaults False (no descent into symlinked dirs); also prune
+        # symlinked subdirs from the walk so nothing under one is ever considered.
+        for root, dirs, files in os.walk(samples_dir):
+            dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d))]
             for fn in files:
                 full = os.path.join(root, fn)
                 rel = os.path.relpath(full, pack_dir)

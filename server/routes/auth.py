@@ -64,12 +64,17 @@ def login(body: LoginRequest, request: Request, response: Response,
         select(User).where(User.username == username)
     ).scalars().first()
 
-    # One uniform rejection for every failure mode (no user-enumeration oracle).
+    # Always spend bcrypt time, even on an unknown/passwordless user, so login
+    # latency is not a username-enumeration oracle. Combined with the single
+    # uniform rejection below, neither the message nor the timing distinguishes
+    # the failure modes.
+    password_ok = auth.verify_password_constant(
+        body.password, user.password_hash if user is not None else None)
     if (
         user is None
         or not user.active
         or user.source != "local"
-        or not auth.verify_password(body.password, user.password_hash)
+        or not password_ok
     ):
         raise HTTPException(status_code=401, detail="invalid credentials")
 

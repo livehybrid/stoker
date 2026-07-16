@@ -13,8 +13,10 @@ Design ground truth (AIOS ``DESIGN.md`` sections 5 + 11 "AWS"):
   for bounded runs, ``restartPolicy: OnFailure``. The HEC token rides in a
   per-run ephemeral Secret with an ``ownerReference`` on the Job (garbage-
   collected with it) and is projected into the pod via ``secretKeyRef`` -- never
-  as a plaintext env value. Pods run ``automountServiceAccountToken: false`` with
-  the worker image pinned by digest.
+  as a plaintext env value. Pods run ``automountServiceAccountToken: false`` and
+  set ``imagePullPolicy: Always`` so a floating worker tag is never served stale
+  from a node's cache (an already-digest-pinned ``run.image`` is immutable
+  regardless).
 * ``scale``   = Elastic Indexed Jobs (k8s >= 1.27): patch ``parallelism`` **and**
   ``completions`` together.
 * ``stop``    = delete the Job with ``propagationPolicy: Foreground`` (pods get
@@ -396,6 +398,11 @@ class K8sDriver(object):
         container = {
             "name": "worker",
             "image": run.image,
+            # A floating tag (…:latest) that a node already cached is otherwise
+            # served stale, so a freshly pushed worker never reaches the fleet
+            # (the same trap the SwarmDriver avoids by resolving the tag to a
+            # digest). Always re-pull; a digest-pinned run.image ignores this.
+            "imagePullPolicy": "Always",
             "env": env,
         }  # type: Dict[str, Any]
         resources = opts.get("resources")
