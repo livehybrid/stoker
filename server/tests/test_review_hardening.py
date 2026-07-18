@@ -148,7 +148,9 @@ def test_rollup_keeps_last_for_cumulative_counters(db_session, settings, fake_dr
     db = db_session
     ctx = H.full_run(db, make_pack(), settings, driver=fake_driver, workers=1)
     run = ctx["run"]
-    old = utcnow() - datetime.timedelta(hours=72)  # older than the 48 h roll-up window
+    # Older than the 48 h roll-up window, floored to a minute so the +5 s/+10 s
+    # samples below can never straddle a 60 s bucket boundary (epoch // 60).
+    old = (utcnow() - datetime.timedelta(hours=72)).replace(second=0, microsecond=0)
     # Three samples in one 60 s bucket; all counters cumulative (increasing).
     for i, ev in enumerate((10, 20, 30)):
         db.add(MetricSample(
