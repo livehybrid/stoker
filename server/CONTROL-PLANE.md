@@ -207,6 +207,7 @@ trusted-proxy header, or an API token (`Authorization: Bearer stk_...`).
 
 **Packs**
 - `POST /api/packs` `{name, source_path, description?}` registers and lints a local pack directory; sets `verified`/`lint_status`/engines/sourcetypes/`est_bytes_per_event`.
+- **Builtin packs**: at every boot, each pack root under `STOKER_BUILTIN_PACKS_DIR` (`/app/packs` in the image — the repo's bundled starter packs) is registered/re-linted as a local pack (`lifecycle.seed_builtin_packs`), named by its `pack.yaml` `name` (e.g. `packs/apigw` → `api-gateway`). Idempotent by `source_path`; a name already taken by another pack is skipped (a dead-path local row is repointed instead); a lint failure registers the pack with `lint_status=error` and never blocks boot. Unset the env to disable.
 - `GET /api/packs` (optional `?repo=<id>` / `?repo_id=<id>` filter), `GET /api/packs/{id}`.
 - `GET /api/packs/{id}/preview` -> stanzas + first 10 sample lines per stanza + lint status.
 - `GET /api/packs/{id}/preview_run?n=<N>` -> N rendered events (a dry-run render for review).
@@ -255,6 +256,7 @@ Parsed once into a frozen `Settings` (`config.py`); secret fields are `repr=Fals
 - **Swarm**: `PORTAINER_HOST`, `PORTAINER_TOKEN` (tier-0, secret), `PORTAINER_ENDPOINT` (default 6).
 - **Kubernetes**: `K8S_NAMESPACE` (default `stoker`) — the namespace the seeded `k8s-local` fleet runs worker Jobs in; per-fleet `config_json.namespace` overrides. Kube auth needs no env: kubeconfig or the pod service account is auto-detected (see K8sDriver).
 - **In-process fleet**: `STOKER_INPROCESS_FLEET` (default off) — seeds `inprocess-local` and allows its driver to build; workers then run as subprocesses of the control plane (small workloads, see InProcessDriver). `STOKER_INPROCESS_MAX_WORKERS` (default 2, min 1) — the worker cap; per-fleet `config_json.max_workers` overrides.
+- **Builtin packs**: `STOKER_BUILTIN_PACKS_DIR` (unset by default; `/app/packs` in the image) — a directory of pack roots registered and re-linted at every boot as local packs.
 - **Auth**: `STOKER_ADMIN_USER` + `STOKER_ADMIN_PASSWORD` (bootstrap admin; password secret), `STOKER_SESSION_TTL` (default 43200 = 12 h), `STOKER_TRUSTED_PROXIES` (comma-separated CIDR/IP; empty = no proxy trusted; a malformed entry is a hard boot error), `STOKER_AUTH_HEADER` (default `X-Forwarded-User`), `STOKER_PROXY_DEFAULT_ROLE` (default operator; validated against viewer/operator/admin at boot), `STOKER_AUTH_DISABLED` (kill switch).
 - **Metric maintenance**: `METRIC_ROLLUP_AFTER_H` (48), `METRIC_PRUNE_AFTER_D` (30), `METRIC_ROLLUP_BUCKET_S` (60), `METRIC_MAINTENANCE_INTERVAL_S` (3600), `METRIC_DELETE_CHUNK` (5000).
 - **Dogfood**: `DOGFOOD_HEC_URL`, `DOGFOOD_HEC_TOKEN` (secret; both required to enable), `DOGFOOD_METRICS_INTERVAL_S` (30), `DOGFOOD_GZIP` (true).

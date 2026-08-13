@@ -31,6 +31,7 @@ from __future__ import annotations
 import datetime
 import logging
 import math
+import os
 import secrets
 import time
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -2143,6 +2144,121 @@ def seed_fleets(db, settings=None):
     db.commit()
 
 
+def seed_builtin_packs(db, settings=None):
+    # type: (Session, Optional[Settings]) -> Dict[str, int]
+    """Register the image's bundled packs at boot (``STOKER_BUILTIN_PACKS_DIR``).
+
+    Every immediate child of the directory that looks like a pack root
+    (``default/eventgen.conf``, a ``pack.yaml`` or a ``stoker.json``) is linted
+    and upserted as a local Pack row (``repo_id`` null), exactly like a
+    ``POST /api/packs`` registration — so the starter packs appear in the UI on
+    first boot with no sideloading. Idempotent and self-healing:
+
+    * a row already registered from the same directory is refreshed (re-linted,
+      metadata updated) so an image upgrade's pack edits take effect;
+    * a NAME already taken by some other pack (operator-registered or
+      repo-synced) is left alone and the builtin copy skipped — unless that
+      pack is a local row whose directory no longer exists, in which case it is
+      repointed here (the builtin dir moved between image layouts);
+    * a pack that fails to lint still registers (``lint_status=error``, run
+      submits stay blocked) and one pack's failure never stops the rest.
+
+    Unset/missing directory is a no-op. Returns
+    ``{"packs_seeded", "packs_updated", "packs_skipped"}``.
+    """
+    if settings is None:
+        settings = get_settings()
+    root = (settings.builtin_packs_dir or "").strip()
+    counts = {"packs_seeded": 0, "packs_updated": 0, "packs_skipped": 0}
+    if not root:
+        return counts
+    if not os.path.isdir(root):
+        log.warning("builtin packs dir %r does not exist; skipping seeding", root)
+        return counts
+
+    from . import bundles
+    from .gitsync import local_pack_metadata
+    from .models import Pack
+
+    for entry in sorted(os.listdir(root)):
+        pack_dir = os.path.join(root, entry)
+        if not os.path.isdir(pack_dir) or not _looks_like_pack_root(pack_dir):
+            continue
+        try:
+            meta = local_pack_metadata(pack_dir)
+            name = meta["name"]
+
+            existing = db.execute(select(Pack).where(
+                Pack.source_path == pack_dir)).scalars().first()
+            if existing is None:
+                clash = db.execute(select(Pack).where(
+                    Pack.name == name)).scalars().first()
+                if clash is not None:
+                    if clash.repo_id is None and not os.path.isdir(clash.source_path):
+                        # A local pack registered from a path that no longer
+                        # exists (the builtin dir moved between images): adopt
+                        # the row rather than stranding it broken.
+                        existing = clash
+                    else:
+                        counts["packs_skipped"] += 1
+                        log.info(
+                            "builtin pack %r skipped: name already registered "
+                            "(pack id %s from %s)", name, clash.id,
+                            "repo %s" % clash.repo_id if clash.repo_id
+                            else clash.source_path)
+                        continue
+
+            lint = bundles.lint_pack(pack_dir)
+            pack = existing or Pack(name=name, source_path=pack_dir)
+            pack.name = name
+            pack.source_path = pack_dir
+            pack.description = meta["description"]
+            pack.tags_json = meta["tags"]
+            pack.engines_json = lint.engines
+            if lint.metricgen is not None:
+                pack.builder_config_json = lint.metricgen
+            pack.sourcetypes_json = lint.sourcetypes
+            pack.stanza_count = lint.stanza_count
+            pack.est_bytes_per_event = lint.est_bytes_per_event
+            pack.declared_per_day_gb = lint.declared_per_day_gb
+            pack.verified = lint.ok
+            pack.lint_status = "ok" if lint.ok else "error"
+            pack.lint_errors_json = lint.errors
+            if existing is None:
+                db.add(pack)
+                counts["packs_seeded"] += 1
+            else:
+                counts["packs_updated"] += 1
+            if not lint.ok:
+                log.warning("builtin pack %r registered with lint errors: %s",
+                            name, lint.errors)
+        except Exception:  # one broken pack must never block boot or the rest
+            counts["packs_skipped"] += 1
+            log.exception("builtin pack %r could not be registered", entry)
+    db.commit()
+    if counts["packs_seeded"] or counts["packs_updated"]:
+        log.info("builtin packs from %s: %d seeded, %d refreshed, %d skipped",
+                 root, counts["packs_seeded"], counts["packs_updated"],
+                 counts["packs_skipped"])
+    return counts
+
+
+def _looks_like_pack_root(pack_dir):
+    # type: (str) -> bool
+    """A builtin-pack candidate: eventgen conf, pack.yaml or stoker.json.
+
+    Deliberately broader than git-sync's pack-root test (which requires the
+    eventgen conf or a rawreplay pack.yaml): the bundled directory-metric packs
+    are declared by ``stoker.json``. The linter decides what the pack actually
+    is; this only filters out non-pack directories (docs, licenses, strays).
+    """
+    return (
+        os.path.isfile(os.path.join(pack_dir, "default", "eventgen.conf"))
+        or os.path.isfile(os.path.join(pack_dir, "pack.yaml"))
+        or os.path.isfile(os.path.join(pack_dir, "stoker.json"))
+    )
+
+
 def resolve_fleet_driver(db, fleet_name):
     # type: (Session, str) -> ExecutionDriver
     """Resolve a spec's fleet NAME to its :class:`ExecutionDriver`.
@@ -2251,6 +2367,7 @@ __all__ = [
     "build_spec_snapshot",
     "build_run_snapshot", "counters_from_payload", "build_metric_sample",
     "fold_totals", "maybe_refresh_jwt", "cmd_continue", "cmd_superseded",
-    "cmd_drain", "cmd_release", "cmd_retarget", "seed_fleets", "get_run_driver",
+    "cmd_drain", "cmd_release", "cmd_retarget", "seed_fleets",
+    "seed_builtin_packs", "get_run_driver",
     "resolve_fleet_driver", "driver_ref_of",
 ]

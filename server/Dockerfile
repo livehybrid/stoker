@@ -52,6 +52,12 @@ COPY worker/stoker_agent /app/worker/stoker_agent
 COPY worker/engines /app/worker/engines
 ENV PYTHONPATH=/app/worker
 
+# The bundled starter packs: registered (and re-linted) at every boot, so a
+# fresh deployment has runnable packs with no sideloading (unset the env to
+# opt out). Read-only at runtime; bundles are built from these paths directly.
+COPY packs /app/packs
+ENV STOKER_BUILTIN_PACKS_DIR=/app/packs
+
 # The built UI from stage 1; app.py serves it from ui/dist (server/../ui/dist).
 COPY --from=ui-build /ui/dist /app/ui/dist
 
