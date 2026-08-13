@@ -28,6 +28,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .. import bundles, crypto, gitsync, lifecycle, preview
+from ..config import get_settings
 from ..db import get_db
 from ..drivers.base import DriverError
 from ..engines import ceilings
@@ -787,6 +788,48 @@ def run_spec(spec_id: int, body: RunLaunch, request: Request, db: Session = Depe
                     "detail": "the metrics engine is engine-paced; use "
                               "rate_mode 'count_interval' (interval = resolution)"})
 
+    # 1d. In-process fleet constraints. Workers on an ``inprocess`` fleet run
+    #     INSIDE the control-plane container (no isolation), so two extra gates
+    #     apply: a hard worker cap (they share the control plane's CPU/memory)
+    #     and an unconditional custom-code deny — a pack shipping ``bin/`` or a
+    #     ``generator =`` stanza would execute arbitrary Python in the control
+    #     plane itself, so ``trusted_code`` does NOT override here. The fleet
+    #     row is fetched once and reused for the resolve error shape below.
+    fleet_row = db.execute(
+        select(Fleet).where(Fleet.name == spec.fleet)).scalars().first()
+    if fleet_row is not None and fleet_row.driver == "inprocess":
+        cfg = fleet_row.config_json or {}
+        settings = get_settings()
+        max_workers = int(cfg.get("max_workers") or settings.inprocess_max_workers)
+        if spec.workers > max_workers:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "inprocess_worker_cap",
+                    "max_workers": max_workers,
+                    "detail": (
+                        "the in-process fleet runs workers inside the control-"
+                        "plane container and is capped at %d worker(s); use at "
+                        "most %d, or a swarm/k8s fleet for larger runs"
+                        % (max_workers, max_workers)),
+                },
+            )
+        if pack.builder_config_json is None:
+            code_errors = gitsync.custom_code_errors(pack.source_path)
+            if code_errors:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "error": "inprocess_custom_code_denied",
+                        "errors": code_errors,
+                        "detail": (
+                            "this pack carries custom code, which never runs on "
+                            "the in-process fleet (it would execute inside the "
+                            "control plane, trusted_code or not); use a "
+                            "container-isolated fleet (swarm/k8s)"),
+                    },
+                )
+
     # 2. replay-single-worker: replay is engine-paced and the control plane
     #    guarantees workers = 1. This covers an eventgen pack with a
     #    ``mode = replay`` stanza AND a rawreplay (Piston) spec/pack, which
@@ -857,15 +900,17 @@ def run_spec(spec_id: int, body: RunLaunch, request: Request, db: Session = Depe
 
     # Resolve the spec's fleet NAME through the fleets table (falling back to a
     # cache-registered or bare driver name), so named fleets ("swarm-local",
-    # "k8s-local", "eks") launch with their configured driver. An unresolvable
-    # name is the operator's error -> 422 with the fleets that do exist.
+    # "k8s-local", "eks") launch with their configured driver. A failure here is
+    # the operator's to fix -> 422: "unknown_fleet" when no such fleet exists,
+    # "fleet_unavailable" when the fleet exists but its driver refuses to build
+    # (e.g. the in-process fleet disabled, or its worker source missing).
     try:
         driver = lifecycle.resolve_fleet_driver(db, spec.fleet)
     except DriverError as exc:
+        code = "fleet_unavailable" if fleet_row is not None else "unknown_fleet"
         raise HTTPException(
             status_code=422,
-            detail={"error": "unknown_fleet", "fleet": spec.fleet,
-                    "detail": str(exc)},
+            detail={"error": code, "fleet": spec.fleet, "detail": str(exc)},
         )
     try:
         run = lifecycle.provision_run(

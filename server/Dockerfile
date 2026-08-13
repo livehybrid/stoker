@@ -33,8 +33,24 @@ WORKDIR /app
 COPY server/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
+# Worker runtime deps (requests, jinja2, ... — small, no version conflicts with
+# the server set) so the in-process fleet (STOKER_INPROCESS_FLEET=1) can spawn
+# real stoker_agent workers in this container. Separate layer: worker dep bumps
+# never invalidate the server pip layer above.
+COPY worker/requirements.txt /app/worker-requirements.txt
+RUN pip install --no-cache-dir -r /app/worker-requirements.txt
+
 # Application source under the `server` package (imported as `server.app`).
 COPY server /app/server
+
+# The worker source, laid out exactly like the worker image (agent package +
+# vendored engines as siblings — the agent resolves engine roots relative to
+# its own location). PYTHONPATH makes stoker_agent importable both for the
+# in-process fleet's workers and for the server's own pack.yaml parsing
+# (bundles reuses the worker's parser when importable).
+COPY worker/stoker_agent /app/worker/stoker_agent
+COPY worker/engines /app/worker/engines
+ENV PYTHONPATH=/app/worker
 
 # The built UI from stage 1; app.py serves it from ui/dist (server/../ui/dist).
 COPY --from=ui-build /ui/dist /app/ui/dist

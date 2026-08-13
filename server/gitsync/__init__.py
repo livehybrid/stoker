@@ -25,6 +25,7 @@ from __future__ import annotations
 from .sync import (
     GitSyncError,
     clone_or_fetch,
+    custom_code_errors,
     index_packs,
     resolve_pack_dir,
     sync_repo,
@@ -33,6 +34,7 @@ from .sync import (
 __all__ = [
     "GitSyncError",
     "clone_or_fetch",
+    "custom_code_errors",
     "index_packs",
     "resolve_pack_dir",
     "sync_repo",

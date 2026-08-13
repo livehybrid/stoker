@@ -53,7 +53,10 @@ def get_driver(fleet_row, cache=True):
     from the fleet's ``config_json`` (Portainer endpoint id + host) and process
     settings; ``driver == "k8s"`` lazily builds a
     :class:`~server.drivers.k8s.K8sDriver` from the fleet's ``config_json``
-    (kubeconfig context + namespace); anything else (``fake``) yields a
+    (kube auth choice + namespace); ``driver == "inprocess"`` builds the
+    :class:`~server.drivers.inprocess.InProcessDriver` (real worker
+    subprocesses inside this container; refuses when the fleet is disabled or
+    the worker source is absent); ``fake`` yields a
     :class:`~server.drivers.fake.FakeDriver`. Instances are cached by fleet name
     unless ``cache`` is False (tests pass their own driver instead).
     """
@@ -89,6 +92,11 @@ def _build(attrs):
 
         log.info("building K8sDriver for fleet %s", attrs["name"])
         return K8sDriver.from_fleet_config(config)
+    if driver_name == "inprocess":
+        from .inprocess import build_inprocess_driver
+
+        log.info("building InProcessDriver for fleet %s", attrs["name"])
+        return build_inprocess_driver(config)
     if driver_name == "fake":
         from .fake import FakeDriver
 
@@ -99,8 +107,8 @@ def _build(attrs):
     # while doing nothing. Fail loudly instead: a swarm run then 502s at provision
     # and boot skips the fleet with a logged warning.
     raise DriverError(
-        "unknown fleet driver %r for fleet %s (expected one of: swarm, k8s, fake)"
-        % (driver_name, attrs["name"]))
+        "unknown fleet driver %r for fleet %s (expected one of: swarm, k8s, "
+        "inprocess, fake)" % (driver_name, attrs["name"]))
 
 
 def register_driver(name, driver):

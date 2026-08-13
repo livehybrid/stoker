@@ -12,6 +12,9 @@
 //   409 {"error":"target_cap_exceeded","headroom_gb_day":N,"detail":..}
 //   422 {"error":"pack_lint_failed","errors":[..]}
 //   422 {"error":"unknown_fleet","fleet":..,"detail":..}
+//   422 {"error":"fleet_unavailable","fleet":..,"detail":..}
+//   422 {"error":"inprocess_worker_cap","max_workers":N,"detail":..}
+//   422 {"error":"inprocess_custom_code_denied","errors":[..],"detail":..}
 //   502 {"error":"provision_failed","detail":..}
 // Plus plain-string details for the simpler 404/422 validation errors.
 
@@ -24,6 +27,9 @@ export type RunErrorKind =
   | "target_cap_exceeded"
   | "pack_lint_failed"
   | "unknown_fleet"
+  | "fleet_unavailable"
+  | "inprocess_worker_cap"
+  | "inprocess_custom_code_denied"
   | "provision_failed"
   | "generic";
 
@@ -110,6 +116,30 @@ export function parseApiError(err: unknown): ParsedApiError {
         inner ??
         `The spec's fleet${fleet ? ` "${fleet}"` : ""} is not a registered fleet; pick one from the fleet list.`;
       return { kind: "unknown_fleet", message, status };
+    }
+    case "fleet_unavailable": {
+      const fleet = detail ? str(detail.fleet) : undefined;
+      const message =
+        inner ??
+        `The fleet${fleet ? ` "${fleet}"` : ""} exists but is not usable right now.`;
+      return { kind: "fleet_unavailable", message, status };
+    }
+    case "inprocess_worker_cap": {
+      const cap = detail ? num(detail.max_workers) : undefined;
+      const message =
+        inner ??
+        `The in-process fleet is capped at ${cap ?? "a small number of"} worker(s); lower the worker count or use a swarm/k8s fleet.`;
+      // The cap doubles as the suggested worker count so the wizard's
+      // one-click "use N workers" affordance works here too.
+      return { kind: "inprocess_worker_cap", message, suggestedWorkers: cap, status };
+    }
+    case "inprocess_custom_code_denied": {
+      const errsRaw = detail ? detail.errors : undefined;
+      const lintErrors = Array.isArray(errsRaw) ? errsRaw.map(String) : undefined;
+      const message =
+        inner ??
+        "This pack carries custom code, which never runs on the in-process fleet; use a swarm/k8s fleet.";
+      return { kind: "inprocess_custom_code_denied", message, lintErrors, status };
     }
     case "provision_failed": {
       const message = inner

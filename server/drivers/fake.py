@@ -12,6 +12,10 @@ DriverStatus. No network, no docker. Two uses:
 
 State is per-instance and keyed by run id so one FakeDriver can back a whole
 test session. ``destroy`` is idempotent.
+
+:class:`~server.drivers.inprocess.InProcessDriver` subclasses the spawn mode to
+run small workloads inside the control-plane container itself; the
+``capture_logs`` option and the ``_slot_env`` hook below exist for it.
 """
 
 from __future__ import annotations
@@ -47,11 +51,17 @@ class _FleetState:
         self.procs = []  # type: List[subprocess.Popen]
 
 
+# Bound on captured worker output kept per fleet (oldest lines dropped), so a
+# chatty long run cannot grow control-plane memory without limit.
+_LOG_CAP_LINES = 4000
+
+
 class FakeDriver(object):
     """A complete in-memory driver. Thread-safe; needs no external services."""
 
-    def __init__(self, spawn=False, python_executable=None, cwd=None, env_overrides=None):
-        # type: (bool, Optional[str], Optional[str], Optional[Dict[str, str]]) -> None
+    def __init__(self, spawn=False, python_executable=None, cwd=None,
+                 env_overrides=None, capture_logs=False):
+        # type: (bool, Optional[str], Optional[str], Optional[Dict[str, str]], bool) -> None
         """
         Args:
             spawn: when True, ``create`` launches real ``stoker_agent``
@@ -60,12 +70,18 @@ class FakeDriver(object):
             python_executable: interpreter for spawned workers (defaults to the
                 current one).
             cwd: working directory for spawned workers.
-            env_overrides: extra env for spawned workers (merged over os.environ).
+            env_overrides: extra env for spawned workers (merged over os.environ
+                and the run snapshot env — an override always wins).
+            capture_logs: when True (spawn mode), each worker's stdout+stderr is
+                read by a daemon thread into the fleet's bounded ``log_lines``
+                ring so ``logs()`` serves real output; when False output goes to
+                /dev/null (the historical test behaviour).
         """
         self._spawn = spawn
         self._python = python_executable or sys.executable
         self._cwd = cwd
         self._env_overrides = dict(env_overrides or {})
+        self._capture_logs = capture_logs
         self._fleets = {}  # type: Dict[str, _FleetState]
         self._lock = threading.Lock()
 
@@ -236,24 +252,73 @@ class FakeDriver(object):
         # supersede path handles identity); tests that scale down and assert on
         # process count use the non-spawn mode.
 
-    def _spawn_one(self, state, slot):
-        # type: (_FleetState, int) -> None
+    def _child_env(self, state, slot):
+        # type: (_FleetState, int) -> Dict[str, str]
+        """The env for one spawned worker: process env < snapshot < overrides
+        < per-slot values, plus the slot hint. Precedence matters: the driver's
+        overrides (e.g. a localhost control URL) must beat the snapshot's."""
         env = dict(os.environ)
         env.update(state.snapshot.env)
         env.update(self._env_overrides)
+        env.update(self._slot_env(state, slot))
         # The worker reads its slot hint from STOKER_HINT_SLOT.
         env.setdefault("STOKER_HINT_SLOT", str(slot))
+        return env
+
+    def _slot_env(self, state, slot):
+        # type: (_FleetState, int) -> Dict[str, str]
+        """Per-slot env hook (empty here). InProcessDriver overrides it to give
+        each worker its own unix output socket — every spawned worker shares
+        one filesystem, so any fixed default path would collide."""
+        return {}
+
+    def _spawn_one(self, state, slot):
+        # type: (_FleetState, int) -> None
+        env = self._child_env(state, slot)
+        sink = subprocess.PIPE if self._capture_logs else subprocess.DEVNULL
         try:
             proc = subprocess.Popen(
                 [self._python, "-m", "stoker_agent"],
                 env=env, cwd=self._cwd,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                stdout=sink, stderr=subprocess.STDOUT if self._capture_logs
+                else subprocess.DEVNULL,
             )
         except OSError as exc:
             raise DriverError("failed to spawn worker slot %d: %s" % (slot, exc))
         state.procs.append(proc)
+        if self._capture_logs and proc.stdout is not None:
+            self._start_log_reader(state, slot, proc)
         log.info("fake driver spawned worker pid=%d slot=%d run=%d",
                  proc.pid, slot, state.run_id)
+
+    def _start_log_reader(self, state, slot, proc):
+        # type: (_FleetState, int, subprocess.Popen) -> None
+        """Daemon thread streaming one worker's output into the bounded ring.
+
+        Reading (rather than /dev/null) also stops the child blocking on a full
+        pipe. The thread exits at EOF (process end); daemon=True so it never
+        pins interpreter shutdown.
+        """
+        def _pump():
+            # type: () -> None
+            try:
+                for raw in iter(proc.stdout.readline, b""):
+                    line = raw.decode("utf-8", "replace").rstrip("\n")
+                    with self._lock:
+                        state.log_lines.append("[slot %d] %s" % (slot, line))
+                        if len(state.log_lines) > _LOG_CAP_LINES:
+                            del state.log_lines[:-_LOG_CAP_LINES]
+            except (OSError, ValueError):
+                pass  # pipe closed mid-read (terminate/kill); nothing to keep
+            finally:
+                try:
+                    proc.stdout.close()
+                except OSError:
+                    pass
+
+        threading.Thread(
+            target=_pump, name="stoker-worker-log-%d-%d" % (state.run_id, slot),
+            daemon=True).start()
 
     def _terminate_procs(self, state, grace_s):
         # type: (_FleetState, int) -> None

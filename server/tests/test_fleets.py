@@ -21,6 +21,7 @@ Covers the in-cluster (EKS-pod) deployment path at the control-plane level:
 from __future__ import annotations
 
 import dataclasses
+import os
 
 import pytest
 from sqlalchemy import select
@@ -172,3 +173,100 @@ def test_list_fleets_redacts_config_to_the_allowlist(client, db_session):
     assert eks["config"] == {"namespace": "stoker", "kube_context": "eks-eu-west-2"}
     assert ciphertext not in resp.text
     assert "encrypted" not in resp.text
+
+
+# --------------------------------------------------------------------------- #
+# In-process fleet: seeding flag + the submit gates.
+# --------------------------------------------------------------------------- #
+
+def test_seed_fleets_inprocess_only_when_enabled(db_session, settings):
+    lifecycle.seed_fleets(db_session, settings=settings)
+    names = {f.name for f in db_session.execute(select(Fleet)).scalars().all()}
+    assert "inprocess-local" not in names  # default: opt-in only
+
+    enabled = dataclasses.replace(settings, inprocess_fleet_enabled=True)
+    lifecycle.seed_fleets(db_session, settings=enabled)
+    row = db_session.execute(
+        select(Fleet).where(Fleet.name == "inprocess-local")).scalars().first()
+    assert row is not None
+    assert row.driver == "inprocess"
+
+
+def test_inprocess_settings_parse():
+    from server.config import load_settings
+
+    parsed = load_settings(env={"STOKER_INPROCESS_FLEET": "1",
+                                "STOKER_INPROCESS_MAX_WORKERS": "0"})
+    assert parsed.inprocess_fleet_enabled is True
+    assert parsed.inprocess_max_workers == 1  # clamped to >= 1
+    assert load_settings(env={}).inprocess_fleet_enabled is False
+
+
+def _inprocess_spec(db_session, settings, make_pack, fleet_name, workers=1,
+                    pack_dir=None):
+    """A spec on an inprocess-driver fleet row, plus its target/pack rows."""
+    db_session.add(Fleet(name=fleet_name, driver="inprocess", config_json={}))
+    target = _helpers.make_target(db_session, settings=settings)
+    pack = _helpers.make_pack(db_session, pack_dir or make_pack())
+    spec = _helpers.make_spec(db_session, pack, target, rate_mode="eps",
+                              rate_value=100.0, workers=workers,
+                              fleet=fleet_name)
+    db_session.commit()
+    return spec
+
+
+def test_launch_inprocess_over_cap_is_422(client, db_session, settings,
+                                          make_pack, fake_driver):
+    spec = _inprocess_spec(db_session, settings, make_pack, "inproc-cap",
+                           workers=3)  # default cap is 2
+    resp = client.post("/api/specs/%d/run" % spec.id, json={})
+    assert resp.status_code == 422, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error"] == "inprocess_worker_cap"
+    assert detail["max_workers"] == 2
+
+
+def test_launch_inprocess_custom_code_denied(client, db_session, settings,
+                                             make_pack, fake_driver):
+    pack_dir = make_pack(name="binpack")
+    bin_dir = os.path.join(pack_dir, "bin")
+    os.makedirs(bin_dir)
+    with open(os.path.join(bin_dir, "evil.py"), "w", encoding="utf-8") as fh:
+        fh.write("print('custom code')\n")
+
+    spec = _inprocess_spec(db_session, settings, make_pack, "inproc-code",
+                           workers=1, pack_dir=pack_dir)
+    resp = client.post("/api/specs/%d/run" % spec.id, json={})
+    assert resp.status_code == 422, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error"] == "inprocess_custom_code_denied"
+    assert any("bin/" in e for e in detail["errors"])
+
+
+def test_launch_inprocess_disabled_is_fleet_unavailable(client, db_session,
+                                                        settings, make_pack,
+                                                        fake_driver):
+    # Gates pass (1 worker, clean pack) but the driver refuses to build while
+    # STOKER_INPROCESS_FLEET is off -> a clean 422, distinguished from a typo'd
+    # fleet name.
+    spec = _inprocess_spec(db_session, settings, make_pack, "inproc-off",
+                           workers=1)
+    resp = client.post("/api/specs/%d/run" % spec.id, json={})
+    assert resp.status_code == 422, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error"] == "fleet_unavailable"
+    assert "STOKER_INPROCESS_FLEET" in detail["detail"]
+
+
+def test_launch_inprocess_within_gates_provisions(client, db_session, settings,
+                                                  make_pack, fake_driver):
+    # With the gates satisfied the launch proceeds. The driver cache is primed
+    # with a bookkeeping FakeDriver under the fleet's name so the test provisions
+    # without spawning real agent subprocesses (the e2e test owns that path);
+    # the submit gates still ran against the row's driver kind ("inprocess").
+    drivers_mod.register_driver("inproc-ok", FakeDriver())
+    spec = _inprocess_spec(db_session, settings, make_pack, "inproc-ok",
+                           workers=2)
+    resp = client.post("/api/specs/%d/run" % spec.id, json={})
+    assert resp.status_code == 201, resp.text
+    assert db_session.get(Run, resp.json()["run_id"]) is not None

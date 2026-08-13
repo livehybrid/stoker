@@ -362,7 +362,7 @@ def index_packs(db, repo, clone_dir, head_sha, settings=None):
         errors = list(lint.errors)
 
         # Custom-code default-deny (unless the repo is flagged trusted_code).
-        code_errors = _custom_code_errors(pack_dir)
+        code_errors = custom_code_errors(pack_dir)
         trusted = bool(repo.trusted_code)
         if code_errors and not trusted:
             errors.extend(code_errors)
@@ -645,7 +645,7 @@ def _fmt_num(value):
 # Custom-code default-deny + token path escape
 # --------------------------------------------------------------------------- #
 
-def _custom_code_errors(pack_dir):
+def custom_code_errors(pack_dir):
     # type: (str) -> List[str]
     """Reasons this pack is custom code (blocked unless the repo is trusted_code).
 
@@ -653,6 +653,10 @@ def _custom_code_errors(pack_dir):
     would import and run inside a worker), and any ``generator =`` stanza key
     (a custom generator plugin). Returns a list of human-readable reasons; empty
     means the pack carries no custom code.
+
+    Public: besides repo indexing (where ``trusted_code`` can override), the
+    in-process fleet's submit gate uses this as a HARD deny — custom pack code
+    must never execute inside the control-plane container, trusted or not.
     """
     reasons = []  # type: List[str]
     bin_dir = os.path.join(pack_dir, "bin")
@@ -1019,6 +1023,7 @@ def _sh_quote(value):
 __all__ = [
     "GitSyncError",
     "clone_or_fetch",
+    "custom_code_errors",
     "index_packs",
     "resolve_pack_dir",
     "sync_repo",

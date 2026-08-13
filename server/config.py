@@ -72,6 +72,10 @@ VALID_ROLES = ("viewer", "operator", "admin")
 # Matches the EKS Terraform module's default namespace.
 DEFAULT_K8S_NAMESPACE = "stoker"
 
+# Worker cap for the in-process fleet (workers run INSIDE the control-plane
+# container, sharing its CPU/memory — small workloads only by design).
+DEFAULT_INPROCESS_MAX_WORKERS = 2
+
 
 class ConfigError(Exception):
     """Raised when an environment value cannot be parsed."""
@@ -147,6 +151,15 @@ class Settings:
     # Namespace the seeded ``k8s-local`` fleet runs worker Jobs in (env
     # K8S_NAMESPACE); per-fleet ``config_json.namespace`` still overrides it.
     k8s_namespace: str = DEFAULT_K8S_NAMESPACE
+
+    # --- In-process fleet (workers inside the control-plane container) ------- #
+    # Opt-in (env STOKER_INPROCESS_FLEET): seeds the ``inprocess-local`` fleet,
+    # whose runs spawn real stoker_agent subprocesses in this container — no
+    # swarm/k8s backend at all. Small workloads only: workers share the control
+    # plane's CPU/memory, so the worker count is capped (env
+    # STOKER_INPROCESS_MAX_WORKERS) and custom-code packs are refused at submit.
+    inprocess_fleet_enabled: bool = False
+    inprocess_max_workers: int = DEFAULT_INPROCESS_MAX_WORKERS
 
     @property
     def is_sqlite(self):
@@ -342,6 +355,9 @@ def load_settings(env=None):
             DEFAULT_RAWREPLAY_FETCH_TIMEOUT_S),
         k8s_namespace=_get(env, "K8S_NAMESPACE", DEFAULT_K8S_NAMESPACE)
         or DEFAULT_K8S_NAMESPACE,
+        inprocess_fleet_enabled=_get_bool(env, "STOKER_INPROCESS_FLEET", False),
+        inprocess_max_workers=max(1, _get_int(
+            env, "STOKER_INPROCESS_MAX_WORKERS", DEFAULT_INPROCESS_MAX_WORKERS)),
     )
 
 
