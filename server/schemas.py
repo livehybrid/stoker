@@ -290,6 +290,27 @@ class PackPreviewRun(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
+# Fleets (deployment targets a spec's ``fleet`` name resolves against)
+# --------------------------------------------------------------------------- #
+
+class FleetOut(BaseModel):
+    """A registered fleet, for the spec wizard's fleet picker.
+
+    ``config`` is a REDACTED view of ``fleets.config_json``: only a small
+    allowlist of addressing keys (namespace, kube context, Portainer endpoint,
+    ...) is exposed, never credential material (the EKS fleet design stores
+    encrypted access keys in ``config_json``, which must not leave the server,
+    even as ciphertext).
+    """
+
+    id: int
+    name: str
+    driver: str
+    config: Optional[Dict[str, Any]] = None
+    created_at: datetime.datetime
+
+
+# --------------------------------------------------------------------------- #
 # Specs (Appendix A JobSpec)
 # --------------------------------------------------------------------------- #
 

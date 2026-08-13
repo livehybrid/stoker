@@ -29,10 +29,10 @@ from sqlalchemy.orm import Session
 
 from .. import bundles, crypto, gitsync, lifecycle, preview
 from ..db import get_db
-from ..drivers import get_driver
 from ..drivers.base import DriverError
 from ..engines import ceilings
 from ..models import (
+    Fleet,
     MetricSample,
     Pack,
     Repo,
@@ -46,6 +46,7 @@ from ..models import (
 from ..schemas import (
     BackfillEstimate,
     BackfillEstimateRequest,
+    FleetOut,
     MetricSampleOut,
     MetricsOut,
     PackCreate,
@@ -520,6 +521,39 @@ def preview_run_pack(
 
 
 # --------------------------------------------------------------------------- #
+# Fleets
+# --------------------------------------------------------------------------- #
+
+# The only config_json keys a GET may expose: addressing, never credentials.
+# The EKS fleet design stores (Fernet-encrypted) access keys in config_json;
+# even ciphertext stays server-side, so this is an allowlist, not a denylist.
+_FLEET_CONFIG_PUBLIC_KEYS = (
+    "namespace", "kube_context", "context", "in_cluster",
+    "portainer_endpoint", "portainer_host", "verify_tls",
+)
+
+
+@router.get("/fleets", response_model=List[FleetOut])
+def list_fleets(db: Session = Depends(get_db)):
+    # type: (...) -> Any
+    """List registered fleets (the names a spec's ``fleet`` field resolves to).
+
+    The UI feeds its fleet picker from this, so the choices always match what
+    the control plane can actually launch on. ``config`` is redacted to the
+    addressing allowlist.
+    """
+    fleets = db.execute(select(Fleet).order_by(Fleet.id)).scalars().all()
+    out = []
+    for fleet in fleets:
+        cfg = {k: v for k, v in (fleet.config_json or {}).items()
+               if k in _FLEET_CONFIG_PUBLIC_KEYS and v is not None}
+        out.append(FleetOut(
+            id=fleet.id, name=fleet.name, driver=fleet.driver,
+            config=cfg or None, created_at=fleet.created_at))
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Specs
 # --------------------------------------------------------------------------- #
 
@@ -821,7 +855,18 @@ def run_spec(spec_id: int, body: RunLaunch, request: Request, db: Session = Depe
                     "resolution_s": body.backfill_resolution_s,
                     "cap_eps": body.backfill_cap_eps}
 
-    driver = get_driver(spec.fleet)
+    # Resolve the spec's fleet NAME through the fleets table (falling back to a
+    # cache-registered or bare driver name), so named fleets ("swarm-local",
+    # "k8s-local", "eks") launch with their configured driver. An unresolvable
+    # name is the operator's error -> 422 with the fleets that do exist.
+    try:
+        driver = lifecycle.resolve_fleet_driver(db, spec.fleet)
+    except DriverError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "unknown_fleet", "fleet": spec.fleet,
+                    "detail": str(exc)},
+        )
     try:
         run = lifecycle.provision_run(
             db, spec, driver, overrides=body.overrides,
@@ -1542,7 +1587,7 @@ def _resolve_driver_quiet(db, run):
     if not fleet_name:
         return None
     try:
-        return get_driver(fleet_name)
+        return lifecycle.resolve_fleet_driver(db, fleet_name)
     except DriverError as exc:
         log.info("driver for fleet %s unavailable: %s", fleet_name, exc)
         return None

@@ -29,8 +29,12 @@ Design ground truth (AIOS ``DESIGN.md`` sections 5 + 11 "AWS"):
 * ``logs``    = read pod logs (whole Job when ``slot`` is None, else the pod whose
   completion index matches ``slot``), tailed.
 
-One driver serves k3s (local) and EKS (AWS) via different kubeconfig contexts;
-the API objects (``BatchV1Api`` / ``CoreV1Api``) are injectable so the request
+One driver serves k3s (local) and EKS (AWS) via different kubeconfig contexts,
+and a control plane running **inside** a cluster (an EKS/k3s pod) via the pod's
+service account: auth resolution tries the fleet's explicit choice first
+(``in_cluster: true`` / ``kube_context``), then auto-detects — kubeconfig when
+one exists, else the in-cluster service account. The API objects
+(``BatchV1Api`` / ``CoreV1Api``) are injectable so the request
 shapes are unit-tested against a mock with no real cluster. A genuine 404 (Job
 gone) is distinct from a transient failure (timeout / 5xx): callers must not
 coerce a hiccup into "absent". No secret (HEC token or JWT) is ever logged, and
@@ -80,8 +84,8 @@ class K8sDriver(object):
     """Kubernetes-backed execution driver (one Indexed ``batch/v1`` Job per run)."""
 
     def __init__(self, namespace="stoker", batch_api=None, core_api=None,
-                 context=None):
-        # type: (str, Optional[Any], Optional[Any], Optional[str]) -> None
+                 context=None, in_cluster=None):
+        # type: (str, Optional[Any], Optional[Any], Optional[str], Optional[bool]) -> None
         """
         Args:
             namespace: the namespace all Jobs/Secrets/pods live in.
@@ -89,9 +93,14 @@ class K8sDriver(object):
             core_api: a ``kubernetes.client.CoreV1Api`` (injected for tests).
             context: kubeconfig context name (k3s vs EKS); used only when the
                 driver builds its own clients (``from_fleet_config``).
+            in_cluster: True forces the pod service-account config (control
+                plane running inside the cluster), False forces kubeconfig,
+                None (default) auto-detects: kubeconfig if loadable, else the
+                in-cluster service account.
         """
         self._namespace = namespace or "stoker"
         self._context = context
+        self._in_cluster = in_cluster
         # Injectable for unit tests (mocks); built lazily from kubeconfig when
         # absent so a long-lived driver picks up the configured context.
         self._batch = batch_api
@@ -100,30 +109,38 @@ class K8sDriver(object):
     @classmethod
     def from_fleet_config(cls, config):
         # type: (Optional[Dict[str, Any]]) -> "K8sDriver"
-        """Build from a ``fleets.config_json`` (kubeconfig context + namespace).
+        """Build from a ``fleets.config_json`` (kube auth choice + namespace).
 
-        The kubeconfig context selects k3s (local) or EKS (AWS); the namespace
-        defaults to ``stoker``. The kubernetes client is imported lazily so the
-        control plane never pulls it in unless a k8s fleet is actually used.
+        ``kube_context`` selects a kubeconfig context (k3s local vs EKS driven
+        from outside the cluster); ``in_cluster: true`` selects the pod service
+        account (control plane deployed inside the cluster); with neither the
+        driver auto-detects at first use. The namespace defaults to the
+        ``K8S_NAMESPACE`` setting. The kubernetes client is imported lazily so
+        the control plane never pulls it in unless a k8s fleet is actually used.
         """
         config = config or {}
-        get_settings()  # kept for parity with SwarmDriver (config precedence)
+        settings = get_settings()
         context = config.get("kube_context") or config.get("context")
-        namespace = config.get("namespace") or "stoker"
-        return cls(namespace=namespace, context=context)
+        namespace = config.get("namespace") or settings.k8s_namespace
+        in_cluster = config.get("in_cluster")
+        if in_cluster is not None:
+            in_cluster = bool(in_cluster)
+        return cls(namespace=namespace, context=context, in_cluster=in_cluster)
 
     # -- lazy client construction (never hit in unit tests) --------------- #
 
     def _batch_api(self):
         # type: () -> Any
         if self._batch is None:
-            self._batch = _build_client("BatchV1Api", self._context)
+            self._batch = _build_client("BatchV1Api", self._context,
+                                        self._in_cluster)
         return self._batch
 
     def _core_api(self):
         # type: () -> Any
         if self._core is None:
-            self._core = _build_client("CoreV1Api", self._context)
+            self._core = _build_client("CoreV1Api", self._context,
+                                       self._in_cluster)
         return self._core
 
     # -- ExecutionDriver -------------------------------------------------- #
@@ -534,13 +551,69 @@ class K8sDriver(object):
 # Module-level helpers (pure; unit-tested via the mocked-client path).
 # --------------------------------------------------------------------------- #
 
-def _build_client(api_name, context):
-    # type: (str, Optional[str]) -> Any
-    """Construct a real kubernetes API client for ``context`` (lazy import)."""
+def _build_client(api_name, context, in_cluster=None):
+    # type: (str, Optional[str], Optional[bool]) -> Any
+    """Construct a real kubernetes API client (lazy import).
+
+    Auth comes from :func:`_load_kube_auth`, so one driver serves a host with a
+    kubeconfig (k3s, an operator laptop, EKS driven from outside) and a control
+    plane running inside the cluster (an EKS/k3s pod with a service account)
+    without per-deployment code.
+    """
     from kubernetes import client, config  # imported only on the real path
 
-    config.load_kube_config(context=context)
+    _load_kube_auth(config, context, in_cluster)
     return getattr(client, api_name)()
+
+
+def _load_kube_auth(config, context, in_cluster):
+    # type: (Any, Optional[str], Optional[bool]) -> None
+    """Load kubernetes client auth per the fleet's configuration.
+
+    Resolution order:
+
+    * ``in_cluster`` True  -> the pod service account, only.
+    * ``context`` set (or ``in_cluster`` False) -> kubeconfig, only.
+    * neither (auto) -> kubeconfig when loadable, else the pod service account.
+
+    Every failure is raised as :class:`DriverError` (never a raw kubernetes
+    ``ConfigException``), so a misconfigured fleet surfaces as a clean
+    provision/status failure whose message says what was tried and how to fix
+    it, instead of a bare "Invalid kube-config file" traceback.
+    """
+    if in_cluster:
+        try:
+            config.load_incluster_config()
+            return
+        except Exception as exc:
+            raise DriverError(
+                "k8s auth: fleet config sets in_cluster=true but the pod "
+                "service-account config is unavailable (%s)" % exc)
+    if context is not None or in_cluster is False:
+        try:
+            config.load_kube_config(context=context)
+            return
+        except Exception as exc:
+            raise DriverError(
+                "k8s auth: could not load kubeconfig%s (%s)"
+                % (" context %r" % context if context else "", exc))
+    # Auto-detect: kubeconfig first (host/k3s deployments keep working), then
+    # the pod service account (control plane running inside the cluster).
+    try:
+        config.load_kube_config()
+        return
+    except Exception as kube_exc:
+        try:
+            config.load_incluster_config()
+        except Exception as pod_exc:
+            raise DriverError(
+                "k8s auth: no kubeconfig (%s) and no in-cluster service "
+                "account (%s); mount a kubeconfig or set the fleet config "
+                "kube_context, or deploy the control plane in-cluster with a "
+                "service account ({\"in_cluster\": true} forces that path)"
+                % (kube_exc, pod_exc))
+        log.info("k8s auth: no kubeconfig (%s); using the in-cluster "
+                 "service account", kube_exc)
 
 
 def _run_label(ref):

@@ -68,6 +68,10 @@ DEFAULT_RAWREPLAY_FETCH_TIMEOUT_S = 120.0
 # management; validated here so a bad STOKER_PROXY_DEFAULT_ROLE fails at boot.
 VALID_ROLES = ("viewer", "operator", "admin")
 
+# Namespace the seeded ``k8s-local`` fleet runs Jobs in (env K8S_NAMESPACE).
+# Matches the EKS Terraform module's default namespace.
+DEFAULT_K8S_NAMESPACE = "stoker"
+
 
 class ConfigError(Exception):
     """Raised when an environment value cannot be parsed."""
@@ -138,6 +142,11 @@ class Settings:
     # would exceed this is refused. Fetch timeout in seconds.
     rawreplay_max_dataset_bytes: int = DEFAULT_RAWREPLAY_MAX_DATASET_BYTES
     rawreplay_fetch_timeout_s: float = DEFAULT_RAWREPLAY_FETCH_TIMEOUT_S
+
+    # --- Kubernetes fleets --------------------------------------------------- #
+    # Namespace the seeded ``k8s-local`` fleet runs worker Jobs in (env
+    # K8S_NAMESPACE); per-fleet ``config_json.namespace`` still overrides it.
+    k8s_namespace: str = DEFAULT_K8S_NAMESPACE
 
     @property
     def is_sqlite(self):
@@ -331,6 +340,8 @@ def load_settings(env=None):
         rawreplay_fetch_timeout_s=_get_float(
             env, "RAWREPLAY_FETCH_TIMEOUT_S",
             DEFAULT_RAWREPLAY_FETCH_TIMEOUT_S),
+        k8s_namespace=_get(env, "K8S_NAMESPACE", DEFAULT_K8S_NAMESPACE)
+        or DEFAULT_K8S_NAMESPACE,
     )
 
 
