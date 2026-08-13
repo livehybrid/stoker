@@ -196,6 +196,51 @@ at exec time — never written to disk by Terraform), mints a short-lived token,
 and the token maps to the `stoker:control-plane` RBAC group via the access
 entry. No long-lived kubeconfig token, no aws-auth ConfigMap.
 
+## Running the control plane inside the cluster (in-pod)
+
+The exec-auth kubeconfig above is for the module's original topology (control
+plane on-prem, driving EKS from outside). Stoker deployed **as a pod in the
+cluster** needs none of it: the `K8sDriver` auto-detects its auth — when no
+kubeconfig is present it uses the **pod's service account**
+(`in_cluster`), so the seeded `k8s-local` fleet works with zero fleet config.
+
+To deploy the control plane in-cluster:
+
+1. **Namespace + RBAC** already exist (`rbac.tf`): the `stoker` namespace, the
+   least-privilege `stoker-driver` Role (Jobs/Pods/Secrets in this namespace
+   only) and the `stoker-driver` ServiceAccount bound to it. For a non-Terraform
+   cluster, apply the equivalent manifests by hand (namespace, ServiceAccount,
+   Role, RoleBinding with the rules in `rbac.tf`).
+2. **Deploy the stoker server pod** in that namespace with:
+
+   ```yaml
+   spec:
+     serviceAccountName: stoker-driver
+     # The SA declares automountServiceAccountToken: false (worker pods must
+     # never carry a token); the CONTROL-PLANE pod is the exception and must
+     # override it at the pod level so in-cluster auth can find its token.
+     automountServiceAccountToken: true
+     containers:
+       - name: stoker
+         image: ghcr.io/livehybrid/stoker:latest
+         env:
+           - name: K8S_NAMESPACE      # namespace worker Jobs run in
+             value: stoker            # (default; set if you renamed it)
+           - name: PUBLIC_BASE_URL    # workers fetch bundles + heartbeat here
+             value: http://stoker.stoker.svc.cluster.local:8080
+   ```
+
+3. **Pick the fleet**: launch specs on the seeded **`k8s-local`** fleet (the
+   UI's fleet picker lists it from `GET /api/fleets`). Its namespace comes from
+   `K8S_NAMESPACE`; a different target namespace or an explicit auth choice can
+   be set per fleet in `fleets.config_json` (`namespace`, `kube_context`,
+   `in_cluster: true`).
+
+Worker pods are unchanged: the driver launches them with
+`automountServiceAccountToken: false` and they never talk to the Kubernetes
+API — only outbound to the control plane (`PUBLIC_BASE_URL`) and the HEC
+target, which the egress-only NetworkPolicy in `rbac.tf` already allows.
+
 ## Known caveats (skeleton honesty)
 
 - **Unapplied**: no `terraform validate/plan` has run here. Expect to reconcile

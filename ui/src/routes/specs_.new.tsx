@@ -37,7 +37,10 @@ interface WizardSearch {
   pack?: number;
 }
 
-const FLEETS = ["swarm-local", "k3s-local", "eks"];
+// Fallback fleet names while GET /api/fleets is loading (or unreachable); the
+// live list from the server replaces this so the picker always matches what
+// the control plane can actually launch on.
+const FALLBACK_FLEETS = ["swarm-local", "k8s-local", "fake-local"];
 const ENGINES = ["eventgen"];
 const RATE_MODES: RateMode[] = ["eps", "per_day_gb", "count_interval"];
 
@@ -138,6 +141,10 @@ function JobWizard() {
     queryKey: ["wizard-targets"],
     queryFn: () => api.targets.list(),
   });
+  const fleetsQ = useQuery({
+    queryKey: ["wizard-fleets"],
+    queryFn: () => api.fleets.list(),
+  });
   const specQ = useQuery({
     queryKey: ["spec", loadId],
     queryFn: () => api.specs.get(loadId as number),
@@ -176,6 +183,17 @@ function JobWizard() {
     () => targetsQ.data?.find((t) => t.id === form.target_id),
     [targetsQ.data, form.target_id],
   );
+
+  // Fleet choices come from GET /api/fleets (what the control plane can
+  // actually launch on); the hardcoded list is only a loading/error fallback.
+  // The form's current fleet is always kept in the list so an edited spec
+  // referencing a since-removed fleet still displays (and re-saves) honestly.
+  const fleetOptions = useMemo(() => {
+    const names = fleetsQ.data?.length
+      ? fleetsQ.data.map((f) => f.name)
+      : FALLBACK_FLEETS;
+    return names.includes(form.fleet) ? names : [form.fleet, ...names];
+  }, [fleetsQ.data, form.fleet]);
 
   const isReplay = packLooksReplay(selectedPack);
   const isMetrics = packIsMetrics(selectedPack);
@@ -594,7 +612,7 @@ function JobWizard() {
                 value={form.fleet}
                 onChange={(e) => patch({ fleet: e.target.value })}
               >
-                {FLEETS.map((f) => (
+                {fleetOptions.map((f) => (
                   <option key={f} value={f}>
                     {f}
                   </option>

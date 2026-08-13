@@ -40,7 +40,7 @@ from sqlalchemy.orm import Session
 
 from . import crypto
 from .config import Settings, get_settings
-from .drivers.base import DriverRef, ExecutionDriver, RunSnapshot
+from .drivers.base import DriverError, DriverRef, ExecutionDriver, RunSnapshot
 from .models import (
     Bundle,
     Fleet,
@@ -2099,11 +2099,15 @@ def cmd_retarget(share):
 
 def seed_fleets(db, settings=None):
     # type: (Session, Optional[Settings]) -> None
-    """Seed the ``fake-local`` and ``swarm-local`` fleets if absent (first boot).
+    """Seed the ``fake-local``, ``swarm-local`` and ``k8s-local`` fleets if
+    absent (first boot).
 
     ``fake-local`` uses the in-process driver; ``swarm-local`` records the
-    Portainer endpoint id + host from config. Idempotent: an existing fleet of
-    the same name is left untouched.
+    Portainer endpoint id + host from config; ``k8s-local`` records the
+    ``K8S_NAMESPACE`` namespace and lets the K8sDriver auto-detect its auth
+    (kubeconfig on a host, the pod service account when the control plane runs
+    inside a cluster — e.g. an EKS pod). Idempotent: an existing fleet of the
+    same name is left untouched.
     """
     if settings is None:
         settings = get_settings()
@@ -2121,16 +2125,52 @@ def seed_fleets(db, settings=None):
             },
         ))
         log.info("seeded fleet swarm-local (endpoint %s)", settings.portainer_endpoint)
+    if "k8s-local" not in existing:
+        db.add(Fleet(
+            name="k8s-local",
+            driver="k8s",
+            config_json={"namespace": settings.k8s_namespace},
+        ))
+        log.info("seeded fleet k8s-local (namespace %s)", settings.k8s_namespace)
     db.commit()
+
+
+def resolve_fleet_driver(db, fleet_name):
+    # type: (Session, str) -> ExecutionDriver
+    """Resolve a spec's fleet NAME to its :class:`ExecutionDriver`.
+
+    The name is looked up in the ``fleets`` table first, so a registered fleet
+    ("swarm-local", "k8s-local", "eks", ...) builds the driver its row
+    configures. A name with no row still resolves when it is a cache-registered
+    name (tests bind fleet names to a shared FakeDriver) or a bare driver name
+    ("fake" | "swarm" | "k8s"); anything else raises :class:`DriverError`
+    listing the fleets that do exist, so a typo'd fleet fails with an
+    actionable message instead of "unknown fleet driver".
+    """
+    from .drivers import get_driver
+
+    fleet = db.execute(
+        select(Fleet).where(Fleet.name == fleet_name)).scalars().first()
+    if fleet is not None:
+        return get_driver(fleet)
+    try:
+        return get_driver(fleet_name)
+    except DriverError:
+        known = sorted(
+            f.name for f in db.execute(select(Fleet)).scalars().all())
+        raise DriverError(
+            "unknown fleet %r: not a registered fleet (registered: %s) and "
+            "not a bare driver name (swarm, k8s, fake)"
+            % (fleet_name, ", ".join(known) if known else "none"))
 
 
 def get_run_driver(db, run, drivers):
     # type: (Session, Run, Mapping[str, ExecutionDriver]) -> Optional[ExecutionDriver]
     """Resolve the driver for a run from a fleet-name -> driver mapping.
 
-    Looks up the run's spec's fleet name; falls back to constructing one via the
-    driver factory when the mapping lacks it (so the supervisor can act on a run
-    whose fleet was not pre-seeded into the map).
+    Looks up the run's spec's fleet name; falls back to constructing one via
+    :func:`resolve_fleet_driver` when the mapping lacks it (so the supervisor
+    can act on a run whose fleet was not pre-seeded into the map).
     """
     fleet_name = None
     spec = getattr(run, "spec", None)
@@ -2142,11 +2182,10 @@ def get_run_driver(db, run, drivers):
     if fleet_name and fleet_name in drivers:
         return drivers[fleet_name]
     if fleet_name:
-        from .drivers import get_driver
-
-        fleet = db.execute(select(Fleet).where(Fleet.name == fleet_name)).scalars().first()
-        if fleet is not None:
-            return get_driver(fleet)
+        try:
+            return resolve_fleet_driver(db, fleet_name)
+        except DriverError:
+            return None
     return None
 
 
@@ -2205,5 +2244,5 @@ __all__ = [
     "build_run_snapshot", "counters_from_payload", "build_metric_sample",
     "fold_totals", "maybe_refresh_jwt", "cmd_continue", "cmd_superseded",
     "cmd_drain", "cmd_release", "cmd_retarget", "seed_fleets", "get_run_driver",
-    "driver_ref_of",
+    "resolve_fleet_driver", "driver_ref_of",
 ]

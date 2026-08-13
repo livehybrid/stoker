@@ -223,6 +223,21 @@ export interface MetricPreviewResponse {
 }
 
 // --------------------------------------------------------------------------- //
+// Fleets
+// --------------------------------------------------------------------------- //
+
+// A registered fleet (deployment target). `config` is the server's redacted
+// addressing view (namespace / kube context / Portainer endpoint), never
+// credential material.
+export interface FleetOut {
+  id: number;
+  name: string;
+  driver: string; // "swarm" | "k8s" | "fake"
+  config?: Record<string, unknown> | null;
+  created_at: string;
+}
+
+// --------------------------------------------------------------------------- //
 // Specs
 // --------------------------------------------------------------------------- //
 

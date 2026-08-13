@@ -42,7 +42,7 @@ from server.drivers.base import (
     NotFound,
     RunSnapshot,
 )
-from server.drivers.k8s import K8sDriver, job_name, secret_name
+from server.drivers.k8s import K8sDriver, _load_kube_auth, job_name, secret_name
 
 
 # --------------------------------------------------------------------------- #
@@ -936,3 +936,121 @@ def test_k8s_no_secret_no_cleanup_when_job_create_fails():
 
     core.create_namespaced_secret.assert_not_called()
     core.delete_namespaced_secret.assert_not_called()
+
+
+# =========================================================================== #
+# 9. Auth resolution: kubeconfig vs the in-cluster service account (EKS pod).
+# =========================================================================== #
+
+def _kube_config_mock(kube_ok=True, incluster_ok=True):
+    # type: (bool, bool) -> Any
+    """A stand-in for the ``kubernetes.config`` module.
+
+    ``kube_ok`` / ``incluster_ok`` False make the corresponding loader raise
+    the message the real client produces, so the driver's error mapping is
+    exercised against realistic text without importing the client.
+    """
+    cfg = mock.Mock(name="kubernetes.config")
+    if not kube_ok:
+        cfg.load_kube_config.side_effect = RuntimeError(
+            "Invalid kube-config file. No configuration found.")
+    if not incluster_ok:
+        cfg.load_incluster_config.side_effect = RuntimeError(
+            "Service host/port is not set.")
+    return cfg
+
+
+def test_k8s_auth_in_cluster_true_uses_service_account_only():
+    cfg = _kube_config_mock()
+    _load_kube_auth(cfg, context=None, in_cluster=True)
+    cfg.load_incluster_config.assert_called_once_with()
+    cfg.load_kube_config.assert_not_called()
+
+
+def test_k8s_auth_in_cluster_true_failure_is_actionable_driver_error():
+    cfg = _kube_config_mock(incluster_ok=False)
+    with pytest.raises(DriverError) as excinfo:
+        _load_kube_auth(cfg, context=None, in_cluster=True)
+    assert "in_cluster=true" in str(excinfo.value)
+
+
+def test_k8s_auth_explicit_context_uses_kubeconfig_only():
+    cfg = _kube_config_mock()
+    _load_kube_auth(cfg, context="eks-eu-west-2", in_cluster=None)
+    cfg.load_kube_config.assert_called_once_with(context="eks-eu-west-2")
+    cfg.load_incluster_config.assert_not_called()
+
+
+def test_k8s_auth_explicit_context_failure_names_the_context():
+    cfg = _kube_config_mock(kube_ok=False)
+    with pytest.raises(DriverError) as excinfo:
+        _load_kube_auth(cfg, context="eks-eu-west-2", in_cluster=None)
+    assert "eks-eu-west-2" in str(excinfo.value)
+    cfg.load_incluster_config.assert_not_called()
+
+
+def test_k8s_auth_in_cluster_false_forces_kubeconfig():
+    # An explicit opt-out of in-cluster auth must never fall back to it.
+    cfg = _kube_config_mock(kube_ok=False)
+    with pytest.raises(DriverError):
+        _load_kube_auth(cfg, context=None, in_cluster=False)
+    cfg.load_incluster_config.assert_not_called()
+
+
+def test_k8s_auth_auto_prefers_kubeconfig():
+    cfg = _kube_config_mock()
+    _load_kube_auth(cfg, context=None, in_cluster=None)
+    cfg.load_kube_config.assert_called_once_with()
+    cfg.load_incluster_config.assert_not_called()
+
+
+def test_k8s_auth_auto_falls_back_to_in_cluster():
+    # The EKS-pod case: no kubeconfig in the container -> the pod service
+    # account is used instead of failing with "Invalid kube-config file".
+    cfg = _kube_config_mock(kube_ok=False)
+    _load_kube_auth(cfg, context=None, in_cluster=None)
+    cfg.load_kube_config.assert_called_once_with()
+    cfg.load_incluster_config.assert_called_once_with()
+
+
+def test_k8s_auth_auto_both_unavailable_raises_actionable_driver_error():
+    cfg = _kube_config_mock(kube_ok=False, incluster_ok=False)
+    with pytest.raises(DriverError) as excinfo:
+        _load_kube_auth(cfg, context=None, in_cluster=None)
+    msg = str(excinfo.value)
+    # The message must say what was tried and how to fix it, not just re-raise
+    # the raw "Invalid kube-config file" the operator cannot act on.
+    assert "Invalid kube-config file" in msg
+    assert "service account" in msg
+    assert "in_cluster" in msg
+
+
+def test_from_fleet_config_wires_auth_choice_into_client_build(settings):
+    driver = K8sDriver.from_fleet_config(
+        {"namespace": "loadns", "kube_context": "eks-ctx", "in_cluster": False})
+    with mock.patch("server.drivers.k8s._build_client") as build:
+        driver._batch_api()
+        driver._core_api()
+    assert build.call_args_list == [
+        mock.call("BatchV1Api", "eks-ctx", False),
+        mock.call("CoreV1Api", "eks-ctx", False),
+    ]
+
+
+def test_from_fleet_config_in_cluster_flag_reaches_the_builder(settings):
+    driver = K8sDriver.from_fleet_config({"in_cluster": True})
+    with mock.patch("server.drivers.k8s._build_client") as build:
+        driver._batch_api()
+    assert build.call_args == mock.call("BatchV1Api", None, True)
+
+
+def test_from_fleet_config_namespace_defaults_from_settings(settings):
+    import dataclasses
+
+    from server import config as config_mod
+
+    config_mod.set_settings(dataclasses.replace(settings, k8s_namespace="podns"))
+    assert K8sDriver.from_fleet_config({})._namespace == "podns"
+    # An explicit per-fleet namespace still wins over the process setting.
+    assert K8sDriver.from_fleet_config(
+        {"namespace": "explicit"})._namespace == "explicit"

@@ -3,7 +3,8 @@
 ``create_app()`` wires the whole control plane:
 
 * initialises the DB (engine + ``create_all``; Alembic baseline arrives later),
-* seeds the ``fake-local`` and ``swarm-local`` fleets on first boot,
+* seeds the ``fake-local``, ``swarm-local`` and ``k8s-local`` fleets on first
+  boot,
 * registers the agent and operator routers by importing their ``router``
   objects (feature builders never edit this file),
 * exposes ``/healthz``,
@@ -67,7 +68,10 @@ def _build_drivers_map():
     ``fake-local`` is always available (in-process). ``swarm-local`` is included
     only when Portainer is configured; otherwise it is skipped so the supervisor
     never tries to reach a Portainer that is not set up (a swarm run would fail
-    loudly at provision time instead).
+    loudly at provision time instead). ``k8s-local`` (and any other k8s fleet)
+    is always included: building a K8sDriver touches no cluster (its client is
+    lazy), and its auth — kubeconfig or the pod service account — is resolved on
+    first use.
     """
     from sqlalchemy import select
 

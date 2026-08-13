@@ -14,6 +14,7 @@ import type {
   AuthStatus,
   BackfillEstimate,
   BackfillEstimateRequest,
+  FleetOut,
   LoginRequest,
   MetricPackCreate,
   MetricPackDetail,
@@ -201,6 +202,14 @@ export const targets = {
 };
 
 // --------------------------------------------------------------------------- //
+// Fleets
+// --------------------------------------------------------------------------- //
+
+export const fleets = {
+  list: () => request<FleetOut[]>("GET", "/fleets"),
+};
+
+// --------------------------------------------------------------------------- //
 // Repos
 // --------------------------------------------------------------------------- //
 
@@ -327,6 +336,7 @@ export const users = {
 // Grouped export for `import { api } from "@/lib/api"` ergonomics.
 export const api = {
   targets,
+  fleets,
   repos,
   packs,
   metricPacks,

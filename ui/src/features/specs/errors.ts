@@ -11,6 +11,7 @@
 //   409 {"error":"target_unhealthy","health_state":..,"detail":..}
 //   409 {"error":"target_cap_exceeded","headroom_gb_day":N,"detail":..}
 //   422 {"error":"pack_lint_failed","errors":[..]}
+//   422 {"error":"unknown_fleet","fleet":..,"detail":..}
 //   502 {"error":"provision_failed","detail":..}
 // Plus plain-string details for the simpler 404/422 validation errors.
 
@@ -22,6 +23,7 @@ export type RunErrorKind =
   | "target_unhealthy"
   | "target_cap_exceeded"
   | "pack_lint_failed"
+  | "unknown_fleet"
   | "provision_failed"
   | "generic";
 
@@ -101,6 +103,13 @@ export function parseApiError(err: unknown): ParsedApiError {
       const message =
         "The pack no longer lints clean; fix the pack before launching.";
       return { kind: "pack_lint_failed", message, lintErrors, status };
+    }
+    case "unknown_fleet": {
+      const fleet = detail ? str(detail.fleet) : undefined;
+      const message =
+        inner ??
+        `The spec's fleet${fleet ? ` "${fleet}"` : ""} is not a registered fleet; pick one from the fleet list.`;
+      return { kind: "unknown_fleet", message, status };
     }
     case "provision_failed": {
       const message = inner
