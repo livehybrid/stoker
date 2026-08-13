@@ -27,6 +27,7 @@ from .sync import (
     clone_or_fetch,
     custom_code_errors,
     index_packs,
+    local_pack_metadata,
     resolve_pack_dir,
     sync_repo,
 )
@@ -36,6 +37,7 @@ __all__ = [
     "clone_or_fetch",
     "custom_code_errors",
     "index_packs",
+    "local_pack_metadata",
     "resolve_pack_dir",
     "sync_repo",
 ]

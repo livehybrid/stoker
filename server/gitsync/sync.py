@@ -577,6 +577,24 @@ def _pack_relpath(pack):
     return ""
 
 
+def local_pack_metadata(pack_dir):
+    # type: (str) -> Dict[str, Any]
+    """Name/description/tags for a pack directory, for non-repo registration.
+
+    Public: the boot-time builtin-pack seeding (``lifecycle.seed_builtin_packs``)
+    uses this so a bundled pack registers under the same name a git-synced copy
+    of it would get (its ``pack.yaml`` ``name``), not its directory basename —
+    e.g. ``packs/apigw`` is the pack ``api-gateway``. Falls back to the
+    basename when the pack declares no name.
+    """
+    name = _yaml_scalar(pack_dir, "name")
+    return {
+        "name": str(name) if name else os.path.basename(os.path.normpath(pack_dir)),
+        "description": _pack_description(pack_dir),
+        "tags": _pack_tags(pack_dir),
+    }
+
+
 def _pack_description(pack_dir):
     # type: (str) -> Optional[str]
     val = _yaml_scalar(pack_dir, "description")
@@ -1025,6 +1043,7 @@ __all__ = [
     "clone_or_fetch",
     "custom_code_errors",
     "index_packs",
+    "local_pack_metadata",
     "resolve_pack_dir",
     "sync_repo",
 ]

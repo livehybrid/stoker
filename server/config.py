@@ -161,6 +161,13 @@ class Settings:
     inprocess_fleet_enabled: bool = False
     inprocess_max_workers: int = DEFAULT_INPROCESS_MAX_WORKERS
 
+    # --- Builtin packs ------------------------------------------------------- #
+    # A directory of pack roots registered (and re-linted) at every boot, so the
+    # image's bundled starter packs appear in the UI with no sideloading (env
+    # STOKER_BUILTIN_PACKS_DIR; the server image sets /app/packs). None/empty =
+    # no builtin seeding.
+    builtin_packs_dir: Optional[str] = None
+
     @property
     def is_sqlite(self):
         # type: () -> bool
@@ -358,6 +365,7 @@ def load_settings(env=None):
         inprocess_fleet_enabled=_get_bool(env, "STOKER_INPROCESS_FLEET", False),
         inprocess_max_workers=max(1, _get_int(
             env, "STOKER_INPROCESS_MAX_WORKERS", DEFAULT_INPROCESS_MAX_WORKERS)),
+        builtin_packs_dir=_get(env, "STOKER_BUILTIN_PACKS_DIR"),
     )
 
 

@@ -4,7 +4,8 @@
 
 * initialises the DB (engine + ``create_all``; Alembic baseline arrives later),
 * seeds the ``fake-local``, ``swarm-local`` and ``k8s-local`` fleets on first
-  boot (plus ``inprocess-local`` when ``STOKER_INPROCESS_FLEET`` is set),
+  boot (plus ``inprocess-local`` when ``STOKER_INPROCESS_FLEET`` is set), and
+  registers the image's bundled starter packs (``STOKER_BUILTIN_PACKS_DIR``),
 * registers the agent and operator routers by importing their ``router``
   objects (feature builders never edit this file),
 * exposes ``/healthz``,
@@ -411,10 +412,18 @@ def create_app():
     """Build and return the configured FastAPI application."""
     settings = get_settings()
 
-    # Schema + fleet seeding before the app serves traffic.
+    # Schema + fleet/builtin-pack seeding before the app serves traffic.
     init_db()
     with SessionLocal() as db:
         lifecycle.seed_fleets(db, settings=settings)
+        try:
+            # Bundled starter packs (STOKER_BUILTIN_PACKS_DIR, /app/packs in
+            # the image): registered/re-linted every boot so the UI has packs
+            # with no sideloading. Best-effort — pack trouble is recorded per
+            # pack and must never stop the control plane from serving.
+            lifecycle.seed_builtin_packs(db, settings=settings)
+        except Exception:  # pragma: no cover - defensive
+            log.exception("builtin pack seeding failed; continuing boot")
 
     app = FastAPI(
         title="Stoker Control Plane",
