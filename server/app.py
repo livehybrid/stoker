@@ -4,7 +4,7 @@
 
 * initialises the DB (engine + ``create_all``; Alembic baseline arrives later),
 * seeds the ``fake-local``, ``swarm-local`` and ``k8s-local`` fleets on first
-  boot,
+  boot (plus ``inprocess-local`` when ``STOKER_INPROCESS_FLEET`` is set),
 * registers the agent and operator routers by importing their ``router``
   objects (feature builders never edit this file),
 * exposes ``/healthz``,

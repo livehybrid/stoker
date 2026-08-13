@@ -2132,6 +2132,14 @@ def seed_fleets(db, settings=None):
             config_json={"namespace": settings.k8s_namespace},
         ))
         log.info("seeded fleet k8s-local (namespace %s)", settings.k8s_namespace)
+    # The in-process fleet (workers as subprocesses of the control plane) is
+    # opt-in: seeded only under STOKER_INPROCESS_FLEET so the picker stays
+    # clean for deployments that never use it. If the flag is later removed,
+    # any remaining row refuses to build its driver (422 fleet_unavailable).
+    if settings.inprocess_fleet_enabled and "inprocess-local" not in existing:
+        db.add(Fleet(name="inprocess-local", driver="inprocess", config_json={}))
+        log.info("seeded fleet inprocess-local (max %d workers)",
+                 settings.inprocess_max_workers)
     db.commit()
 
 
@@ -2143,9 +2151,9 @@ def resolve_fleet_driver(db, fleet_name):
     ("swarm-local", "k8s-local", "eks", ...) builds the driver its row
     configures. A name with no row still resolves when it is a cache-registered
     name (tests bind fleet names to a shared FakeDriver) or a bare driver name
-    ("fake" | "swarm" | "k8s"); anything else raises :class:`DriverError`
-    listing the fleets that do exist, so a typo'd fleet fails with an
-    actionable message instead of "unknown fleet driver".
+    ("fake" | "swarm" | "k8s" | "inprocess"); anything else raises
+    :class:`DriverError` listing the fleets that do exist, so a typo'd fleet
+    fails with an actionable message instead of "unknown fleet driver".
     """
     from .drivers import get_driver
 
@@ -2155,13 +2163,13 @@ def resolve_fleet_driver(db, fleet_name):
         return get_driver(fleet)
     try:
         return get_driver(fleet_name)
-    except DriverError:
+    except DriverError as exc:
         known = sorted(
             f.name for f in db.execute(select(Fleet)).scalars().all())
         raise DriverError(
             "unknown fleet %r: not a registered fleet (registered: %s) and "
-            "not a bare driver name (swarm, k8s, fake)"
-            % (fleet_name, ", ".join(known) if known else "none"))
+            "not a usable bare driver name (%s)"
+            % (fleet_name, ", ".join(known) if known else "none", exc))
 
 
 def get_run_driver(db, run, drivers):
