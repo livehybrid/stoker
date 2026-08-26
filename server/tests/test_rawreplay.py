@@ -642,6 +642,43 @@ def test_run_snapshot_omits_engine_for_eventgen(db_session, settings, make_pack)
     assert "STOKER_ENGINE" not in snap.env
 
 
+def test_run_snapshot_projects_verify_tls_opt_out(db_session, settings, make_pack):
+    target = _helpers.make_target(db_session, settings=settings, verify_tls=False)
+    pack = _helpers.make_pack(db_session, make_pack())
+    spec = _helpers.make_spec(db_session, pack, target, engine="eventgen",
+                              rate_mode="eps", rate_value=500.0, workers=1)
+    from server.models import Run
+    from server import crypto
+
+    run = Run(spec_id=spec.id, jwt_kid=crypto.new_kid(),
+              spec_snapshot_json=lifecycle.build_spec_snapshot(spec, target))
+    db_session.add(run)
+    db_session.flush()
+
+    snap = lifecycle.build_run_snapshot(run, spec, target, "tok", settings=settings)
+    # The worker reads only the env var (not the slice's target block), so a
+    # verify_tls=False target MUST project the opt-out or the worker verifies.
+    assert snap.env["STOKER_HEC_VERIFY_TLS"] == "0"
+
+
+def test_run_snapshot_omits_verify_tls_for_verifying_target(db_session, settings, make_pack):
+    target = _helpers.make_target(db_session, settings=settings, verify_tls=True)
+    pack = _helpers.make_pack(db_session, make_pack())
+    spec = _helpers.make_spec(db_session, pack, target, engine="eventgen",
+                              rate_mode="eps", rate_value=500.0, workers=1)
+    from server.models import Run
+    from server import crypto
+
+    run = Run(spec_id=spec.id, jwt_kid=crypto.new_kid(),
+              spec_snapshot_json=lifecycle.build_spec_snapshot(spec, target))
+    db_session.add(run)
+    db_session.flush()
+
+    snap = lifecycle.build_run_snapshot(run, spec, target, "tok", settings=settings)
+    # Verify-on is the worker default: the env stays byte-for-byte unchanged.
+    assert "STOKER_HEC_VERIFY_TLS" not in snap.env
+
+
 def test_run_spec_rejects_multi_worker_rawreplay(client, db_session, settings, fake_driver, tmp_path):
     pack_dir = _write_rawreplay_pack(str(tmp_path))
     target = _helpers.make_target(db_session, settings=settings)

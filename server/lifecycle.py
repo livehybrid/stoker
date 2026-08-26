@@ -1949,10 +1949,11 @@ def build_run_snapshot(run, spec, target, hec_token, settings=None, workers=None
 
     Projects the worker environment: ``STOKER_RUN_ID``, ``STOKER_CONTROL_URL``
     (= ``PUBLIC_BASE_URL``), ``STOKER_RUN_JWT``, ``STOKER_TOTAL_WORKERS``, the HEC
-    token as ``STOKER_HEC_TOKEN`` (the driver, not the slice, carries the secret)
-    and, for a non-default engine (rawreplay/Piston), ``STOKER_ENGINE`` so the
-    worker launches the right engine. ``labels`` always includes
-    ``stoker.run=<id>``.
+    token as ``STOKER_HEC_TOKEN`` (the driver, not the slice, carries the secret),
+    ``STOKER_HEC_VERIFY_TLS=0`` when the target opts out of TLS verification
+    (the worker reads only the env var, defaulting to verify) and, for a
+    non-default engine (rawreplay/Piston), ``STOKER_ENGINE`` so the worker
+    launches the right engine. ``labels`` always includes ``stoker.run=<id>``.
 
     ``workers`` overrides the projected ``STOKER_TOTAL_WORKERS`` (the provisioner
     passes the single-worker-clamped count for a replay run); it defaults to the
@@ -1986,6 +1987,14 @@ def build_run_snapshot(run, spec, target, hec_token, settings=None, workers=None
         env["STOKER_ENGINE"] = engine
     if hec_token:
         env["STOKER_HEC_TOKEN"] = hec_token
+    # Project the target's TLS-verify choice. The worker defaults to verify ON
+    # (contract: STOKER_HEC_VERIFY_TLS unset == 1), so only a verify_tls=False
+    # target needs the var; a verifying target's env stays byte-for-byte
+    # unchanged. Without this the worker ignored targets.verify_tls entirely
+    # (it reads only the env var, not the slice's target block) and failed the
+    # TLS handshake against any self-signed HEC.
+    if not target.verify_tls:
+        env["STOKER_HEC_VERIFY_TLS"] = "0"
     driver_opts = dict(spec.driver_opts_json or {})
     # Surface the bounded duration to the driver (for a hard workload deadline).
     # Unbounded runs (duration_s falsy) leave it absent so no deadline is set. A
