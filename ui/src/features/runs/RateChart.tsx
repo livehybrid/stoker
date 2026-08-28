@@ -29,9 +29,21 @@ function tickBytes(v: number): string {
   return fmtBps(v);
 }
 
-export function RateChart({ points }: { points: RatePoint[] }) {
+export function RateChart({
+  points,
+  terminal = false,
+}: {
+  points: RatePoint[];
+  terminal?: boolean;
+}) {
   if (points.length === 0) {
-    return <p className="text-sm text-slate-500">No metric samples yet.</p>;
+    return (
+      <p className="text-sm text-slate-500">
+        {terminal
+          ? "No metric samples were recorded for this run (older samples may have been pruned)."
+          : "No metric samples yet."}
+      </p>
+    );
   }
   const hasTarget = points.some((p) => p.target != null);
   return (

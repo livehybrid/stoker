@@ -35,7 +35,7 @@ import { LogTailPanel } from "../features/runs/LogTailPanel";
 
 // Run detail — the flagship live view (design section 10.3). Polls run + metrics
 // at 5 s while the run is active and stops once it reaches a terminal state.
-// Charts: target-vs-actual events/s + bytes/s; stacked HEC outcomes. Plus the
+// Charts: target-vs-actual events/s + bytes/s; HEC outcomes. Plus the
 // lease roster, controls, warning banners and the snapshot/events/logs tabs.
 
 type Tab = "snapshot" | "events" | "logs";
@@ -56,9 +56,23 @@ function RunDetailPage() {
 
   const terminal = isTerminal(run.data?.state);
 
+  // The server reads `window` as "this far back from NOW", so the default 15 m
+  // rolling window returns nothing for a run that finished more than 15 minutes
+  // ago. For a terminal run, widen the window to reach back past the run's
+  // start (now − start, plus slack for clock skew) so its whole history loads;
+  // a live run keeps the rolling view.
+  const startIso = run.data ? run.data.t0 ?? run.data.created_at : null;
+  const metricsWindow = useMemo(() => {
+    if (!terminal) return "15m";
+    const startMs = startIso ? Date.parse(startIso) : NaN;
+    if (Number.isNaN(startMs)) return "all";
+    const seconds = Math.max(0, Math.ceil((Date.now() - startMs) / 1000)) + 300;
+    return `${seconds}s`;
+  }, [terminal, startIso]);
+
   const metrics = useQuery({
-    queryKey: ["run", id, "metrics"],
-    queryFn: () => api.runs.metrics(id),
+    queryKey: ["run", id, "metrics", metricsWindow],
+    queryFn: () => api.runs.metrics(id, "5s", metricsWindow),
     refetchInterval: terminal ? false : POLL_MS,
     // Only fetch metrics once the run is known to exist (a 404 run short-circuits
     // to the error view below and never needs its metrics).
@@ -169,7 +183,7 @@ function RunDetailPage() {
         ) : metrics.isError ? (
           <ErrorState error={metrics.error} onRetry={() => metrics.refetch()} />
         ) : (
-          <RateChart points={rate} />
+          <RateChart points={rate} terminal={terminal} />
         )}
       </Card>
 
@@ -179,7 +193,7 @@ function RunDetailPage() {
         ) : metrics.isError ? (
           <ErrorState error={metrics.error} onRetry={() => metrics.refetch()} />
         ) : (
-          <HecChart points={hec} />
+          <HecChart points={hec} terminal={terminal} />
         )}
       </Card>
 
