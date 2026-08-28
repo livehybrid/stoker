@@ -190,6 +190,15 @@ class PackCreate(BaseModel):
     description: Optional[str] = None
 
 
+# ``POST /api/packs/upload`` has no request model here by design: it is a
+# multipart/form-data request (a ``file`` archive part plus optional ``name`` /
+# ``description`` form fields), which FastAPI binds via File()/Form() in the
+# route rather than a JSON body model. Its response is :class:`PackOut` — an
+# uploaded pack is an ordinary local pack row, and the lint outcome rides the
+# same ``lint_status`` / ``lint_errors_json`` fields every other pack uses, so
+# the operator sees WHY a bad pack failed lint in the create response itself.
+
+
 class PackOut(BaseModel):
     model_config = _ORM
 

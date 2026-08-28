@@ -64,6 +64,23 @@ DEFAULT_DOGFOOD_METRICS_INTERVAL_S = 30.0
 # when the pack declares a `dataset_sha256`.
 DEFAULT_RAWREPLAY_MAX_DATASET_BYTES = 512 * 1024 * 1024  # 512 MiB
 DEFAULT_RAWREPLAY_FETCH_TIMEOUT_S = 120.0
+
+# Pack upload (POST /api/packs/upload): where extracted packs land, and the
+# resource caps on the UNTRUSTED archive an operator uploads. The directory
+# sits beside BUNDLE_DIR / REPO_CLONE_DIR on the control-plane volume so
+# uploaded packs survive a restart (mount a volume over /data). The caps are
+# extraction-bomb defences (server/packupload.py enforces them while streaming,
+# never from the archive's own declared sizes): the archive body itself, the
+# total uncompressed payload, any single member, and the member count. All are
+# deliberately generous for a real pack (conf + samples, or a rawreplay
+# dataset) while bounding what a hostile archive can make the control plane
+# hold; the member cap mirrors DEFAULT_RAWREPLAY_MAX_DATASET_BYTES, the
+# largest single legitimate pack file we expect.
+DEFAULT_PACK_UPLOAD_DIR = "/data/uploads"
+DEFAULT_PACK_UPLOAD_MAX_ARCHIVE_BYTES = 256 * 1024 * 1024  # 256 MiB upload body
+DEFAULT_PACK_UPLOAD_MAX_TOTAL_BYTES = 1024 * 1024 * 1024   # 1 GiB unpacked total
+DEFAULT_PACK_UPLOAD_MAX_MEMBER_BYTES = 512 * 1024 * 1024   # 512 MiB per member
+DEFAULT_PACK_UPLOAD_MAX_MEMBERS = 10_000
 # The three authorisation roles, most to least privileged. ``admin`` gates user
 # management; validated here so a bad STOKER_PROXY_DEFAULT_ROLE fails at boot.
 VALID_ROLES = ("viewer", "operator", "admin")
@@ -160,6 +177,17 @@ class Settings:
     # would exceed this is refused. Fetch timeout in seconds.
     rawreplay_max_dataset_bytes: int = DEFAULT_RAWREPLAY_MAX_DATASET_BYTES
     rawreplay_fetch_timeout_s: float = DEFAULT_RAWREPLAY_FETCH_TIMEOUT_S
+
+    # --- Pack upload (archives via the operator API) ------------------------- #
+    # Where uploaded packs are extracted to (env PACK_UPLOAD_DIR; a persistent
+    # volume in prod, so uploads survive a restart) and the extraction-bomb caps
+    # (see the DEFAULT_PACK_UPLOAD_* comment above). All defaulted so existing
+    # Settings(...) call sites stay valid.
+    pack_upload_dir: str = DEFAULT_PACK_UPLOAD_DIR
+    pack_upload_max_archive_bytes: int = DEFAULT_PACK_UPLOAD_MAX_ARCHIVE_BYTES
+    pack_upload_max_total_bytes: int = DEFAULT_PACK_UPLOAD_MAX_TOTAL_BYTES
+    pack_upload_max_member_bytes: int = DEFAULT_PACK_UPLOAD_MAX_MEMBER_BYTES
+    pack_upload_max_members: int = DEFAULT_PACK_UPLOAD_MAX_MEMBERS
 
     # --- Kubernetes fleets --------------------------------------------------- #
     # Namespace the seeded ``k8s-local`` fleet runs worker Jobs in (env
@@ -418,6 +446,19 @@ def load_settings(env=None):
         rawreplay_fetch_timeout_s=_get_float(
             env, "RAWREPLAY_FETCH_TIMEOUT_S",
             DEFAULT_RAWREPLAY_FETCH_TIMEOUT_S),
+        pack_upload_dir=_get(env, "PACK_UPLOAD_DIR", DEFAULT_PACK_UPLOAD_DIR)
+        or DEFAULT_PACK_UPLOAD_DIR,
+        pack_upload_max_archive_bytes=_get_int(
+            env, "PACK_UPLOAD_MAX_ARCHIVE_BYTES",
+            DEFAULT_PACK_UPLOAD_MAX_ARCHIVE_BYTES),
+        pack_upload_max_total_bytes=_get_int(
+            env, "PACK_UPLOAD_MAX_TOTAL_BYTES",
+            DEFAULT_PACK_UPLOAD_MAX_TOTAL_BYTES),
+        pack_upload_max_member_bytes=_get_int(
+            env, "PACK_UPLOAD_MAX_MEMBER_BYTES",
+            DEFAULT_PACK_UPLOAD_MAX_MEMBER_BYTES),
+        pack_upload_max_members=_get_int(
+            env, "PACK_UPLOAD_MAX_MEMBERS", DEFAULT_PACK_UPLOAD_MAX_MEMBERS),
         k8s_namespace=_get(env, "K8S_NAMESPACE", DEFAULT_K8S_NAMESPACE)
         or DEFAULT_K8S_NAMESPACE,
         inprocess_fleet_enabled=_get_bool(env, "STOKER_INPROCESS_FLEET", False),

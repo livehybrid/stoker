@@ -507,6 +507,43 @@ on argv or in logs) is documented in `server/gitsync/sync.py`.
 
 ---
 
+## Uploading a pack (no git required)
+
+Not every environment can reach a git remote. For those, a pack can be uploaded
+as an **archive** through the Packs page ("Upload pack") or directly via
+`POST /api/packs/upload` (multipart: a `file` part plus optional `name` /
+`description` form fields; operator role required):
+
+```
+tar czf mypack.tar.gz mypack/          # or: zip -r mypack.zip mypack
+curl -H "Authorization: Bearer stk_..." \
+     -F "file=@mypack.tar.gz" https://stoker.example.com/api/packs/upload
+```
+
+- **Formats**: `.tar.gz` / `.tgz` / `.tar` / `.zip`, detected from the file
+  *content* (magic bytes), so a mis-named archive still works.
+- **Shape**: the archive may be rooted at the pack itself
+  (`default/eventgen.conf` at the top) or wrap it in a **single top-level
+  directory** (`mypack/default/eventgen.conf` — what `tar czf … mypack/`
+  produces). Anything else — no pack markers, two top-level directories — is
+  refused with a message describing both accepted shapes.
+- **Registration**: the extracted directory registers exactly like a local
+  pack directory (`POST /api/packs`): same linter, same `verified` /
+  `lint_status` semantics, same bundle build, same runs. A pack that fails
+  lint still registers with its errors in the response and on the pack card —
+  fix the pack and upload again (run submits stay blocked meanwhile).
+- **Storage**: packs land under `PACK_UPLOAD_DIR` (default `/data/uploads`);
+  mount a volume there so uploads survive a control-plane restart. An uploaded
+  pack can be removed again with `DELETE /api/packs/{id}` (refused while a
+  spec references it).
+- **Safety**: the archive is treated as untrusted input. Extraction refuses
+  path-traversal members, symlinks/hardlinks and device nodes, and caps the
+  member count, per-file and total uncompressed bytes (streaming-enforced, so
+  a lying header does not help) plus the upload body itself — see the
+  `PACK_UPLOAD_*` settings in the control-plane reference.
+
+---
+
 ## The built bundle (what the worker consumes)
 
 `server/bundles.build_from_pack` lints the pack, writes a `stoker.json` manifest,

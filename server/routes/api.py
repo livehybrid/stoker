@@ -19,15 +19,17 @@ import hmac
 import logging
 import os
 import secrets
+import shutil
 import time
 from typing import Any, Dict, List, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import (APIRouter, Depends, File, Form, HTTPException, Query,
+                     Request, Response, UploadFile)
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .. import bundles, crypto, gitsync, lifecycle, preview
+from .. import bundles, crypto, gitsync, lifecycle, packupload, preview
 from ..config import get_settings
 from ..db import get_db
 from ..drivers.base import DriverError
@@ -439,6 +441,190 @@ def register_pack(body: PackCreate, db: Session = Depends(get_db)):
     log.info("registered pack %s (id=%s) lint=%s stanzas=%d",
              pack.name, pack.id, pack.lint_status, lint.stanza_count)
     return pack
+
+
+@router.post("/packs/upload", response_model=PackOut, status_code=201)
+async def upload_pack(
+    file: UploadFile = File(...),
+    name: Optional[str] = Form(default=None),
+    description: Optional[str] = Form(default=None),
+    db: Session = Depends(get_db),
+):
+    # type: (...) -> Any
+    """Upload a pack as a tarball/zip and register it like a directory pack.
+
+    The no-git path: the archive (``.tar.gz``/``.tgz``/``.tar`` or ``.zip``,
+    detected by content, not filename) is extracted with every guard in
+    :mod:`server.packupload` — traversal, link, special-member and
+    extraction-bomb defences, caps from the ``PACK_UPLOAD_*`` settings — into a
+    persistent directory under ``PACK_UPLOAD_DIR``. The archive may be rooted at
+    the pack itself or wrap it in a single top-level directory (how a customer
+    tars a folder). The extracted directory then registers through the SAME
+    path as ``POST /api/packs``: linted by ``bundles.lint_pack``, stored as a
+    local Pack row whose ``source_path`` is the extracted directory, flowing
+    into specs/bundles/runs identically.
+
+    A pack that extracts cleanly but FAILS LINT is still registered
+    (``lint_status=error``, run submits stay blocked — the same behaviour as
+    ``POST /api/packs`` and the builtin-pack seeding) so the operator can read
+    the lint errors in the response and on the pack card, rather than losing
+    them to a 400. A structurally-bad upload — not an archive, a hostile
+    member, over a cap, no recognisable pack root — is ``400
+    pack_upload_rejected`` (or ``413`` for an oversized body) with an
+    operator-facing reason, and leaves nothing on disk.
+
+    Mutating, so the auth middleware requires operator+ (a viewer cannot write
+    to the control-plane disk). ``name``/``description`` are optional form
+    fields; a pack.yaml ``name``/``description`` fills whichever is omitted
+    (falling back to the archive's directory name).
+    """
+    settings = get_settings()
+    data = await _read_upload_capped(file, settings.pack_upload_max_archive_bytes)
+    try:
+        pack_dir = packupload.store_uploaded_pack(
+            data, settings.pack_upload_dir,
+            packupload.UploadLimits.from_settings(settings),
+            name_hint=(name or "").strip() or None)
+    except packupload.PackUploadError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "pack_upload_rejected", "detail": str(exc)})
+
+    # Metadata + lint. Unlike register_pack (whose source_path an operator
+    # already vetted), this content is untrusted: an unreadable pack.yaml /
+    # stoker.json raises BundleError from the readers before the linter can
+    # collect it as a lint error, so catch it here — remove the extracted
+    # directory and reject with the reason, rather than 500ing and stranding
+    # the files on disk.
+    try:
+        meta = gitsync.local_pack_metadata(pack_dir)
+        lint = bundles.lint_pack(pack_dir)
+    except bundles.BundleError as exc:
+        _remove_uploaded_pack_dir(pack_dir)
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "pack_upload_rejected",
+                    "detail": "pack metadata unreadable: %s" % exc})
+    pack = Pack(
+        name=(name or "").strip() or meta["name"],
+        source_path=pack_dir,
+        description=(description or "").strip() or meta["description"],
+        tags_json=meta["tags"] or [],
+        engines_json=lint.engines,
+        # A directory metric pack's validated metricgen becomes its builder
+        # config, exactly as in register_pack; None for others.
+        builder_config_json=lint.metricgen,
+        sourcetypes_json=lint.sourcetypes,
+        stanza_count=lint.stanza_count,
+        est_bytes_per_event=lint.est_bytes_per_event,
+        declared_per_day_gb=lint.declared_per_day_gb,
+        verified=lint.ok,
+        lint_status="ok" if lint.ok else "error",
+        lint_errors_json=lint.errors,
+    )
+    db.add(pack)
+    db.commit()
+    db.refresh(pack)
+    log.info("uploaded pack %s (id=%s) -> %s lint=%s stanzas=%d",
+             pack.name, pack.id, pack_dir, pack.lint_status, lint.stanza_count)
+    return pack
+
+
+@router.delete("/packs/{pack_id}", status_code=204)
+def delete_pack(pack_id: int, db: Session = Depends(get_db)):
+    # type: (...) -> Any
+    """Delete a locally-registered pack (guarded when referenced by a spec).
+
+    Exists primarily so an uploaded pack can be removed again. Follows the
+    ``delete_repo`` guard: a pack referenced by any spec is refused (409) so a
+    defined/running job never loses its pack out from under it. A repo-indexed
+    pack is also refused — its lifecycle belongs to the repo (delete or resync
+    the repo instead).
+
+    The extracted directory is removed from disk ONLY when it lives inside the
+    configured ``PACK_UPLOAD_DIR`` (checked by realpath containment). Any other
+    ``source_path`` — an operator-registered directory, the builtin packs dir —
+    is data this API never owned, so the row is deleted but the directory is
+    left untouched (and a builtin pack simply re-registers at next boot).
+    Already-built bundles are content-addressed and shared, so they stay.
+    """
+    pack = db.get(Pack, pack_id)
+    if pack is None:
+        raise HTTPException(status_code=404, detail="unknown pack")
+    if pack.repo_id is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=("pack %s was indexed from repo %s; delete or resync that "
+                    "repo instead" % (pack_id, pack.repo_id)),
+        )
+    ref = db.execute(
+        select(Spec.id).where(Spec.pack_id == pack_id).limit(1)
+    ).scalars().first()
+    if ref is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="pack %s is referenced by one or more specs; delete those first" % pack_id,
+        )
+    _remove_uploaded_pack_dir(pack.source_path)
+    db.delete(pack)
+    db.commit()
+    return Response(status_code=204)
+
+
+async def _read_upload_capped(file, max_bytes):
+    # type: (UploadFile, int) -> bytes
+    """Read the upload body, refusing once it exceeds ``max_bytes`` (413).
+
+    Reads in chunks and stops the moment the cap is crossed rather than
+    trusting a Content-Length header (which a client can omit or understate),
+    so an oversized body is bounded by the cap plus one chunk, never fully
+    buffered. An empty body is a 400 (nothing to extract).
+    """
+    chunks = []  # type: List[bytes]
+    total = 0
+    while True:
+        chunk = await file.read(1 << 20)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail={
+                    "error": "pack_upload_too_large",
+                    "detail": ("upload exceeds the %d-byte archive limit "
+                               "(PACK_UPLOAD_MAX_ARCHIVE_BYTES)" % max_bytes),
+                })
+        chunks.append(chunk)
+    if total == 0:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "pack_upload_rejected", "detail": "empty upload"})
+    return b"".join(chunks)
+
+
+def _remove_uploaded_pack_dir(source_path):
+    # type: (Optional[str]) -> None
+    """Remove a pack directory from disk iff it is an uploaded one.
+
+    Containment by realpath: only a directory strictly INSIDE the configured
+    ``PACK_UPLOAD_DIR`` is removed (never the upload dir itself, never a path
+    merely symlinked to look like one). Everything else — builtin packs,
+    operator-registered directories, a metric pack's ``builder://`` sentinel —
+    is not this API's to delete. Best-effort: a failed rmtree logs and moves on
+    (the row delete still proceeds; a leftover directory is inert).
+    """
+    if not source_path:
+        return
+    upload_root = os.path.realpath(get_settings().pack_upload_dir)
+    real = os.path.realpath(source_path)
+    if not real.startswith(upload_root + os.sep):
+        return
+    if os.path.isdir(real):
+        try:
+            shutil.rmtree(real)
+        except OSError as exc:  # pragma: no cover - defensive
+            log.warning("could not remove uploaded pack dir %s: %s", real, exc)
 
 
 @router.get("/packs", response_model=List[PackOut])

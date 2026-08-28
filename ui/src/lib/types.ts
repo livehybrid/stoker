@@ -120,6 +120,14 @@ export interface PackOut {
   created_at: string;
 }
 
+// Optional form fields accompanying a pack-archive upload
+// (POST /api/packs/upload, multipart). Both fall back to the pack.yaml values
+// (then the archive's directory name) when omitted.
+export interface PackUploadMeta {
+  name?: string;
+  description?: string;
+}
+
 export interface PackPreview {
   stanzas: string[];
   sample_lines: Record<string, string[]>;

@@ -27,6 +27,7 @@ engines/apportion.py largest-remainder share split
 engines/ceilings.py  configurable per-engine ceilings (fleet > env > defaults) + slice-exceeds-ceiling check
 engines/known.py     known-engine registry
 bundles.py           pack lint (eventgen + rawreplay) + content-addressed tar builder + rawreplay dataset fetch
+packupload.py        safe extraction of an uploaded pack archive (traversal/link/bomb guards)
 preview.py           pack preview / preview_run rendering
 gitsync/sync.py      git clone/fetch + pack indexing (custom-code + path-escape guards)
 drivers/base.py      ExecutionDriver Protocol, RunSnapshot, DriverRef, DriverStatus, DriverError/NotFound
@@ -220,6 +221,8 @@ trusted-proxy header, or an API token (`Authorization: Bearer stk_...`).
 **Packs**
 - `POST /api/packs` `{name, source_path, description?}` registers and lints a local pack directory; sets `verified`/`lint_status`/engines/sourcetypes/`est_bytes_per_event`.
 - **Builtin packs**: at every boot, each pack root under `STOKER_BUILTIN_PACKS_DIR` (`/app/packs` in the image — the repo's bundled starter packs) is registered/re-linted as a local pack (`lifecycle.seed_builtin_packs`), named by its `pack.yaml` `name` (e.g. `packs/apigw` → `api-gateway`). Idempotent by `source_path`; a name already taken by another pack is skipped (a dead-path local row is repointed instead); a lint failure registers the pack with `lint_status=error` and never blocks boot. Unset the env to disable.
+- `POST /api/packs/upload` — multipart upload of a pack **archive** (`file` part: `.tar.gz`/`.tgz`/`.tar` or `.zip`, detected from the CONTENT, never the filename; optional `name` / `description` form fields, falling back to pack.yaml then the archive's directory name). The no-git path: the archive is extracted under `PACK_UPLOAD_DIR` (a persistent volume, so uploads survive a restart) and registered through the same lint-and-store path as `POST /api/packs`, so the pack flows into specs/bundles/runs identically. The archive may be rooted at the pack itself or wrap it in a single top-level directory (how a customer tars a folder); anything else is refused with a message describing both shapes. Extraction (`server/packupload.py`) treats the archive as hostile: traversal members (`../`, absolute, drive-letter/UNC paths) are refused with realpath containment as a second layer; symlink/hardlink members are refused outright (the same arbitrary-file-read exfiltration `bundles._iter_pack_files` blocks at bundle time — a link into the control plane's filesystem would ship its target to every worker); device/fifo/special members are refused; the member count, per-member bytes and total bytes are capped, with the byte caps enforced on the bytes actually produced **while streaming** (a lying zip header cannot defeat them) and the upload body itself capped (`413 pack_upload_too_large`). A rejected upload is `400 pack_upload_rejected{detail}` with an operator-facing reason and leaves nothing on disk. A pack that extracts but **fails lint still registers** (`lint_status=error`, run submits stay blocked — same as `POST /api/packs`), so the response carries the lint errors instead of discarding them. Mutating, so operator+.
+- `DELETE /api/packs/{id}` — delete a locally-registered pack. Guards mirror `DELETE /api/repos/{id}`: `409` when any spec references the pack, `409` for a repo-indexed pack (delete or resync the repo instead). An uploaded pack's extracted directory (realpath-inside `PACK_UPLOAD_DIR` only) is removed with the row; any other `source_path` (builtin packs, operator-registered directories) is left on disk. Bundles are content-addressed and shared, so they stay.
 - `GET /api/packs` (optional `?repo=<id>` / `?repo_id=<id>` filter), `GET /api/packs/{id}`.
 - `GET /api/packs/{id}/preview` -> stanzas + first 10 sample lines per stanza + lint status.
 - `GET /api/packs/{id}/preview_run?n=<N>` -> N rendered events (a dry-run render for review).
@@ -274,6 +277,7 @@ Parsed once into a frozen `Settings` (`config.py`); secret fields are `repr=Fals
 - **Metric maintenance**: `METRIC_ROLLUP_AFTER_H` (48), `METRIC_PRUNE_AFTER_D` (30), `METRIC_ROLLUP_BUCKET_S` (60), `METRIC_MAINTENANCE_INTERVAL_S` (3600), `METRIC_DELETE_CHUNK` (5000).
 - **Dogfood**: `DOGFOOD_HEC_URL`, `DOGFOOD_HEC_TOKEN` (secret; both required to enable), `DOGFOOD_METRICS_INTERVAL_S` (30), `DOGFOOD_GZIP` (true).
 - **rawreplay**: `RAWREPLAY_MAX_DATASET_BYTES` (default 512 MiB; cap on a `dataset_url` fetch), `RAWREPLAY_FETCH_TIMEOUT_S` (default 120).
+- **Pack upload**: `PACK_UPLOAD_DIR` (default `/data/uploads`) — where `POST /api/packs/upload` extracts packs to; mount a volume here (alongside `BUNDLE_DIR` / `REPO_CLONE_DIR`) so uploads survive a restart. The extraction-bomb caps, all enforced on actual bytes while streaming: `PACK_UPLOAD_MAX_ARCHIVE_BYTES` (default 256 MiB; the upload body), `PACK_UPLOAD_MAX_TOTAL_BYTES` (default 1 GiB; total uncompressed), `PACK_UPLOAD_MAX_MEMBER_BYTES` (default 512 MiB; any single member — sized to match the rawreplay dataset cap), `PACK_UPLOAD_MAX_MEMBERS` (default 10000).
 
 ## Crypto
 
@@ -282,7 +286,7 @@ Parsed once into a frozen `Settings` (`config.py`); secret fields are `repr=Fals
 
 ## Testing
 
-- Unit: apportionment (sums exactly), ceilings, lease state machine, JWT round-trip + tamper reject, bundle build/dedup, rawreplay lint/fetch, gitsync + gitsync security guards, auth (password hashing, session, proxy trust, role gating, last-admin/self-delete guards), boot reconcile, release gate, heartbeat, driver conformance (FakeDriver; K8sDriver against a mock), target-token never echoed.
+- Unit: apportionment (sums exactly), ceilings, lease state machine, JWT round-trip + tamper reject, bundle build/dedup, rawreplay lint/fetch, gitsync + gitsync security guards, pack-upload extraction guards (traversal/link/special members, streaming byte caps, cleanup), auth (password hashing, session, proxy trust, role gating, last-admin/self-delete guards), boot reconcile, release gate, heartbeat, driver conformance (FakeDriver; K8sDriver against a mock), target-token never echoed.
 - Integration/e2e (`tests/test_e2e.py`): start the app with a FakeDriver, create target+pack+spec, `POST /run`, then drive the **real** `stoker_agent` through claim -> ready -> release at T0 -> heartbeats -> final, asserting the run reaches `completed`, leases end `done`, and `metric_samples` accrued — reusing the vendored engine and a tiny pack to prove the whole path without a swarm.
 - Test DB is SQLite (dialect-agnostic models); prod is Postgres. CI runs the server suite alongside the worker suite.
 
