@@ -1,9 +1,11 @@
 import type { ReactNode } from "react";
 import type { LeaseOut, RunDetail } from "../../lib/types";
+import { leaseAssignedWork, leaseAssignedReason } from "./LeaseTable";
 
-// Warning banners (section 10.3): degraded start, lag > 300 s and lost workers.
-// Each is a coloured strip that only appears when its condition holds; a run
-// with none of them shows no banner block at all.
+// Warning banners (section 10.3): degraded start, lag > 300 s, lost workers
+// and workers holding no work (an over-provisioned run). Each is a coloured
+// strip that only appears when its condition holds; a run with none of them
+// shows no banner block at all.
 
 const LAG_WARN_S = 300;
 
@@ -45,6 +47,28 @@ export function WarningBanners({
       <Banner key="degraded" tone="amber" title="Degraded start">
         the run released on a subset of its requested workers; the same total rate
         is spread across the workers that came up.
+      </Banner>,
+    );
+  }
+
+  // Workers that reported they hold NO work (metrics: no series in their
+  // stride shard; eventgen count_interval: every stanza count split to zero).
+  // They are healthy and heart-beating but will generate nothing all run.
+  const idle = leases.filter((l: LeaseOut) => leaseAssignedWork(l) === 0);
+  if (idle.length > 0) {
+    const slots = idle.map((l) => l.slot).join(", ");
+    const reason = leaseAssignedReason(idle[0]);
+    banners.push(
+      <Banner
+        key="no-work"
+        tone="amber"
+        title={`${idle.length} worker(s) hold no work`}
+      >
+        slot{idle.length === 1 ? "" : "s"} {slots} own no work and will generate
+        nothing for the entire run — the run is over-provisioned for this pack
+        (more workers than it has series/counts to shard).
+        {reason ? ` Worker report: ${reason}.` : ""} Scale the run down (or use
+        fewer workers next time) to put every slot to work.
       </Banner>,
     );
   }

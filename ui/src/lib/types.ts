@@ -348,6 +348,12 @@ export interface RunCreated {
 export interface LeaseOut {
   slot: number;
   lease_id: string;
+  // Alongside the single rate key (eps | per_day_gb | count), share_json may
+  // carry private underscore-prefixed bookkeeping the control plane stores on
+  // the lease: `_assigned_work` (how many work units the worker reported it
+  // holds — metrics series / eventgen stanzas / a replay dataset) and
+  // `_assigned_reason` (a short explanation when it holds none). Read them via
+  // leaseAssignedWork()/leaseAssignedReason() in features/runs/LeaseTable.
   share_json?: Record<string, unknown> | null;
   holder?: string | null;
   node?: string | null;
@@ -355,6 +361,11 @@ export interface LeaseOut {
   last_heartbeat_at?: string | null;
   effective_t0?: string | null;
   restarts: number;
+  // Worker-reported assigned work, once LeaseOut (server/schemas.py) exposes
+  // it top-level; today the same data arrives inside share_json (see above).
+  // Optional in both directions so old servers/new UIs interoperate.
+  assigned_work?: number | null;
+  assigned_reason?: string | null;
 }
 
 export interface RunEventOut {

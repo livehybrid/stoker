@@ -31,7 +31,7 @@ from .. import bundles, crypto, gitsync, lifecycle, preview
 from ..config import get_settings
 from ..db import get_db
 from ..drivers.base import DriverError
-from ..engines import ceilings
+from ..engines import ceilings, sharding
 from ..models import (
     Fleet,
     MetricSample,
@@ -888,6 +888,26 @@ def run_spec(spec_id: int, body: RunLaunch, request: Request, db: Session = Depe
                 "suggested_workers": check.suggested_workers,
                 "limiting_factor": check.limiting_factor,
                 "detail": check.detail,
+            },
+        )
+
+    # 3b. Sharding: every requested worker must actually receive work. The
+    #     metrics series stride and the count_interval largest-remainder split
+    #     both leave surplus workers with nothing (healthy, heartbeating,
+    #     0 EPS forever), so an over-provisioned fleet is rejected up front.
+    shard = sharding.check_sharding(
+        spec.engine, spec.rate_mode, spec.workers,
+        metrics_config=pack.builder_config_json,
+        pack_dir=pack.source_path if pack.builder_config_json is None else None)
+    if not shard.ok:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "workers_exceed_shardable_work",
+                "suggested_workers": shard.suggested_workers,
+                "active_workers": shard.active_workers,
+                "limiting_factor": shard.limiting_factor,
+                "detail": shard.detail,
             },
         )
 

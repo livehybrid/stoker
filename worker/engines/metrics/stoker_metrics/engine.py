@@ -224,7 +224,11 @@ class MetricsEngine(object):
         self.emitted = 0
         spec = config.spec
         all_series = build_series(spec)
-        # This worker's deterministic stride shard of the matrix.
+        # This worker's deterministic stride shard of the matrix. Kept next to
+        # the full matrix size so an empty shard can be reported loudly: with
+        # total_workers > len(all_series) the surplus slots own NOTHING and
+        # would otherwise sit at 0 EPS for the whole run with no explanation.
+        self.total_series = len(all_series)
         self._series = all_series[config.slot::config.total_workers]
         self._metrics = spec.get("metrics") or []
         self._tz_offset_s = 3600.0 * float(spec.get("tz_offset_hours", 0) or 0)
@@ -274,7 +278,16 @@ class MetricsEngine(object):
         try:
             if not self._series:
                 # This worker owns no series (workers > matrix size): idle until
-                # the agent closes the socket on drain, then exit clean.
+                # the agent closes the socket on drain, then exit clean. Loud by
+                # design — this worker will produce nothing for the ENTIRE run,
+                # so the log must say exactly why (the run is over-provisioned
+                # for this pack's series matrix).
+                log.warning(
+                    "metrics slot %d of %d workers owns NO series (the series "
+                    "matrix has only %d) and will produce nothing for the "
+                    "entire run; the run is over-provisioned for this pack — "
+                    "use at most %d workers", cfg.slot, cfg.total_workers,
+                    self.total_series, max(1, self.total_series))
                 self._idle_until_closed(sock)
                 return 0
             if self._cfg.is_backfill:
