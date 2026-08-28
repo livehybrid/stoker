@@ -531,6 +531,9 @@ def preview_run_pack(
 _FLEET_CONFIG_PUBLIC_KEYS = (
     "namespace", "kube_context", "context", "in_cluster",
     "portainer_endpoint", "portainer_host", "verify_tls",
+    # Per-fleet ceiling overrides: plain numbers, never credentials, and the
+    # wizard benefits from seeing that a fleet carries its own bounds.
+    "max_eps_per_worker", "max_gb_day_per_worker",
 )
 
 
@@ -541,16 +544,25 @@ def list_fleets(db: Session = Depends(get_db)):
 
     The UI feeds its fleet picker from this, so the choices always match what
     the control plane can actually launch on. ``config`` is redacted to the
-    addressing allowlist.
+    addressing allowlist. ``ceilings`` is each engine's EFFECTIVE per-worker
+    ceiling on this fleet (built-in table + env config + the fleet's own
+    override), so the wizard's live arithmetic uses the same numbers the
+    submit guard will enforce.
     """
+    settings = get_settings()
     fleets = db.execute(select(Fleet).order_by(Fleet.id)).scalars().all()
     out = []
     for fleet in fleets:
         cfg = {k: v for k, v in (fleet.config_json or {}).items()
                if k in _FLEET_CONFIG_PUBLIC_KEYS and v is not None}
+        effective = {
+            engine: ceilings.resolve_ceilings(
+                engine, settings=settings, fleet_config=fleet.config_json or {})
+            for engine in ceilings.CEILINGS
+        }
         out.append(FleetOut(
             id=fleet.id, name=fleet.name, driver=fleet.driver,
-            config=cfg or None, created_at=fleet.created_at))
+            config=cfg or None, ceilings=effective, created_at=fleet.created_at))
     return out
 
 
@@ -608,13 +620,23 @@ def get_spec(spec_id: int, db: Session = Depends(get_db)):
 @router.get("/specs/{spec_id}/estimate", response_model=SpecEstimate)
 def estimate_spec(spec_id: int, db: Session = Depends(get_db)):
     # type: (...) -> Any
-    """Per-worker share, pct of ceiling, approx eps/gb and an ok bool."""
+    """Per-worker share, pct of ceiling, approx eps/gb and an ok bool.
+
+    The ceilings are resolved exactly as the submit guard resolves them
+    (engine table + env config + the spec's fleet override), so what this
+    view shows is what ``POST /specs/{id}/run`` will enforce.
+    """
     spec = db.get(Spec, spec_id)
     if spec is None:
         raise HTTPException(status_code=404, detail="unknown spec")
     pack = db.get(Pack, spec.pack_id)
     bytes_per_event = pack.est_bytes_per_event if pack is not None else None
-    return _estimate(spec, bytes_per_event)
+    fleet_row = db.execute(
+        select(Fleet).where(Fleet.name == spec.fleet)).scalars().first()
+    resolved = ceilings.resolve_ceilings(
+        spec.engine, settings=get_settings(),
+        fleet_config=fleet_row.config_json if fleet_row is not None else None)
+    return _estimate(spec, bytes_per_event, resolved)
 
 
 @router.post("/specs/{spec_id}/backfill_estimate", response_model=BackfillEstimate)
@@ -847,10 +869,17 @@ def run_spec(spec_id: int, body: RunLaunch, request: Request, db: Session = Depe
         )
 
     # 3. Ceiling: apportion the rate across workers and check the per-worker
-    #    share against the engine ceiling. Over -> 422 with suggested_workers.
+    #    share against the RESOLVED engine ceiling (built-in table + env config
+    #    + this fleet's config_json override — the same resolution the estimate
+    #    view uses, so the wizard and this guard can never disagree). Over ->
+    #    422 with suggested_workers.
     per_worker = _per_worker_share(spec.rate_mode, spec.rate_value, spec.workers)
+    resolved_ceilings = ceilings.resolve_ceilings(
+        spec.engine, settings=get_settings(),
+        fleet_config=fleet_row.config_json if fleet_row is not None else None)
     check = ceilings.check_slice(
-        spec.rate_mode, per_worker, bytes_per_event=bytes_per_event, engine=spec.engine)
+        spec.rate_mode, per_worker, bytes_per_event=bytes_per_event,
+        engine=spec.engine, ceilings=resolved_ceilings)
     if not check.ok:
         raise HTTPException(
             status_code=422,
@@ -1189,18 +1218,28 @@ def _per_worker_share(rate_mode, rate_value, workers):
     return max((s.get(key, 0.0) for s in shares), default=0.0)
 
 
-def _estimate(spec, bytes_per_event):
-    # type: (Spec, Optional[float]) -> SpecEstimate
+def _estimate(spec, bytes_per_event, resolved_ceilings=None):
+    # type: (Spec, Optional[float], Optional[Dict[str, Optional[float]]]) -> SpecEstimate
     """Build the estimate view for a spec (per-worker share + ceiling headroom).
 
     For a single-worker engine (rawreplay) the worker count is clamped to 1 so
     the estimate reflects what the run will actually do (the control plane forces
     workers = 1 for a replay run regardless of the spec's requested count).
+
+    ``resolved_ceilings`` is the effective table from
+    :func:`~server.engines.ceilings.resolve_ceilings` (env + fleet overrides
+    applied); the caller resolves it once so this view and the submit guard use
+    the same numbers. ``None`` falls back to resolving the built-in defaults
+    (an unknown engine then has no table and everything passes). A disabled
+    bound (``None`` inside the table) yields no limit and no percentage.
     """
+    if resolved_ceilings is None:
+        resolved_ceilings = ceilings.resolve_ceilings(spec.engine)
     workers = lifecycle.effective_workers(spec.engine, max(1, int(spec.workers)))
     per_worker = _per_worker_share(spec.rate_mode, spec.rate_value, workers)
     check = ceilings.check_slice(
-        spec.rate_mode, per_worker, bytes_per_event=bytes_per_event, engine=spec.engine)
+        spec.rate_mode, per_worker, bytes_per_event=bytes_per_event,
+        engine=spec.engine, ceilings=resolved_ceilings)
 
     per_worker_eps = None  # type: Optional[float]
     per_worker_gb = None  # type: Optional[float]
@@ -1208,7 +1247,7 @@ def _estimate(spec, bytes_per_event):
     ceiling_pct = None  # type: Optional[float]
     limiting = None  # type: Optional[str]
 
-    table = ceilings.ceiling_for(spec.engine)
+    table = resolved_ceilings if resolved_ceilings is not None else {}
     max_eps = table.get("max_eps_per_worker")
     max_gb = table.get("max_gb_day_per_worker")
 
@@ -1246,6 +1285,7 @@ def _estimate(spec, bytes_per_event):
         ok=check.ok,
         suggested_workers=check.suggested_workers,
         detail=check.detail,
+        ceilings=resolved_ceilings,
     )
 
 

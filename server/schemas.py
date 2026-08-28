@@ -301,12 +301,19 @@ class FleetOut(BaseModel):
     ...) is exposed, never credential material (the EKS fleet design stores
     encrypted access keys in ``config_json``, which must not leave the server,
     even as ciphertext).
+
+    ``ceilings`` maps each engine with a ceiling table to its EFFECTIVE
+    per-worker ceilings on THIS fleet (built-in defaults overlaid with env
+    config and the fleet's own ``config_json`` override — see
+    engines.ceilings.resolve_ceilings). A null bound means it is disabled. The
+    wizard reads these so its live arithmetic always matches the submit guard.
     """
 
     id: int
     name: str
     driver: str
     config: Optional[Dict[str, Any]] = None
+    ceilings: Optional[Dict[str, Dict[str, Optional[float]]]] = None
     created_at: datetime.datetime
 
 
@@ -407,6 +414,12 @@ class SpecEstimate(BaseModel):
     ok: bool
     suggested_workers: Optional[int] = None
     detail: Optional[str] = None
+    # The EFFECTIVE per-worker ceilings the check ran against (built-in table
+    # overlaid with env config and the spec's fleet override — see
+    # engines.ceilings.resolve_ceilings). None = the engine has no ceiling
+    # table at all; a null bound inside means that bound is disabled. The UI
+    # uses these instead of its hardcoded mirror of the defaults.
+    ceilings: Optional[Dict[str, Optional[float]]] = None
 
 
 # --------------------------------------------------------------------------- #

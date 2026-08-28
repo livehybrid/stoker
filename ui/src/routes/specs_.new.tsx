@@ -22,7 +22,7 @@ import { useToast } from "../components/Toast";
 import { PackPicker } from "../features/specs/PackPicker";
 import { TargetPicker } from "../features/specs/TargetPicker";
 import { EstimatePanel } from "../features/specs/EstimatePanel";
-import { localEstimate } from "../features/specs/estimate";
+import { fleetCeilings, localEstimate } from "../features/specs/estimate";
 import { parseApiError } from "../features/specs/errors";
 import { packLooksReplay } from "../features/specs/replay";
 import { packIsMetrics } from "../features/metrics/config";
@@ -258,6 +258,15 @@ function JobWizard() {
   const workersNum = Math.max(1, Math.floor(numOrNull(form.workers) ?? 1));
   const rateValueNum = numOrNull(form.rate_value);
 
+  // Effective per-worker ceilings for the chosen fleet + engine, as the server
+  // resolved them (built-in table + env config + the fleet's own override; GET
+  // /api/fleets reports them per engine). Null while the fleets query has not
+  // answered — localEstimate then falls back to its hardcoded defaults.
+  const serverCeilings = useMemo(() => {
+    const fleet = fleetsQ.data?.find((f) => f.name === form.fleet);
+    return fleetCeilings(fleet, form.engine);
+  }, [fleetsQ.data, form.fleet, form.engine]);
+
   // Live arithmetic preview (mirrors the server estimate; see estimate.ts).
   const estimate = useMemo(
     () =>
@@ -267,8 +276,16 @@ function JobWizard() {
         workers: workersNum,
         engine: form.engine,
         bytesPerEvent,
+        ceilings: serverCeilings,
       }),
-    [form.rate_mode, rateValueNum, workersNum, form.engine, bytesPerEvent],
+    [
+      form.rate_mode,
+      rateValueNum,
+      workersNum,
+      form.engine,
+      bytesPerEvent,
+      serverCeilings,
+    ],
   );
 
   // A replay pack must run on exactly 1 worker; lock the field and coerce.

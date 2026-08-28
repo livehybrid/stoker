@@ -128,6 +128,15 @@ export function EstimatePanel({
         </p>
       )}
 
+      {estimate.rate_mode !== "count_interval" &&
+        estimate.ok &&
+        estimate.ceiling_limit == null && (
+          <p className="text-xs text-slate-500">
+            No per-worker ceiling applies here (disabled or none configured for
+            this engine/fleet); the control plane will not block on rate.
+          </p>
+        )}
+
       {source && (
         <p className="text-[11px] text-slate-600">
           {source === "live"

@@ -24,7 +24,7 @@ crypto.py            Fernet encrypt/decrypt of target tokens; per-run JWT mint/v
 auth.py              app-level auth backend: bcrypt password hashing, signed session cookie, trusted-proxy SSO resolver, bootstrap/setup helpers
 schemas.py           pydantic v2 request/response models (no secret fields by construction)
 engines/apportion.py largest-remainder share split
-engines/ceilings.py  per-engine ceiling table + slice-exceeds-ceiling check
+engines/ceilings.py  configurable per-engine ceilings (fleet > env > defaults) + slice-exceeds-ceiling check
 engines/known.py     known-engine registry
 bundles.py           pack lint (eventgen + rawreplay) + content-addressed tar builder + rawreplay dataset fetch
 preview.py           pack preview / preview_run rendering
@@ -100,8 +100,20 @@ env stays byte-for-byte unchanged.
 - **Provision** (`lifecycle.provision_run`): `effective_workers` clamps a `rawreplay` spec to 1 (and corrects the snapshot's worker count).
 - **Scale** (`routes/api.py` `scale_run_endpoint` and `lifecycle.scale_run`): a grow of a replay run is rejected `409 replay_single_worker` at the route and clamped to 1 in the lifecycle.
 
-Per-worker ceilings (`engines/ceilings.py`) are 25 GB/day and 5000 EPS for both
-engines; a replay run is one worker so per-worker == whole-run.
+Per-worker ceilings (`engines/ceilings.py`) default to 25 GB/day and 5000 EPS
+for both engines; a replay run is one worker so per-worker == whole-run. The
+defaults are deliberately conservative and CONFIGURABLE, resolved most specific
+wins (`resolve_ceilings`): a fleet row's `config_json.max_gb_day_per_worker` /
+`config_json.max_eps_per_worker` beats the env
+(`STOKER_MAX_GB_DAY_PER_WORKER` / `STOKER_MAX_EPS_PER_WORKER`, plus per-engine
+`STOKER_MAX_GB_DAY_PER_WORKER_<ENGINE>`-style suffixes), which beats the
+built-in table. A value of `0` (or negative) at any layer DISABLES that bound —
+an operator who has measured a worker at 200 GB/day can turn the guard off. The
+same resolved table feeds the submit guard, `GET /specs/{id}/estimate` (echoed
+in its `ceilings` field) and each fleet's `ceilings` map in `GET /api/fleets`
+(what the wizard's live arithmetic uses), so the estimate and the guard can
+never disagree. An engine with no built-in table (e.g. `metrics`) has no
+ceiling and always passes.
 
 ### rawreplay (Piston) packs
 
@@ -213,13 +225,13 @@ trusted-proxy header, or an API token (`Authorization: Bearer stk_...`).
 - `GET /api/packs/{id}/preview_run?n=<N>` -> N rendered events (a dry-run render for review).
 
 **Fleets**
-- `GET /api/fleets` -> the registered fleets (`{id, name, driver, config, created_at}`). The UI's fleet picker is fed from this so a spec's `fleet` name always matches something the control plane can launch on. `config` is REDACTED to an addressing allowlist (`namespace`, `kube_context`, `in_cluster`, `portainer_endpoint`, `portainer_host`, `verify_tls`) — credentials (even Fernet ciphertext) never appear in a GET body.
+- `GET /api/fleets` -> the registered fleets (`{id, name, driver, config, ceilings, created_at}`). The UI's fleet picker is fed from this so a spec's `fleet` name always matches something the control plane can launch on. `config` is REDACTED to an addressing allowlist (`namespace`, `kube_context`, `in_cluster`, `portainer_endpoint`, `portainer_host`, `verify_tls`, plus the plain-number ceiling overrides `max_gb_day_per_worker` / `max_eps_per_worker`) — credentials (even Fernet ciphertext) never appear in a GET body. `ceilings` maps each engine with a ceiling table to its EFFECTIVE per-worker bounds on this fleet (defaults + env + fleet override; null = disabled), which the wizard's live arithmetic uses so it always matches the submit guard.
 
 **Specs**
 - `POST /api/specs` (JobSpec), `GET /api/specs`, `GET /api/specs/{id}`.
-- `GET /api/specs/{id}/estimate` -> per-worker share, pct of ceiling, approx eps/gb, `ok` bool.
+- `GET /api/specs/{id}/estimate` -> per-worker share, pct of ceiling, approx eps/gb, `ok` bool, and the resolved `ceilings` the check ran against (fleet > env > defaults; a null bound = disabled).
 - `PUT /api/specs/{id}`, `DELETE /api/specs/{id}` (409 when the spec has runs).
-- `POST /api/specs/{id}/run` `{overrides?}` -> `201 {run_id, state}` after the submit gates (in order): pack lint ok (`422 pack_lint_failed`); engine/pack consistency (`422 engine_pack_mismatch` — a rawreplay spec on a non-rawreplay pack); in-process fleet constraints when the spec's fleet row is `driver=inprocess` (`422 inprocess_worker_cap{max_workers}` over the cap; `422 inprocess_custom_code_denied{errors}` for a pack with `bin/` or a `generator =` stanza — `trusted_code` does not override on this fleet); replay-single-worker (`409 replay_single_worker` when a replay run has workers>1); per-worker slice vs ceiling (`422 slice_exceeds_ceiling{suggested_workers, limiting_factor, detail}`); per-target concurrent-GB cap (`409 target_cap_exceeded{headroom_gb_day, detail}`); target health (`409 target_unhealthy` when red; unknown/amber pass). Then the spec's `fleet` NAME is resolved through the `fleets` table (`lifecycle.resolve_fleet_driver`: a registered fleet row builds its configured driver; a bare driver name `fake|swarm|k8s|inprocess` still works ad hoc; an unknown name is `422 unknown_fleet` listing the registered fleets, and a registered fleet whose driver refuses to build — e.g. the in-process fleet disabled or its worker source missing — is `422 fleet_unavailable`). Then provision. A driver failure surfaces as `502 provision_failed`. (`started_by` records the resolving caller — a username, or `token:<name>` for an API token — falling back to `operator` only in the bootstrap / auth-disabled window; the same actor is stamped on the run's audit events for stop/scale/rescale.)
+- `POST /api/specs/{id}/run` `{overrides?}` -> `201 {run_id, state}` after the submit gates (in order): pack lint ok (`422 pack_lint_failed`); engine/pack consistency (`422 engine_pack_mismatch` — a rawreplay spec on a non-rawreplay pack); in-process fleet constraints when the spec's fleet row is `driver=inprocess` (`422 inprocess_worker_cap{max_workers}` over the cap; `422 inprocess_custom_code_denied{errors}` for a pack with `bin/` or a `generator =` stanza — `trusted_code` does not override on this fleet); replay-single-worker (`409 replay_single_worker` when a replay run has workers>1); per-worker slice vs the RESOLVED ceiling — fleet `config_json` override > env > built-in defaults, the same table the estimate view reports (`422 slice_exceeds_ceiling{suggested_workers, limiting_factor, detail}`); per-target concurrent-GB cap (`409 target_cap_exceeded{headroom_gb_day, detail}`); target health (`409 target_unhealthy` when red; unknown/amber pass). Then the spec's `fleet` NAME is resolved through the `fleets` table (`lifecycle.resolve_fleet_driver`: a registered fleet row builds its configured driver; a bare driver name `fake|swarm|k8s|inprocess` still works ad hoc; an unknown name is `422 unknown_fleet` listing the registered fleets, and a registered fleet whose driver refuses to build — e.g. the in-process fleet disabled or its worker source missing — is `422 fleet_unavailable`). Then provision. A driver failure surfaces as `502 provision_failed`. (`started_by` records the resolving caller — a username, or `token:<name>` for an API token — falling back to `operator` only in the bootstrap / auth-disabled window; the same actor is stamped on the run's audit events for stop/scale/rescale.)
 
 **Runs**
 - `GET /api/runs`, `GET /api/runs/{id}` (state, snapshot, totals, lease roster, event log).
@@ -255,6 +267,7 @@ Parsed once into a frozen `Settings` (`config.py`); secret fields are `repr=Fals
 - **Core**: `DATABASE_URL` (default `sqlite:///./stoker.db`; prod `postgresql+psycopg://...`), `STOKER_MASTER_KEY` (Fernet key; or `STOKER_MASTER_KEY_FILE` for a mounted secret; a dev key is generated with a loud warning if neither is set), `STOKER_JWT_TTL_S` (default 3600), `PUBLIC_BASE_URL` (what workers use to reach the control plane and bundles; defaults to `http://localhost:<PORT>`), `WORKER_IMAGE` (default `ghcr.io/livehybrid/stoker-worker:latest`; prod pins `@sha256:<digest>`), `BUNDLE_DIR` (default `/data/bundles`), `REPO_CLONE_DIR` (default `/data/repos`), `PORT` (default 8080).
 - **Swarm**: `PORTAINER_HOST`, `PORTAINER_TOKEN` (tier-0, secret), `PORTAINER_ENDPOINT` (default 6).
 - **Kubernetes**: `K8S_NAMESPACE` (default `stoker`) — the namespace the seeded `k8s-local` fleet runs worker Jobs in; per-fleet `config_json.namespace` overrides. Kube auth needs no env: kubeconfig or the pod service account is auto-detected (see K8sDriver).
+- **Ceilings**: `STOKER_MAX_GB_DAY_PER_WORKER` / `STOKER_MAX_EPS_PER_WORKER` (unset = the built-in 25 GB/day / 5000 EPS per-worker defaults; `0` or negative = that bound disabled) — the submit-time per-worker ceiling for every engine with a table; `STOKER_MAX_GB_DAY_PER_WORKER_<ENGINE>` / `STOKER_MAX_EPS_PER_WORKER_<ENGINE>` (engine name uppercased, e.g. `..._EVENTGEN`) narrow it to one engine; per-fleet `config_json.max_gb_day_per_worker` / `config_json.max_eps_per_worker` override all of these for runs on that fleet.
 - **In-process fleet**: `STOKER_INPROCESS_FLEET` (default off) — seeds `inprocess-local` and allows its driver to build; workers then run as subprocesses of the control plane (small workloads, see InProcessDriver). `STOKER_INPROCESS_MAX_WORKERS` (default 2, min 1) — the worker cap; per-fleet `config_json.max_workers` overrides.
 - **Builtin packs**: `STOKER_BUILTIN_PACKS_DIR` (unset by default; `/app/packs` in the image) — a directory of pack roots registered and re-linted at every boot as local packs.
 - **Auth**: `STOKER_ADMIN_USER` + `STOKER_ADMIN_PASSWORD` (bootstrap admin; password secret), `STOKER_SESSION_TTL` (default 43200 = 12 h), `STOKER_TRUSTED_PROXIES` (comma-separated CIDR/IP; empty = no proxy trusted; a malformed entry is a hard boot error), `STOKER_AUTH_HEADER` (default `X-Forwarded-User`), `STOKER_PROXY_DEFAULT_ROLE` (default operator; validated against viewer/operator/admin at boot), `STOKER_AUTH_DISABLED` (kill switch).

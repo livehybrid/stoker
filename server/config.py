@@ -76,6 +76,20 @@ DEFAULT_K8S_NAMESPACE = "stoker"
 # container, sharing its CPU/memory — small workloads only by design).
 DEFAULT_INPROCESS_MAX_WORKERS = 2
 
+# Per-worker rate ceilings (engines/ceilings.py). The built-in table (25 GB/day,
+# 5000 EPS per worker) is deliberately conservative; a real worker often beats
+# it when the data is cheap to template and Splunk is close on the network. The
+# env can therefore raise (or disable) it globally: STOKER_MAX_EPS_PER_WORKER /
+# STOKER_MAX_GB_DAY_PER_WORKER set the default for every engine, and a
+# per-engine suffix (e.g. STOKER_MAX_GB_DAY_PER_WORKER_EVENTGEN) narrows it to
+# one engine. Unset = the built-in default; 0 (or negative) = that bound is
+# DISABLED entirely. A per-fleet config_json override (same key names) still
+# beats all of these — resolution lives in engines.ceilings.resolve_ceilings.
+_CEILING_ENV_PREFIXES = (
+    ("STOKER_MAX_EPS_PER_WORKER_", "max_eps_per_worker"),
+    ("STOKER_MAX_GB_DAY_PER_WORKER_", "max_gb_day_per_worker"),
+)
+
 
 class ConfigError(Exception):
     """Raised when an environment value cannot be parsed."""
@@ -161,6 +175,17 @@ class Settings:
     inprocess_fleet_enabled: bool = False
     inprocess_max_workers: int = DEFAULT_INPROCESS_MAX_WORKERS
 
+    # --- Per-worker rate ceilings -------------------------------------------- #
+    # Env-configured defaults for the submit-time ceiling check (see the
+    # _CEILING_ENV_PREFIXES comment above). None = unset (the built-in table in
+    # engines/ceilings.py applies); <= 0 = that bound is disabled entirely.
+    # ``per_engine_ceilings`` holds the per-engine env overrides as sorted
+    # (engine, bound_key, raw_value) triples (a tuple so the dataclass stays
+    # hashable/frozen-friendly, like ``trusted_proxies``).
+    max_eps_per_worker: Optional[float] = None
+    max_gb_day_per_worker: Optional[float] = None
+    per_engine_ceilings: Tuple[Tuple[str, str, float], ...] = ()
+
     # --- Builtin packs ------------------------------------------------------- #
     # A directory of pack roots registered (and re-linted) at every boot, so the
     # image's bundled starter packs appear in the UI with no sideloading (env
@@ -218,6 +243,39 @@ def _get_float(env, key, default):
         return float(raw)
     except ValueError:
         raise ConfigError("%s must be a number, got %r" % (key, raw))
+
+
+def _get_opt_float(env, key):
+    # type: (Mapping[str, str], str) -> Optional[float]
+    """Parse an optional float env var (unset/blank -> None, not a default)."""
+    raw = _get(env, key)
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        raise ConfigError("%s must be a number, got %r" % (key, raw))
+
+
+def _parse_engine_ceilings(env):
+    # type: (Mapping[str, str]) -> Tuple[Tuple[str, str, float], ...]
+    """Scan the env for per-engine ceiling overrides.
+
+    ``STOKER_MAX_EPS_PER_WORKER_<ENGINE>`` / ``STOKER_MAX_GB_DAY_PER_WORKER_<ENGINE>``
+    (engine name uppercased, e.g. ``..._EVENTGEN``) override the global ceiling
+    for that one engine. Returned as sorted (engine, bound_key, value) triples;
+    a malformed value is a hard :class:`ConfigError` at boot, matching the other
+    numeric settings. Blank values are ignored (treated as unset).
+    """
+    entries = []
+    for env_key in env:
+        for prefix, bound_key in _CEILING_ENV_PREFIXES:
+            if env_key.startswith(prefix) and len(env_key) > len(prefix):
+                value = _get_opt_float(env, env_key)
+                if value is None:
+                    continue
+                entries.append((env_key[len(prefix):].lower(), bound_key, value))
+    return tuple(sorted(entries))
 
 
 def _get_bool(env, key, default=False):
@@ -366,6 +424,9 @@ def load_settings(env=None):
         inprocess_max_workers=max(1, _get_int(
             env, "STOKER_INPROCESS_MAX_WORKERS", DEFAULT_INPROCESS_MAX_WORKERS)),
         builtin_packs_dir=_get(env, "STOKER_BUILTIN_PACKS_DIR"),
+        max_eps_per_worker=_get_opt_float(env, "STOKER_MAX_EPS_PER_WORKER"),
+        max_gb_day_per_worker=_get_opt_float(env, "STOKER_MAX_GB_DAY_PER_WORKER"),
+        per_engine_ceilings=_parse_engine_ceilings(env),
     )
 
 
