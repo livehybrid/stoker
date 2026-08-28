@@ -334,6 +334,8 @@ def delete_repo(repo_id: int, db: Session = Depends(get_db)):
         ref = db.execute(
             select(Spec.id).where(Spec.pack_id.in_(pack_ids)).limit(1)
         ).scalars().first()
+        if ref is None and _spec_referencing_extra_packs(db, pack_ids) is not None:
+            ref = True  # referenced as a multi-pack extra: same guard applies
         if ref is not None:
             raise HTTPException(
                 status_code=409,
@@ -560,6 +562,8 @@ def delete_pack(pack_id: int, db: Session = Depends(get_db)):
     ref = db.execute(
         select(Spec.id).where(Spec.pack_id == pack_id).limit(1)
     ).scalars().first()
+    if ref is None and _spec_referencing_extra_packs(db, [pack_id]) is not None:
+        ref = True  # referenced as a multi-pack extra: same guard applies
     if ref is not None:
         raise HTTPException(
             status_code=409,
@@ -759,14 +763,23 @@ def list_fleets(db: Session = Depends(get_db)):
 @router.post("/specs", response_model=SpecOut, status_code=201)
 def create_spec(body: SpecCreate, db: Session = Depends(get_db)):
     # type: (...) -> Any
-    _require_pack(db, body.pack_id)
+    primary = _require_pack(db, body.pack_id)
     _require_target(db, body.target_id)
     _validate_rate(body.rate_mode, body.rate_value)
     if body.workers < 1:
         raise HTTPException(status_code=422, detail="workers must be >= 1")
+    # Multi-pack: normalise the extra ids (dedupe, drop the primary, every id
+    # must exist) and gate the merge up front — only eventgen packs merge, so
+    # the operator learns at save time, not at launch. Submit re-checks (pack
+    # contents can change under a repo resync between save and run).
+    extra_pack_ids = _clean_extra_pack_ids(db, body.pack_id, body.extra_pack_ids)
+    if extra_pack_ids:
+        _multi_pack_guard(db, body.engine, [primary]
+                          + [db.get(Pack, pid) for pid in extra_pack_ids])
     spec = Spec(
         name=body.name,
         pack_id=body.pack_id,
+        extra_pack_ids_json=extra_pack_ids,
         target_id=body.target_id,
         ref=body.ref,
         engine=body.engine,
@@ -816,7 +829,9 @@ def estimate_spec(spec_id: int, db: Session = Depends(get_db)):
     if spec is None:
         raise HTTPException(status_code=404, detail="unknown spec")
     pack = db.get(Pack, spec.pack_id)
-    bytes_per_event = pack.est_bytes_per_event if pack is not None else None
+    # A multi-pack spec estimates against the MERGED bytes/event (the same
+    # number the submit guard uses), so the view and the gate never disagree.
+    bytes_per_event = _spec_bytes_per_event(db, spec, pack)
     fleet_row = db.execute(
         select(Fleet).where(Fleet.name == spec.fleet)).scalars().first()
     resolved = ceilings.resolve_ceilings(
@@ -843,7 +858,7 @@ def backfill_estimate(spec_id: int, body: BackfillEstimateRequest,
     res = body.resolution_s or pack_res
     plan = lifecycle.plan_backfill(spec.engine, series, live_eps, body.window_s,
                                    res, body.cap_eps, time.time())
-    bpe = pack.est_bytes_per_event if pack is not None else None
+    bpe = _spec_bytes_per_event(db, spec, pack)
     return BackfillEstimate(
         engine=spec.engine,
         events=plan["events"],
@@ -875,10 +890,30 @@ def update_spec(spec_id: int, body: SpecUpdate, db: Session = Depends(get_db)):
     if "workers" in data and data["workers"] is not None and data["workers"] < 1:
         raise HTTPException(status_code=422, detail="workers must be >= 1")
 
+    # Multi-pack: normalise a supplied extra list against the EFFECTIVE primary
+    # (the patched pack_id when the same request changes it) and re-gate the
+    # merge against the effective engine. ``[]`` clears back to single-pack;
+    # an omitted field leaves the stored set unchanged.
+    effective_primary = data.get("pack_id") or spec.pack_id
+    if "extra_pack_ids" in data:
+        data["extra_pack_ids"] = _clean_extra_pack_ids(
+            db, effective_primary, data["extra_pack_ids"])
+    elif "pack_id" in data and spec.extra_pack_ids_json:
+        # The primary changed under a stored extra list: re-normalise so the
+        # new primary is never also listed as an extra (a double-merge).
+        data["extra_pack_ids"] = _clean_extra_pack_ids(
+            db, effective_primary, spec.extra_pack_ids_json)
+    effective_extras = data.get("extra_pack_ids", spec.extra_pack_ids_json)
+    if effective_extras:
+        _multi_pack_guard(db, data.get("engine", spec.engine),
+                          [db.get(Pack, effective_primary)]
+                          + [_require_pack(db, pid) for pid in effective_extras])
+
     # Map schema field names to their ORM ``*_json`` columns where they differ.
     column_aliases = {
         "overrides": "overrides_json",
         "driver_opts": "driver_opts_json",
+        "extra_pack_ids": "extra_pack_ids_json",
     }
     for key, value in data.items():
         setattr(spec, column_aliases.get(key, key), value)
@@ -921,6 +956,8 @@ def run_spec(spec_id: int, body: RunLaunch, request: Request, db: Session = Depe
 
     Rejections per the contract:
     ``422 slice_exceeds_ceiling{suggested_workers}``,
+    ``422 multi_pack_engine_unsupported`` (a multi-pack spec whose packs
+    cannot merge — only eventgen packs can),
     ``409 target_unhealthy``, ``409 target_cap_exceeded{headroom_gb_day}``,
     ``409 replay_single_worker``. On success ``201 {run_id, state}``.
     """
@@ -933,18 +970,37 @@ def run_spec(spec_id: int, body: RunLaunch, request: Request, db: Session = Depe
     pack = db.get(Pack, spec.pack_id)
     if pack is None:
         raise HTTPException(status_code=404, detail="spec pack no longer exists")
+    # Multi-pack spec: load every extra pack (the run merges them with the
+    # primary into one bundle). A vanished extra is the same operator problem
+    # as a vanished primary, so it gets the same 404 shape.
+    extra_packs = []  # type: List[Pack]
+    for extra_id in (spec.extra_pack_ids_json or []):
+        extra = db.get(Pack, extra_id)
+        if extra is None:
+            raise HTTPException(
+                status_code=404,
+                detail="spec extra pack %s no longer exists" % extra_id)
+        extra_packs.append(extra)
+    all_packs = [pack] + extra_packs
 
     bytes_per_event = pack.est_bytes_per_event
 
     # --- Submit-time validation gates (order: cheap/local first) ----------- #
 
-    # 1. Lint ok: the pack must currently lint clean (a stale/broken pack is a
-    #    hard stop; 422 with the lint errors so the operator can fix it). A
-    #    UI-authored metrics pack has no source directory; lint its stored config.
+    # 1. Lint ok: every referenced pack must currently lint clean (a stale/
+    #    broken pack is a hard stop; 422 with the lint errors so the operator
+    #    can fix it). A UI-authored metrics pack has no source directory; lint
+    #    its stored config. Extra packs' errors are labelled per pack.
     if pack.builder_config_json is not None:
         lint_errors = bundles.lint_metrics_config(pack.builder_config_json)
     else:
         lint_errors = bundles.lint_pack(pack.source_path).errors
+    for extra in extra_packs:
+        if extra.builder_config_json is not None:
+            extra_errors = bundles.lint_metrics_config(extra.builder_config_json)
+        else:
+            extra_errors = bundles.lint_pack(extra.source_path).errors
+        lint_errors.extend("pack %r: %s" % (extra.name, e) for e in extra_errors)
     if lint_errors:
         raise HTTPException(
             status_code=422,
@@ -996,6 +1052,21 @@ def run_spec(spec_id: int, body: RunLaunch, request: Request, db: Session = Depe
                     "detail": "the metrics engine is engine-paced; use "
                               "rate_mode 'count_interval' (interval = resolution)"})
 
+    # 1c2. Multi-pack merge guard: only eventgen packs merge into one bundle.
+    #      rawreplay is a single dataset forced to one worker, metrics packs
+    #      are synthesised from a builder config, and a `mode = replay` stanza
+    #      is engine-paced — none of them has a mergeable stanza+samples shape.
+    #      Re-checked here (not just at spec save) because a repo resync can
+    #      change a pack's engine between save and launch. With the merge
+    #      admitted, the merged bytes/event estimate replaces the primary
+    #      pack's for the ceiling and target-cap arithmetic below.
+    if extra_packs:
+        _multi_pack_guard(db, spec.engine, all_packs)
+        merged_bpe = bundles.merged_est_bytes_per_event(
+            [p.source_path for p in all_packs])
+        if merged_bpe is not None:
+            bytes_per_event = merged_bpe
+
     # 1d. In-process fleet constraints. Workers on an ``inprocess`` fleet run
     #     INSIDE the control-plane container (no isolation), so two extra gates
     #     apply: a hard worker cap (they share the control plane's CPU/memory)
@@ -1022,21 +1093,24 @@ def run_spec(spec_id: int, body: RunLaunch, request: Request, db: Session = Depe
                         % (max_workers, max_workers)),
                 },
             )
-        if pack.builder_config_json is None:
-            code_errors = gitsync.custom_code_errors(pack.source_path)
-            if code_errors:
-                raise HTTPException(
-                    status_code=422,
-                    detail={
-                        "error": "inprocess_custom_code_denied",
-                        "errors": code_errors,
-                        "detail": (
-                            "this pack carries custom code, which never runs on "
-                            "the in-process fleet (it would execute inside the "
-                            "control plane, trusted_code or not); use a "
-                            "container-isolated fleet (swarm/k8s)"),
-                    },
-                )
+        code_errors = []  # type: List[str]
+        for code_pack in all_packs:
+            if code_pack.builder_config_json is None:
+                code_errors.extend(
+                    gitsync.custom_code_errors(code_pack.source_path))
+        if code_errors:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "inprocess_custom_code_denied",
+                    "errors": code_errors,
+                    "detail": (
+                        "this pack carries custom code, which never runs on "
+                        "the in-process fleet (it would execute inside the "
+                        "control plane, trusted_code or not); use a "
+                        "container-isolated fleet (swarm/k8s)"),
+                },
+            )
 
     # 2. replay-single-worker: replay is engine-paced and the control plane
     #    guarantees workers = 1. This covers an eventgen pack with a
@@ -1084,7 +1158,10 @@ def run_spec(spec_id: int, body: RunLaunch, request: Request, db: Session = Depe
     shard = sharding.check_sharding(
         spec.engine, spec.rate_mode, spec.workers,
         metrics_config=pack.builder_config_json,
-        pack_dir=pack.source_path if pack.builder_config_json is None else None)
+        pack_dir=pack.source_path if pack.builder_config_json is None else None,
+        # A multi-pack run merges the stanza sets, so the count_interval
+        # prediction must scan the union of the packs' declared counts.
+        pack_dirs=[p.source_path for p in all_packs] if extra_packs else None)
     if not shard.ok:
         raise HTTPException(
             status_code=422,
@@ -1391,6 +1468,102 @@ def _require_target(db, target_id):
     if target is None:
         raise HTTPException(status_code=422, detail="unknown target_id %s" % target_id)
     return target
+
+
+def _clean_extra_pack_ids(db, primary_id, extra_ids):
+    # type: (Session, int, Optional[List[int]]) -> Optional[List[int]]
+    """Normalise a spec's extra pack ids: dedupe, drop the primary, verify each.
+
+    Selection order does not matter downstream (the merge sorts by namespace),
+    but the stored list keeps the caller's order for display. Returns ``None``
+    for an empty/absent list so a cleared multi-pack spec stores NULL — the
+    classic single-pack shape.
+    """
+    if not extra_ids:
+        return None
+    out = []  # type: List[int]
+    for pack_id in extra_ids:
+        if pack_id == primary_id or pack_id in out:
+            continue
+        _require_pack(db, pack_id)
+        out.append(pack_id)
+    return out or None
+
+
+def _multi_pack_guard(db, engine, packs):
+    # type: (Session, Optional[str], List[Pack]) -> None
+    """Refuse a multi-pack spec/run whose packs cannot merge (422).
+
+    Only eventgen packs merge into one synthesised bundle: a metrics pack is
+    built from a ``metricgen`` builder config (no stanzas/samples to merge), a
+    rawreplay pack replays a single dataset on exactly one worker, and a
+    ``mode = replay`` stanza is engine-paced with no rate share to apportion.
+    Follows the established submit-gate error-body convention
+    (``error`` slug + ``detail``).
+    """
+    def _refuse(detail):
+        # type: (str) -> None
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "multi_pack_engine_unsupported", "detail": detail})
+
+    if (engine or "eventgen").strip() != "eventgen":
+        _refuse("multiple packs can only merge under the eventgen engine; "
+                "this spec's engine is %r" % engine)
+    for pack in packs:
+        if pack is None:
+            continue  # existence is the caller's gate; this one is about engines
+        if pack.builder_config_json is not None:
+            _refuse("pack %s (%r) is a metrics pack; metrics packs are "
+                    "synthesised from a builder config and cannot merge with "
+                    "other packs" % (pack.id, pack.name))
+        if bundles.is_rawreplay_pack(pack.source_path):
+            _refuse("pack %s (%r) is a rawreplay pack; rawreplay replays a "
+                    "single dataset on exactly 1 worker and cannot merge with "
+                    "other packs" % (pack.id, pack.name))
+        if _pack_has_replay(pack.source_path):
+            _refuse("pack %s (%r) declares a mode = replay stanza; replay is "
+                    "engine-paced and single-worker and cannot merge with "
+                    "other packs" % (pack.id, pack.name))
+
+
+def _spec_referencing_extra_packs(db, pack_ids):
+    # type: (Session, List[int]) -> Optional[Spec]
+    """The first spec whose ``extra_pack_ids_json`` references any of ``pack_ids``.
+
+    ``Spec.pack_id`` referential guards are a plain SQL filter; the extra ids
+    live in a JSON list, so this scans the (small) set of multi-pack specs in
+    Python rather than fighting dialect-specific JSON containment operators.
+    """
+    wanted = set(pack_ids)
+    stmt = select(Spec).where(Spec.extra_pack_ids_json.is_not(None))
+    for spec in db.execute(stmt).scalars().all():
+        if wanted.intersection(spec.extra_pack_ids_json or []):
+            return spec
+    return None
+
+
+def _spec_bytes_per_event(db, spec, pack):
+    # type: (Session, Spec, Optional[Pack]) -> Optional[float]
+    """The spec's effective bytes/event estimate (merged for a multi-pack spec).
+
+    A single-pack spec keeps the pack row's stored estimate. A multi-pack spec
+    uses the weighted merged estimate (the same arithmetic the merged bundle's
+    manifest carries), falling back to the primary's estimate when the merge
+    cannot be evaluated — the estimate views must degrade, never 500.
+    """
+    base = pack.est_bytes_per_event if pack is not None else None
+    extra_ids = list(spec.extra_pack_ids_json or []) if spec is not None else []
+    if not extra_ids or pack is None or pack.builder_config_json is not None:
+        return base
+    dirs = [pack.source_path]
+    for pack_id in extra_ids:
+        extra = db.get(Pack, pack_id)
+        if extra is None or extra.builder_config_json is not None:
+            return base
+        dirs.append(extra.source_path)
+    merged = bundles.merged_est_bytes_per_event(dirs)
+    return merged if merged is not None else base
 
 
 def _validate_rate(rate_mode, rate_value):

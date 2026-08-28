@@ -312,11 +312,17 @@ def provision_run(db, spec, driver, overrides=None, started_by=None, settings=No
 
 def _resolve_bundle(db, spec, settings=None):
     # type: (Session, Spec, Optional[Settings]) -> Bundle
-    """Return the run's bundle, building it from the spec's pack when absent.
+    """Return the run's bundle, building it from the spec's pack(s) when absent.
 
     Content-addressed: an existing bundle row for the built digest is reused, so
     a re-run of the same pack never rebuilds. The bundle row is added/flushed so
     ``bundle.id`` is available for the run's ``bundle_id`` foreign key.
+
+    A multi-pack spec (``extra_pack_ids_json`` set) builds ONE merged bundle
+    via :func:`server.bundles.build_from_packs` — the worker contract does not
+    change, it just downloads a bundle whose conf/samples are the namespaced
+    union of the selected packs. The merge is deterministic (packs sorted by
+    namespace), so the same pack set re-runs on the same digest.
     """
     from .bundles import build_from_metrics_config, build_from_pack
 
@@ -330,10 +336,13 @@ def _resolve_bundle(db, spec, settings=None):
 
     if settings is None:
         settings = get_settings()
+    extra_ids = list(spec.extra_pack_ids_json or [])
     # A UI-authored metrics pack has no source directory: its bundle is
     # synthesised from the stored builder config. Every other pack builds from
     # its on-disk source_path (a local directory or a repo clone).
-    if pack.builder_config_json is not None:
+    if extra_ids:
+        built = _build_merged_bundle(db, spec, pack, extra_ids, settings)
+    elif pack.builder_config_json is not None:
         built = build_from_metrics_config(
             pack.name, pack.builder_config_json, bundle_dir=settings.bundle_dir)
     else:
@@ -388,6 +397,36 @@ def _pack_build_dir(db, pack, settings):
                     "snapshot at %s (%s); building from the live clone path",
                     pack.id, (pack.indexed_sha or "")[:12], exc)
         return pack.source_path
+
+
+def _build_merged_bundle(db, spec, primary_pack, extra_ids, settings):
+    # type: (Session, Spec, Any, List[int], Settings) -> Any
+    """Build the merged bundle for a multi-pack spec.
+
+    Loads the primary + extra pack rows, derives one deterministic namespace
+    per pack (:func:`server.bundles.merge_pack_namespaces` — the sanitised pack
+    name, disambiguated by id on a name clash) and merges via
+    :func:`server.bundles.build_from_packs`. Each pack's build directory goes
+    through :func:`_pack_build_dir`, so a repo-synced pack merges from its
+    pinned per-SHA snapshot exactly as it would build alone. Only eventgen
+    packs are mergeable — the submit route refuses anything else with a 422
+    before provisioning, and ``build_from_packs`` re-checks (BundleError) so no
+    other caller can slip a rawreplay/metrics pack in.
+    """
+    from . import bundles
+    from .models import Pack
+
+    packs = [primary_pack]
+    for pack_id in extra_ids:
+        extra = db.get(Pack, pack_id)
+        if extra is None:
+            raise ValueError(
+                "spec %s references unknown extra pack %s" % (spec.id, pack_id))
+        packs.append(extra)
+    namespaces = bundles.merge_pack_namespaces([(p.name, p.id) for p in packs])
+    inputs = [(ns, _pack_build_dir(db, p, settings))
+              for ns, p in zip(namespaces, packs)]
+    return bundles.build_from_packs(inputs, bundle_dir=settings.bundle_dir)
 
 
 def stop_run(db, run, driver, force=False, actor="operator"):
@@ -2084,6 +2123,12 @@ def build_spec_snapshot(spec, target, overrides=None, rate_mode=None,
             "env_tag": target.env_tag,
         },
     }
+    # Multi-pack spec: freeze the extra pack ids for the audit trail (the run's
+    # bundle digest already pins the merged content). Added only when present so
+    # every single-pack snapshot stays byte-for-byte what it was.
+    extra_pack_ids = list(getattr(spec, "extra_pack_ids_json", None) or [])
+    if extra_pack_ids:
+        snap["extra_pack_ids"] = extra_pack_ids
     if backfill is not None:
         snap["backfill"] = backfill
     return snap

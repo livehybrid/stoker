@@ -333,6 +333,10 @@ class FleetOut(BaseModel):
 class SpecCreate(BaseModel):
     name: str
     pack_id: int
+    # Additional pack ids to merge with ``pack_id`` into one bundle at run time
+    # (eventgen packs only; the route validates and the submit gate enforces).
+    # Omitted/None/empty = the classic single-pack spec.
+    extra_pack_ids: Optional[List[int]] = None
     target_id: int
     ref: str = "local"
     engine: str = "eventgen"  # eventgen | rawreplay
@@ -362,6 +366,9 @@ class SpecUpdate(BaseModel):
 
     name: Optional[str] = None
     pack_id: Optional[int] = None
+    # Send a list to replace the merged-pack set, [] to clear it back to a
+    # single-pack spec; omit to leave it unchanged (exclude_unset semantics).
+    extra_pack_ids: Optional[List[int]] = None
     target_id: Optional[int] = None
     ref: Optional[str] = None
     engine: Optional[str] = None
@@ -394,6 +401,7 @@ class SpecOut(BaseModel):
     id: int
     name: str
     pack_id: int
+    extra_pack_ids_json: Optional[List[int]] = None
     target_id: int
     ref: str
     engine: str

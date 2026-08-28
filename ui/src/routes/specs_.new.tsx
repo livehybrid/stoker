@@ -19,7 +19,7 @@ import { Badge } from "../components/Badge";
 import { ErrorState, LoadingState } from "../components/States";
 import { useToast } from "../components/Toast";
 
-import { PackPicker } from "../features/specs/PackPicker";
+import { PackPicker, packMergeable } from "../features/specs/PackPicker";
 import { TargetPicker } from "../features/specs/TargetPicker";
 import { EstimatePanel } from "../features/specs/EstimatePanel";
 import { fleetCeilings, localEstimate } from "../features/specs/estimate";
@@ -52,6 +52,9 @@ type OverrideKey = (typeof OVERRIDE_KEYS)[number];
 interface FormState {
   name: string;
   pack_id: number | null;
+  // Additional packs merged with pack_id into one bundle at run time
+  // (eventgen only; empty = the classic single-pack spec).
+  extra_pack_ids: number[];
   target_id: number | null;
   engine: string;
   rate_mode: RateMode;
@@ -68,6 +71,7 @@ function emptyForm(): FormState {
   return {
     name: "",
     pack_id: null,
+    extra_pack_ids: [],
     target_id: null,
     engine: "eventgen",
     rate_mode: "eps",
@@ -86,6 +90,7 @@ function formFromSpec(spec: SpecOut): FormState {
   return {
     name: spec.name,
     pack_id: spec.pack_id,
+    extra_pack_ids: spec.extra_pack_ids_json ?? [],
     target_id: spec.target_id,
     engine: spec.engine,
     rate_mode: (spec.rate_mode as RateMode) ?? "eps",
@@ -179,6 +184,34 @@ function JobWizard() {
     () => packsQ.data?.find((p) => p.id === form.pack_id),
     [packsQ.data, form.pack_id],
   );
+  // The additional packs merged with the primary one, resolved for display.
+  const mergedPacks: PackOut[] = useMemo(
+    () =>
+      form.extra_pack_ids
+        .map((id) => packsQ.data?.find((p) => p.id === id))
+        .filter((p): p is PackOut => p != null),
+    [packsQ.data, form.extra_pack_ids],
+  );
+
+  // Choosing the primary pack has to keep the merge set coherent: a pack
+  // promoted to primary must not also sit in the extras, and switching to a
+  // pack that cannot merge (replay / metrics) drops the extras entirely rather
+  // than submitting a set the server would reject.
+  const selectPrimaryPack = (pack: PackOut) =>
+    patch({
+      pack_id: pack.id,
+      extra_pack_ids: packMergeable(pack)
+        ? form.extra_pack_ids.filter((id) => id !== pack.id)
+        : [],
+    });
+
+  const toggleExtraPack = (pack: PackOut) =>
+    patch({
+      extra_pack_ids: form.extra_pack_ids.includes(pack.id)
+        ? form.extra_pack_ids.filter((id) => id !== pack.id)
+        : [...form.extra_pack_ids, pack.id],
+    });
+
   const selectedTarget: TargetOut | undefined = useMemo(
     () => targetsQ.data?.find((t) => t.id === form.target_id),
     [targetsQ.data, form.target_id],
@@ -353,6 +386,7 @@ function JobWizard() {
     return {
       name: form.name.trim(),
       pack_id: form.pack_id as number,
+      extra_pack_ids: form.extra_pack_ids.length ? form.extra_pack_ids : null,
       target_id: form.target_id as number,
       engine: form.engine,
       rate_mode: form.rate_mode,
@@ -370,6 +404,8 @@ function JobWizard() {
     return {
       name: form.name.trim(),
       pack_id: form.pack_id as number,
+      // Always sent so clearing the merge persists (null clears server-side).
+      extra_pack_ids: form.extra_pack_ids.length ? form.extra_pack_ids : null,
       target_id: form.target_id as number,
       engine: form.engine,
       rate_mode: form.rate_mode,
@@ -510,8 +546,26 @@ function JobWizard() {
           <PackPicker
             packs={packsQ.data}
             selectedId={form.pack_id}
-            onSelect={(p) => patch({ pack_id: p.id })}
+            onSelect={selectPrimaryPack}
+            extraIds={form.extra_pack_ids}
+            onToggleExtra={toggleExtraPack}
           />
+          {mergedPacks.length > 0 && (
+            <div className="rounded-md border border-sky-800/60 bg-sky-950/30 px-3 py-2 text-xs text-sky-200">
+              Merging {mergedPacks.length + 1} packs into one run: their stanzas
+              and samples are combined into a single bundle, namespaced by pack
+              so same-named samples cannot collide. The run's rate is split
+              across every stanza of the merged set, so each pack's share follows
+              its own declared rate — not an even split per pack.
+              <div className="mt-1.5 flex flex-wrap gap-1">
+                {mergedPacks.map((p) => (
+                  <Badge key={p.id} tone="sky">
+                    {p.name}
+                  </Badge>
+                ))}
+              </div>
+            </div>
+          )}
           {isReplay && (
             <div className="rounded-md border border-amber-800/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
               This pack looks like a replay pack: replay is engine-paced and runs

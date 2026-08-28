@@ -254,6 +254,9 @@ export type RateMode = "eps" | "per_day_gb" | "count_interval";
 export interface SpecCreate {
   name: string;
   pack_id: number;
+  // Additional pack ids merged with pack_id into one bundle at run time
+  // (eventgen packs only). Omitted/empty = the classic single-pack spec.
+  extra_pack_ids?: number[] | null;
   target_id: number;
   ref?: string; // default "local"
   engine?: string; // default "eventgen"
@@ -272,6 +275,8 @@ export interface SpecCreate {
 export type SpecUpdate = Partial<{
   name: string;
   pack_id: number;
+  // A list replaces the merged-pack set; [] clears back to single-pack.
+  extra_pack_ids: number[] | null;
   target_id: number;
   ref: string;
   engine: string;
@@ -290,6 +295,7 @@ export interface SpecOut {
   id: number;
   name: string;
   pack_id: number;
+  extra_pack_ids_json?: number[] | null;
   target_id: number;
   ref: string;
   engine: string;

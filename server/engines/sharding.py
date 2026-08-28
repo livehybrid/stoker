@@ -181,18 +181,24 @@ def eventgen_stanza_counts(pack_dir):
     return counts
 
 
-def check_sharding(engine, rate_mode, workers, metrics_config=None, pack_dir=None):
-    # type: (Optional[str], Optional[str], int, Optional[dict], Optional[str]) -> ShardingCheck
+def check_sharding(engine, rate_mode, workers, metrics_config=None, pack_dir=None,
+                   pack_dirs=None):
+    # type: (Optional[str], Optional[str], int, Optional[dict], Optional[str], Optional[Sequence[str]]) -> ShardingCheck
     """Check a run's worker count against the work its engine can shard.
 
     ``metrics_config`` is the pack's ``metricgen`` builder config (the spec is
     a metrics run exactly when the pack carries one — mirroring the submit
     route's own dispatch); ``pack_dir`` is the eventgen pack's source directory
-    for the count_interval stanza scan. Engines/modes that split a continuous
-    rate (eps / per_day_gb) and single-worker engines (rawreplay) always pass;
-    so does anything this function cannot cheaply predict (unreadable conf) —
-    it is a guard against the *known* silent-starvation shapes, never a new
-    way for a valid submit to fail.
+    for the count_interval stanza scan. ``pack_dirs`` (a multi-pack spec's
+    merged set, primary included) supersedes ``pack_dir``: the merged bundle's
+    stanza set is the union of the packs', so the count_interval prediction
+    scans every directory and concatenates the counts — one unreadable conf
+    makes the whole check pass conservatively, exactly as for a single pack.
+    Engines/modes that split a continuous rate (eps / per_day_gb) and
+    single-worker engines (rawreplay) always pass; so does anything this
+    function cannot cheaply predict (unreadable conf) — it is a guard against
+    the *known* silent-starvation shapes, never a new way for a valid submit
+    to fail.
     """
     workers = max(1, int(workers))
     engine = (engine or "eventgen").strip() or "eventgen"
@@ -236,7 +242,16 @@ def check_sharding(engine, rate_mode, workers, metrics_config=None, pack_dir=Non
         # share, no worker can starve.
         return ShardingCheck(ok=True, active_workers=workers, total_workers=workers)
 
-    counts = eventgen_stanza_counts(pack_dir)
+    if pack_dirs:
+        counts = []  # type: Optional[List[Optional[float]]]
+        for one_dir in pack_dirs:
+            one = eventgen_stanza_counts(one_dir)
+            if one is None:
+                counts = None  # an unreadable conf: pass conservatively
+                break
+            counts.extend(one)
+    else:
+        counts = eventgen_stanza_counts(pack_dir)
     if counts is None or not counts:
         # Unknown stanza counts (no dir / unreadable conf / no paced stanzas):
         # pass conservatively; lint owns conf validity.

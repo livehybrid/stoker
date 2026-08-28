@@ -12,6 +12,7 @@ import { TextInput } from "../../components/Field";
 import { LoadingState, ErrorState } from "../../components/States";
 import { cn } from "../../components/cn";
 import { packLooksReplay, packLooksTrusted } from "./replay";
+import { packIsMetrics } from "../metrics/config";
 
 function PackBadges({ pack }: { pack: PackOut }) {
   return (
@@ -88,14 +89,29 @@ function PackPreview({ packId }: { packId: number }) {
   );
 }
 
+// A pack that can join a multi-pack merge: eventgen only (replay is
+// single-worker/engine-paced; metrics packs are built from a builder config).
+// Mirrors the server's multi_pack_engine_unsupported gate.
+export function packMergeable(pack: PackOut): boolean {
+  return !packLooksReplay(pack) && !packIsMetrics(pack);
+}
+
 export function PackPicker({
   packs,
   selectedId,
   onSelect,
+  extraIds,
+  onToggleExtra,
 }: {
   packs: PackOut[];
   selectedId: number | null;
   onSelect: (pack: PackOut) => void;
+  // Multi-pack merge (optional): ids of ADDITIONAL packs merged with the
+  // selected one into a single run bundle. When `onToggleExtra` is provided,
+  // each non-selected mergeable row gets an "+ Add" toggle; the single-pack
+  // flow is untouched when these props are omitted.
+  extraIds?: number[];
+  onToggleExtra?: (pack: PackOut) => void;
 }) {
   const [filter, setFilter] = useState("");
   const needle = filter.trim().toLowerCase();
@@ -126,36 +142,73 @@ export function PackPicker({
           ) : (
             shown.map((p) => {
               const active = p.id === selectedId;
+              const inMerge = (extraIds ?? []).includes(p.id);
+              // The "+ Add" toggle appears only when a mergeable primary is
+              // already chosen and this row is another mergeable pack.
+              const primary = packs.find((pk) => pk.id === selectedId);
+              const canToggle =
+                onToggleExtra != null &&
+                !active &&
+                selectedId != null &&
+                primary != null &&
+                packMergeable(primary) &&
+                packMergeable(p);
               return (
-                <button
+                <div
                   key={p.id}
-                  type="button"
-                  onClick={() => onSelect(p)}
                   className={cn(
-                    "w-full rounded-md border px-3 py-2 text-left transition-colors",
+                    "flex w-full items-stretch gap-1 rounded-md border transition-colors",
                     active
                       ? "border-sky-600 bg-sky-950/40"
-                      : "border-surface-muted bg-surface hover:bg-surface-muted/40",
+                      : inMerge
+                        ? "border-sky-800/70 bg-sky-950/20"
+                        : "border-surface-muted bg-surface hover:bg-surface-muted/40",
                   )}
                 >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="truncate text-sm font-medium text-slate-100">
-                      {p.name}
-                    </span>
-                    <span className="shrink-0 text-xs text-slate-500">
-                      {p.stanza_count ?? "—"} stanza
-                      {p.stanza_count === 1 ? "" : "s"}
-                    </span>
-                  </div>
-                  {p.description && (
-                    <p className="mt-0.5 truncate text-xs text-slate-500">
-                      {p.description}
-                    </p>
+                  <button
+                    type="button"
+                    onClick={() => onSelect(p)}
+                    className="min-w-0 flex-1 px-3 py-2 text-left"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="truncate text-sm font-medium text-slate-100">
+                        {p.name}
+                      </span>
+                      <span className="shrink-0 text-xs text-slate-500">
+                        {p.stanza_count ?? "—"} stanza
+                        {p.stanza_count === 1 ? "" : "s"}
+                      </span>
+                    </div>
+                    {p.description && (
+                      <p className="mt-0.5 truncate text-xs text-slate-500">
+                        {p.description}
+                      </p>
+                    )}
+                    <div className="mt-1.5 flex flex-wrap items-center gap-1">
+                      <PackBadges pack={p} />
+                      {inMerge && <Badge tone="sky">in merge</Badge>}
+                    </div>
+                  </button>
+                  {canToggle && (
+                    <button
+                      type="button"
+                      title={
+                        inMerge
+                          ? "Remove from this run's merge"
+                          : "Also send this pack in the same run"
+                      }
+                      onClick={() => onToggleExtra(p)}
+                      className={cn(
+                        "shrink-0 self-center rounded-md border px-2 py-1 mr-2 text-xs transition-colors",
+                        inMerge
+                          ? "border-sky-700 bg-sky-900/50 text-sky-200 hover:bg-sky-900/80"
+                          : "border-surface-muted text-slate-400 hover:bg-surface-muted/60 hover:text-slate-200",
+                      )}
+                    >
+                      {inMerge ? "✓ Added" : "+ Add"}
+                    </button>
                   )}
-                  <div className="mt-1.5">
-                    <PackBadges pack={p} />
-                  </div>
-                </button>
+                </div>
               );
             })
           )}
