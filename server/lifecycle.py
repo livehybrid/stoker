@@ -675,6 +675,10 @@ def _supervise_run(db, run, drivers, boot_time, now):
     # 4. Auto-abort policies (a subset per the contract).
     _check_auto_abort(db, run, leases, now, drivers)
 
+    # 4b. Target-health backpressure (opt-in): drain a run whose HEC target is
+    #     failing to accept data, rather than keep hammering it.
+    _check_backpressure(db, run, leases, now)
+
     # 5. Draining runs whose grace has elapsed get their fleet destroyed.
     _reap_draining(db, run, drivers, now)
 
@@ -783,6 +787,122 @@ def _check_auto_abort(db, run, leases, now, drivers=None):
         log.warning("run %s auto-aborted: HEC auth failed on %d/%d slots",
                     run.id, len(auth_slots), total)
         _destroy_fleet(db, run, drivers, "auto-abort-auth")
+
+
+def _check_backpressure(db, run, leases, now, settings=None):
+    # type: (Session, Run, Sequence[WorkerLease], datetime.datetime, Optional[Settings]) -> None
+    """Drain a run whose HEC target is failing to accept data (opt-in).
+
+    Off unless ``STOKER_BACKPRESSURE_DRAIN``. When on: if the share of the
+    fleet's *recent* delivery attempts that FAILED (5xx + timeouts, measured as
+    the delta between each live slot's last two samples) meets
+    ``backpressure_min_failed_fraction`` and that has held for
+    ``backpressure_sustained_s``, the run is DRAINED (a graceful stop — data
+    already sent stays valid), its target flagged red, and the decision recorded
+    on the audit trail. A single failing tick only starts the clock (a
+    ``backpressure_detected`` event); a subsequent healthy tick clears it, so a
+    transient blip never drains. Draining, not failing: the operator asked for
+    load, the target could not take it, and stopping cleanly is the safe
+    response — never a silent continue.
+    """
+    if settings is None:
+        settings = get_settings()
+    if not settings.backpressure_drain_enabled:
+        return
+    # Only a released, still-delivering run: pre-T0 there is no delivery to judge,
+    # and a draining/terminal run is already stopping.
+    if run.state not in (STATE_RUNNING, STATE_RELEASING) or run.t0 is None:
+        return
+    live_slots = [l.slot for l in leases
+                  if l.state in (LEASE_CLAIMED, LEASE_READY, LEASE_RUNNING)]
+    if not live_slots:
+        return
+
+    ok, fail = _recent_delivery_deltas(db, run, live_slots)
+    attempts = ok + fail
+    failing = attempts > 0 and (fail / attempts) >= settings.backpressure_min_failed_fraction
+    frac = round(fail / attempts, 3) if attempts else 0.0
+
+    since = _open_backpressure_since(db, run)
+    if not failing:
+        # Recovered (or never failing): close any open condition so the clock
+        # resets and a later blip starts fresh.
+        if since is not None:
+            append_event(db, run, "backpressure_cleared",
+                         {"ok": ok, "failed": fail, "failed_fraction": frac})
+        return
+    if since is None:
+        # First failing tick: start the clock, do not drain yet.
+        append_event(db, run, "backpressure_detected",
+                     {"ok": ok, "failed": fail, "failed_fraction": frac})
+        return
+    if _seconds_between(since, now) >= settings.backpressure_sustained_s:
+        transition_run(db, run, STATE_DRAINING,
+                       {"reason": "target backpressure", "ok": ok, "failed": fail,
+                        "failed_fraction": frac,
+                        "sustained_s": settings.backpressure_sustained_s},
+                       end_reason="backpressure-drain")
+        _flag_target_unhealthy(
+            db, run,
+            "HEC delivery failing (backpressure): %d/%d recent attempts failed"
+            % (fail, attempts))
+        log.warning("run %s drained: target backpressure (%d/%d recent attempts "
+                    "failed, sustained %.0fs)",
+                    run.id, fail, attempts, settings.backpressure_sustained_s)
+
+
+def _recent_delivery_deltas(db, run, live_slots):
+    # type: (Session, Run, Sequence[int]) -> Tuple[int, int]
+    """Fleet-wide (ok, fail) HEC-outcome deltas over each slot's last two samples.
+
+    The HEC counters are cumulative, so a *rate* of recent success/failure needs
+    the delta between consecutive samples. A slot with fewer than two samples
+    contributes nothing (its cumulative absolute is not a recent rate), so a
+    just-started run never trips backpressure on its first sample. ok = new 2xx;
+    fail = new 5xx + timeouts (server-side inability to accept — not 4xx, which
+    is the client's own bad request / handled by the auth path).
+    """
+    ok_total = 0
+    fail_total = 0
+    for slot in live_slots:
+        rows = db.execute(
+            select(MetricSample)
+            .where(MetricSample.run_id == run.id, MetricSample.slot == slot)
+            .order_by(MetricSample.ts.desc())
+            .limit(2)
+        ).scalars().all()
+        if len(rows) < 2:
+            continue
+        latest, prev = rows[0], rows[1]
+        ok_total += max(0, (latest.hec_2xx or 0) - (prev.hec_2xx or 0))
+        latest_fail = (latest.hec_5xx or 0) + (latest.hec_timeouts or 0)
+        prev_fail = (prev.hec_5xx or 0) + (prev.hec_timeouts or 0)
+        fail_total += max(0, latest_fail - prev_fail)
+    return ok_total, fail_total
+
+
+def _open_backpressure_since(db, run):
+    # type: (Session, Run) -> Optional[datetime.datetime]
+    """Start instant of the current un-cleared backpressure streak, or None.
+
+    The earliest ``backpressure_detected`` after the most recent
+    ``backpressure_cleared`` (or ever, if never cleared). Events are the state,
+    so the sustained-duration test needs no extra columns.
+    """
+    db.flush()  # autoflush is off; see _last_state_ts
+    rows = db.execute(
+        select(RunEvent)
+        .where(RunEvent.run_id == run.id,
+               RunEvent.kind.in_(("backpressure_detected", "backpressure_cleared")))
+        .order_by(RunEvent.ts.asc())
+    ).scalars().all()
+    since = None  # type: Optional[datetime.datetime]
+    for event in rows:
+        if event.kind == "backpressure_cleared":
+            since = None
+        elif since is None:  # first detected of a fresh streak
+            since = event.ts
+    return since
 
 
 def _reap_draining(db, run, drivers, now):

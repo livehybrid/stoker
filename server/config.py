@@ -58,6 +58,12 @@ DEFAULT_METRIC_DELETE_CHUNK = 5000    # rows per delete batch (never one huge tx
 # stoker:metrics event this often when dogfood is enabled.
 DEFAULT_DOGFOOD_METRICS_INTERVAL_S = 30.0
 
+# Target-health backpressure (opt-in): the share of recent fleet HEC delivery
+# attempts that must FAIL (5xx / timeouts) to count as the target struggling,
+# and how long that must hold before the supervisor drains the run.
+DEFAULT_BACKPRESSURE_MIN_FAILED_FRACTION = 0.5
+DEFAULT_BACKPRESSURE_SUSTAINED_S = 60.0
+
 # rawreplay (Piston) dataset fetch: a pack.yaml `dataset_url` (e.g. an
 # attack_data capture) is downloaded at bundle-build time. https only, capped so
 # a hostile/huge URL cannot exhaust the control-plane disk, and sha-verifiable
@@ -219,6 +225,18 @@ class Settings:
     max_eps_per_worker: Optional[float] = None
     max_gb_day_per_worker: Optional[float] = None
     per_engine_ceilings: Tuple[Tuple[str, str, float], ...] = ()
+
+    # --- Target-health backpressure ------------------------------------------ #
+    # Opt-in (env STOKER_BACKPRESSURE_DRAIN): when the HEC target is failing to
+    # accept data — recent delivery attempts across the fleet failing (5xx /
+    # timeouts) beyond ``backpressure_min_failed_fraction`` and sustained for
+    # ``backpressure_sustained_s`` — the supervisor DRAINS the run rather than
+    # keep hammering a struggling target, flags the target red and records the
+    # decision on the run audit trail. Disabled by default so no existing run
+    # changes behaviour until an operator opts in.
+    backpressure_drain_enabled: bool = False
+    backpressure_min_failed_fraction: float = DEFAULT_BACKPRESSURE_MIN_FAILED_FRACTION
+    backpressure_sustained_s: float = DEFAULT_BACKPRESSURE_SUSTAINED_S
 
     # --- Builtin packs ------------------------------------------------------- #
     # A directory of pack roots registered (and re-linted) at every boot, so the
@@ -500,6 +518,13 @@ def load_settings(env=None):
         max_eps_per_worker=_get_opt_float(env, "STOKER_MAX_EPS_PER_WORKER"),
         max_gb_day_per_worker=_get_opt_float(env, "STOKER_MAX_GB_DAY_PER_WORKER"),
         per_engine_ceilings=_parse_engine_ceilings(env),
+        backpressure_drain_enabled=_get_bool(env, "STOKER_BACKPRESSURE_DRAIN", False),
+        backpressure_min_failed_fraction=_get_float(
+            env, "STOKER_BACKPRESSURE_MIN_FAILED_FRACTION",
+            DEFAULT_BACKPRESSURE_MIN_FAILED_FRACTION),
+        backpressure_sustained_s=_get_float(
+            env, "STOKER_BACKPRESSURE_SUSTAINED_S",
+            DEFAULT_BACKPRESSURE_SUSTAINED_S),
     )
 
 
