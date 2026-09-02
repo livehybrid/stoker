@@ -24,6 +24,7 @@ import type {
   PackOut,
   PackPreview,
   PackPreviewRun,
+  PackUploadMeta,
   RepoCreate,
   RepoCreated,
   RepoOut,
@@ -138,13 +139,18 @@ function messageFromDetail(status: number, detail: unknown): string {
 async function request<T>(
   method: string,
   path: string,
-  opts: { query?: Query; body?: unknown } = {},
+  opts: { query?: Query; body?: unknown; form?: FormData } = {},
 ): Promise<T> {
   const init: RequestInit = {
     method,
     headers: { Accept: "application/json" },
   };
-  if (opts.body !== undefined) {
+  if (opts.form !== undefined) {
+    // multipart/form-data (file uploads): pass the FormData through and let
+    // the browser set the Content-Type itself — it must carry the generated
+    // boundary, so setting the header manually here would break parsing.
+    init.body = opts.form;
+  } else if (opts.body !== undefined) {
     (init.headers as Record<string, string>)["Content-Type"] =
       "application/json";
     init.body = JSON.stringify(opts.body);
@@ -231,6 +237,21 @@ export const packs = {
   list: (repo?: number) =>
     request<PackOut[]>("GET", "/packs", { query: { repo } }),
   get: (id: number) => request<PackOut>("GET", `/packs/${id}`),
+  // Upload a pack archive (.tar.gz/.tgz/.tar or .zip; the server detects the
+  // format from the content). Multipart: the file plus optional name /
+  // description form fields. The response is an ordinary PackOut — a pack
+  // that fails lint still registers, with the errors in lint_errors_json.
+  upload: (file: File, meta: PackUploadMeta = {}) => {
+    const form = new FormData();
+    form.append("file", file);
+    if (meta.name) form.append("name", meta.name);
+    if (meta.description) form.append("description", meta.description);
+    return request<PackOut>("POST", "/packs/upload", { form });
+  },
+  // Delete a locally-registered pack (an uploaded pack's extracted directory
+  // is removed server-side). 409 when a spec references it or it came from a
+  // repo (delete the repo instead).
+  delete: (id: number) => request<void>("DELETE", `/packs/${id}`),
   preview: (id: number) =>
     request<PackPreview>("GET", `/packs/${id}/preview`),
   // Render a few sample events in-process (no fleet, no HEC target). `n` is

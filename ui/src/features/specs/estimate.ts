@@ -3,27 +3,55 @@
 // The authoritative estimate is GET /specs/{id}/estimate (server/engines/
 // ceilings.py + api._estimate). But the wizard must show live arithmetic while
 // the operator is still choosing values, before any spec is saved (a new spec
-// has no id to estimate against). So this mirrors ceilings.py exactly, and the
-// wizard reconciles against the real endpoint once a spec exists.
+// has no id to estimate against). So this mirrors the ARITHMETIC of ceilings.py
+// exactly, while the CEILING VALUES come from the server: ceilings are
+// configurable (env vars, per-fleet config_json overrides), and GET /api/fleets
+// reports each fleet's effective per-engine table (FleetOut.ceilings), which
+// the wizard threads in via `checkSlice`/`localEstimate`'s `ceilings` argument.
 //
-// Keep these constants and the check in lock-step with server/engines/ceilings.py.
+// Keep the check arithmetic in lock-step with server/engines/ceilings.py.
 
 import type { RateMode, SpecEstimate } from "../../lib/types";
 
-// engine -> per-worker ceilings (mirrors CEILINGS in ceilings.py).
-export interface Ceiling {
-  max_gb_day_per_worker: number;
-  max_eps_per_worker: number;
+// Effective per-worker ceilings for one engine, as the server reports them
+// (FleetOut.ceilings[engine] / SpecEstimate.ceilings). A null/absent bound is
+// DISABLED: no limit on that axis.
+export interface EffectiveCeiling {
+  max_gb_day_per_worker?: number | null;
+  max_eps_per_worker?: number | null;
 }
 
-export const CEILINGS: Record<string, Ceiling> = {
+// engine -> per-worker ceilings (mirrors the built-in default CEILINGS table in
+// ceilings.py). FALLBACK ONLY: used until the server has answered with the
+// effective (configurable) ceilings — see the module comment above. Once
+// FleetOut.ceilings is available it always wins, so these constants can only
+// disagree with the server for the moment the fleets query is in flight.
+export const CEILINGS: Record<string, EffectiveCeiling> = {
   eventgen: { max_gb_day_per_worker: 25.0, max_eps_per_worker: 5000.0 },
 };
+
+/**
+ * Read the server-reported effective ceilings for one engine off a fleet row
+ * (`FleetOut.ceilings`, from GET /api/fleets). Typed structurally so the shared
+ * FleetOut type does not have to be imported here. Returns null when the server
+ * has not answered yet — callers then fall back to the CEILINGS defaults above.
+ */
+export function fleetCeilings(
+  fleet:
+    // `name` overlaps with FleetOut so the structural (weak) type is accepted
+    // without importing FleetOut here.
+    | { name?: string; ceilings?: Record<string, EffectiveCeiling | null> | null }
+    | null
+    | undefined,
+  engine: string,
+): EffectiveCeiling | null {
+  return fleet?.ceilings?.[engine] ?? null;
+}
 
 const SECONDS_PER_DAY = 86400.0;
 const BYTES_PER_GB = 1_000_000_000.0; // decimal GB, matching eventgen perDayVolume
 
-export function ceilingFor(engine: string): Partial<Ceiling> {
+export function ceilingFor(engine: string): EffectiveCeiling {
   return CEILINGS[engine] ?? {};
 }
 
@@ -102,9 +130,13 @@ export function checkSlice(
   perWorkerValue: number | null,
   bytesPerEvent: number | null | undefined,
   engine = "eventgen",
+  // Server-resolved effective ceilings (fleetCeilings / SpecEstimate.ceilings);
+  // falls back to the hardcoded defaults while the server has not answered. A
+  // null bound inside is disabled and never checked (mirrors check_slice).
+  ceilings?: EffectiveCeiling | null,
 ): CeilingCheck {
-  const ceilings = CEILINGS[engine];
-  if (!ceilings) {
+  const table = ceilings ?? CEILINGS[engine];
+  if (!table) {
     return { ok: true, suggestedWorkers: null, limitingFactor: null, detail: null };
   }
   if (rateMode === "count_interval") {
@@ -113,21 +145,23 @@ export function checkSlice(
   if (perWorkerValue == null || perWorkerValue <= 0) {
     return { ok: true, suggestedWorkers: null, limitingFactor: null, detail: null };
   }
-  const maxEps = ceilings.max_eps_per_worker;
-  const maxGb = ceilings.max_gb_day_per_worker;
+  const maxEps = table.max_eps_per_worker;
+  const maxGb = table.max_gb_day_per_worker;
 
   if (rateMode === "eps") {
     const eps = perWorkerValue;
     const gbDay = epsToGbDay(eps, bytesPerEvent);
-    if (eps > maxEps) return exceeded("eps", eps, maxEps);
-    if (gbDay != null && gbDay > maxGb) return exceeded("gb_day", gbDay, maxGb);
+    if (maxEps != null && eps > maxEps) return exceeded("eps", eps, maxEps);
+    if (maxGb != null && gbDay != null && gbDay > maxGb)
+      return exceeded("gb_day", gbDay, maxGb);
     return { ok: true, suggestedWorkers: null, limitingFactor: null, detail: null };
   }
   // per_day_gb
   const gbDay = perWorkerValue;
   const eps = gbDayToEps(gbDay, bytesPerEvent);
-  if (gbDay > maxGb) return exceeded("gb_day", gbDay, maxGb);
-  if (eps != null && eps > maxEps) return exceeded("eps", eps, maxEps);
+  if (maxGb != null && gbDay > maxGb) return exceeded("gb_day", gbDay, maxGb);
+  if (maxEps != null && eps != null && eps > maxEps)
+    return exceeded("eps", eps, maxEps);
   return { ok: true, suggestedWorkers: null, limitingFactor: null, detail: null };
 }
 
@@ -143,13 +177,16 @@ export function localEstimate(params: {
   workers: number;
   engine: string;
   bytesPerEvent: number | null | undefined;
+  /** Server-resolved effective ceilings for the chosen fleet + engine
+   *  (fleetCeilings); omit/null to fall back to the hardcoded defaults. */
+  ceilings?: EffectiveCeiling | null;
 }): SpecEstimate {
   const { rateMode, rateValue, engine, bytesPerEvent } = params;
   const workers = Math.max(1, Math.floor(params.workers) || 1);
   const perWorker = perWorkerShare(rateMode, rateValue, workers);
-  const check = checkSlice(rateMode, perWorker, bytesPerEvent, engine);
+  const check = checkSlice(rateMode, perWorker, bytesPerEvent, engine, params.ceilings);
 
-  const table = ceilingFor(engine);
+  const table = params.ceilings ?? ceilingFor(engine);
   const maxEps = table.max_eps_per_worker ?? null;
   const maxGb = table.max_gb_day_per_worker ?? null;
 

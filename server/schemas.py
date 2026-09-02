@@ -190,6 +190,15 @@ class PackCreate(BaseModel):
     description: Optional[str] = None
 
 
+# ``POST /api/packs/upload`` has no request model here by design: it is a
+# multipart/form-data request (a ``file`` archive part plus optional ``name`` /
+# ``description`` form fields), which FastAPI binds via File()/Form() in the
+# route rather than a JSON body model. Its response is :class:`PackOut` — an
+# uploaded pack is an ordinary local pack row, and the lint outcome rides the
+# same ``lint_status`` / ``lint_errors_json`` fields every other pack uses, so
+# the operator sees WHY a bad pack failed lint in the create response itself.
+
+
 class PackOut(BaseModel):
     model_config = _ORM
 
@@ -301,12 +310,19 @@ class FleetOut(BaseModel):
     ...) is exposed, never credential material (the EKS fleet design stores
     encrypted access keys in ``config_json``, which must not leave the server,
     even as ciphertext).
+
+    ``ceilings`` maps each engine with a ceiling table to its EFFECTIVE
+    per-worker ceilings on THIS fleet (built-in defaults overlaid with env
+    config and the fleet's own ``config_json`` override — see
+    engines.ceilings.resolve_ceilings). A null bound means it is disabled. The
+    wizard reads these so its live arithmetic always matches the submit guard.
     """
 
     id: int
     name: str
     driver: str
     config: Optional[Dict[str, Any]] = None
+    ceilings: Optional[Dict[str, Dict[str, Optional[float]]]] = None
     created_at: datetime.datetime
 
 
@@ -317,6 +333,10 @@ class FleetOut(BaseModel):
 class SpecCreate(BaseModel):
     name: str
     pack_id: int
+    # Additional pack ids to merge with ``pack_id`` into one bundle at run time
+    # (eventgen packs only; the route validates and the submit gate enforces).
+    # Omitted/None/empty = the classic single-pack spec.
+    extra_pack_ids: Optional[List[int]] = None
     target_id: int
     ref: str = "local"
     engine: str = "eventgen"  # eventgen | rawreplay
@@ -346,6 +366,9 @@ class SpecUpdate(BaseModel):
 
     name: Optional[str] = None
     pack_id: Optional[int] = None
+    # Send a list to replace the merged-pack set, [] to clear it back to a
+    # single-pack spec; omit to leave it unchanged (exclude_unset semantics).
+    extra_pack_ids: Optional[List[int]] = None
     target_id: Optional[int] = None
     ref: Optional[str] = None
     engine: Optional[str] = None
@@ -378,6 +401,7 @@ class SpecOut(BaseModel):
     id: int
     name: str
     pack_id: int
+    extra_pack_ids_json: Optional[List[int]] = None
     target_id: int
     ref: str
     engine: str
@@ -407,6 +431,12 @@ class SpecEstimate(BaseModel):
     ok: bool
     suggested_workers: Optional[int] = None
     detail: Optional[str] = None
+    # The EFFECTIVE per-worker ceilings the check ran against (built-in table
+    # overlaid with env config and the spec's fleet override — see
+    # engines.ceilings.resolve_ceilings). None = the engine has no ceiling
+    # table at all; a null bound inside means that bound is disabled. The UI
+    # uses these instead of its hardcoded mirror of the defaults.
+    ceilings: Optional[Dict[str, Optional[float]]] = None
 
 
 # --------------------------------------------------------------------------- #

@@ -5,12 +5,38 @@ import type { SlotLatest } from "./metrics";
 import { leaseTargetShare } from "./metrics";
 import { fmtElapsed, fmtInt, fmtNum } from "./format";
 
-// Lease roster (section 10.3): slot, holder, node, EPS, lag s, queue depth, RSS,
-// restarts, state. Live gauge columns (EPS/lag/queue/RSS) come from the latest
-// metric sample per slot; identity + restarts + heartbeat come off the lease.
+// Lease roster (section 10.3): slot, holder, node, assigned work, EPS, lag s,
+// queue depth, RSS, restarts, state. Live gauge columns (EPS/lag/queue/RSS)
+// come from the latest metric sample per slot; identity + restarts + heartbeat
+// come off the lease. "Assigned" is the worker's own report of how many work
+// units it holds (metrics series / eventgen stanzas / a replay dataset) — a
+// slot legitimately holding NONE is flagged in red with the worker's reason,
+// so a 0 EPS row is never a silent mystery.
 
 // A lag figure over this many seconds is shown in red on the row.
 const LAG_WARN_S = 300;
+
+/**
+ * The worker-reported count of work units this lease holds, or null when the
+ * worker has not (yet) reported one — an old worker image, or a lease that has
+ * not heart-beaten since claiming. Reads the top-level field when the server
+ * exposes one, falling back to the private `_assigned_work` key the control
+ * plane stores inside share_json.
+ */
+export function leaseAssignedWork(lease: LeaseOut): number | null {
+  if (typeof lease.assigned_work === "number") return lease.assigned_work;
+  const v = lease.share_json?.["_assigned_work"];
+  return typeof v === "number" && !Number.isNaN(v) ? v : null;
+}
+
+/** The worker's short explanation for holding no work (null when absent). */
+export function leaseAssignedReason(lease: LeaseOut): string | null {
+  if (typeof lease.assigned_reason === "string" && lease.assigned_reason) {
+    return lease.assigned_reason;
+  }
+  const v = lease.share_json?.["_assigned_reason"];
+  return typeof v === "string" && v ? v : null;
+}
 
 export function LeaseTable({
   leases,
@@ -29,6 +55,25 @@ export function LeaseTable({
       ),
     },
     { key: "node", header: "Node", cell: (l) => l.node ?? "—" },
+    {
+      key: "assigned",
+      header: "Assigned work",
+      className: "text-right tabular-nums",
+      cell: (l) => {
+        const assigned = leaseAssignedWork(l);
+        if (assigned == null) return "—";
+        if (assigned > 0) return fmtInt(assigned);
+        const reason = leaseAssignedReason(l);
+        return (
+          <span
+            className="font-medium text-red-400"
+            title={reason ?? "this worker holds no work and will generate nothing"}
+          >
+            none
+          </span>
+        );
+      },
+    },
     {
       key: "target",
       header: "Target",

@@ -99,6 +99,41 @@ def test_head_equals_models_no_pending_autogen(tmp_path):
     assert not material, "schema drift from the models: %r" % material
 
 
+def test_delta_0003_adds_specs_extra_pack_ids(tmp_path):
+    """A live DB stamped at 0002 (before multi-pack specs) gains the
+    ``specs.extra_pack_ids_json`` column from the 0003 delta — the real upgrade
+    path, distinct from a fresh DB where the baseline create_all already has it.
+    Simulated by migrating to head, dropping the column and re-stamping at 0002."""
+    _use(tmp_path, "delta0003.db")
+    from alembic import command
+    from alembic.config import Config
+
+    from server.migrate import run_migrations
+
+    run_migrations()
+
+    def _spec_columns():
+        # type: () -> set
+        return {c["name"] for c in inspect(db_mod.get_engine()).get_columns("specs")}
+
+    assert "extra_pack_ids_json" in _spec_columns()  # fresh DB: baseline has it
+
+    # Rewind to the pre-0003 shape: drop the column, stamp at 0002.
+    with db_mod.get_engine().begin() as conn:
+        conn.execute(text("ALTER TABLE specs DROP COLUMN extra_pack_ids_json"))
+        cfg = Config()
+        cfg.set_main_option(
+            "script_location",
+            os.path.join(os.path.dirname(db_mod.__file__), "migrations"))
+        cfg.attributes["connection"] = conn
+        command.stamp(cfg, "0002_bigint_counters_and_indexes", purge=True)
+    assert "extra_pack_ids_json" not in _spec_columns()
+
+    run_migrations()  # managed at 0002 -> upgrade head applies 0003
+    assert _head_rev() == "0003_spec_extra_pack_ids"
+    assert "extra_pack_ids_json" in _spec_columns()
+
+
 def test_baseline_upgrade_builds_schema_via_cli(tmp_path):
     """A plain ``alembic upgrade head`` on an empty DB runs the baseline and
     creates the schema (the manual CLI path, distinct from run_migrations)."""

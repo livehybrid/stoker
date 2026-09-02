@@ -64,6 +64,23 @@ DEFAULT_DOGFOOD_METRICS_INTERVAL_S = 30.0
 # when the pack declares a `dataset_sha256`.
 DEFAULT_RAWREPLAY_MAX_DATASET_BYTES = 512 * 1024 * 1024  # 512 MiB
 DEFAULT_RAWREPLAY_FETCH_TIMEOUT_S = 120.0
+
+# Pack upload (POST /api/packs/upload): where extracted packs land, and the
+# resource caps on the UNTRUSTED archive an operator uploads. The directory
+# sits beside BUNDLE_DIR / REPO_CLONE_DIR on the control-plane volume so
+# uploaded packs survive a restart (mount a volume over /data). The caps are
+# extraction-bomb defences (server/packupload.py enforces them while streaming,
+# never from the archive's own declared sizes): the archive body itself, the
+# total uncompressed payload, any single member, and the member count. All are
+# deliberately generous for a real pack (conf + samples, or a rawreplay
+# dataset) while bounding what a hostile archive can make the control plane
+# hold; the member cap mirrors DEFAULT_RAWREPLAY_MAX_DATASET_BYTES, the
+# largest single legitimate pack file we expect.
+DEFAULT_PACK_UPLOAD_DIR = "/data/uploads"
+DEFAULT_PACK_UPLOAD_MAX_ARCHIVE_BYTES = 256 * 1024 * 1024  # 256 MiB upload body
+DEFAULT_PACK_UPLOAD_MAX_TOTAL_BYTES = 1024 * 1024 * 1024   # 1 GiB unpacked total
+DEFAULT_PACK_UPLOAD_MAX_MEMBER_BYTES = 512 * 1024 * 1024   # 512 MiB per member
+DEFAULT_PACK_UPLOAD_MAX_MEMBERS = 10_000
 # The three authorisation roles, most to least privileged. ``admin`` gates user
 # management; validated here so a bad STOKER_PROXY_DEFAULT_ROLE fails at boot.
 VALID_ROLES = ("viewer", "operator", "admin")
@@ -75,6 +92,20 @@ DEFAULT_K8S_NAMESPACE = "stoker"
 # Worker cap for the in-process fleet (workers run INSIDE the control-plane
 # container, sharing its CPU/memory — small workloads only by design).
 DEFAULT_INPROCESS_MAX_WORKERS = 2
+
+# Per-worker rate ceilings (engines/ceilings.py). The built-in table (25 GB/day,
+# 5000 EPS per worker) is deliberately conservative; a real worker often beats
+# it when the data is cheap to template and Splunk is close on the network. The
+# env can therefore raise (or disable) it globally: STOKER_MAX_EPS_PER_WORKER /
+# STOKER_MAX_GB_DAY_PER_WORKER set the default for every engine, and a
+# per-engine suffix (e.g. STOKER_MAX_GB_DAY_PER_WORKER_EVENTGEN) narrows it to
+# one engine. Unset = the built-in default; 0 (or negative) = that bound is
+# DISABLED entirely. A per-fleet config_json override (same key names) still
+# beats all of these — resolution lives in engines.ceilings.resolve_ceilings.
+_CEILING_ENV_PREFIXES = (
+    ("STOKER_MAX_EPS_PER_WORKER_", "max_eps_per_worker"),
+    ("STOKER_MAX_GB_DAY_PER_WORKER_", "max_gb_day_per_worker"),
+)
 
 
 class ConfigError(Exception):
@@ -147,6 +178,17 @@ class Settings:
     rawreplay_max_dataset_bytes: int = DEFAULT_RAWREPLAY_MAX_DATASET_BYTES
     rawreplay_fetch_timeout_s: float = DEFAULT_RAWREPLAY_FETCH_TIMEOUT_S
 
+    # --- Pack upload (archives via the operator API) ------------------------- #
+    # Where uploaded packs are extracted to (env PACK_UPLOAD_DIR; a persistent
+    # volume in prod, so uploads survive a restart) and the extraction-bomb caps
+    # (see the DEFAULT_PACK_UPLOAD_* comment above). All defaulted so existing
+    # Settings(...) call sites stay valid.
+    pack_upload_dir: str = DEFAULT_PACK_UPLOAD_DIR
+    pack_upload_max_archive_bytes: int = DEFAULT_PACK_UPLOAD_MAX_ARCHIVE_BYTES
+    pack_upload_max_total_bytes: int = DEFAULT_PACK_UPLOAD_MAX_TOTAL_BYTES
+    pack_upload_max_member_bytes: int = DEFAULT_PACK_UPLOAD_MAX_MEMBER_BYTES
+    pack_upload_max_members: int = DEFAULT_PACK_UPLOAD_MAX_MEMBERS
+
     # --- Kubernetes fleets --------------------------------------------------- #
     # Namespace the seeded ``k8s-local`` fleet runs worker Jobs in (env
     # K8S_NAMESPACE); per-fleet ``config_json.namespace`` still overrides it.
@@ -160,6 +202,17 @@ class Settings:
     # STOKER_INPROCESS_MAX_WORKERS) and custom-code packs are refused at submit.
     inprocess_fleet_enabled: bool = False
     inprocess_max_workers: int = DEFAULT_INPROCESS_MAX_WORKERS
+
+    # --- Per-worker rate ceilings -------------------------------------------- #
+    # Env-configured defaults for the submit-time ceiling check (see the
+    # _CEILING_ENV_PREFIXES comment above). None = unset (the built-in table in
+    # engines/ceilings.py applies); <= 0 = that bound is disabled entirely.
+    # ``per_engine_ceilings`` holds the per-engine env overrides as sorted
+    # (engine, bound_key, raw_value) triples (a tuple so the dataclass stays
+    # hashable/frozen-friendly, like ``trusted_proxies``).
+    max_eps_per_worker: Optional[float] = None
+    max_gb_day_per_worker: Optional[float] = None
+    per_engine_ceilings: Tuple[Tuple[str, str, float], ...] = ()
 
     # --- Builtin packs ------------------------------------------------------- #
     # A directory of pack roots registered (and re-linted) at every boot, so the
@@ -218,6 +271,39 @@ def _get_float(env, key, default):
         return float(raw)
     except ValueError:
         raise ConfigError("%s must be a number, got %r" % (key, raw))
+
+
+def _get_opt_float(env, key):
+    # type: (Mapping[str, str], str) -> Optional[float]
+    """Parse an optional float env var (unset/blank -> None, not a default)."""
+    raw = _get(env, key)
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        raise ConfigError("%s must be a number, got %r" % (key, raw))
+
+
+def _parse_engine_ceilings(env):
+    # type: (Mapping[str, str]) -> Tuple[Tuple[str, str, float], ...]
+    """Scan the env for per-engine ceiling overrides.
+
+    ``STOKER_MAX_EPS_PER_WORKER_<ENGINE>`` / ``STOKER_MAX_GB_DAY_PER_WORKER_<ENGINE>``
+    (engine name uppercased, e.g. ``..._EVENTGEN``) override the global ceiling
+    for that one engine. Returned as sorted (engine, bound_key, value) triples;
+    a malformed value is a hard :class:`ConfigError` at boot, matching the other
+    numeric settings. Blank values are ignored (treated as unset).
+    """
+    entries = []
+    for env_key in env:
+        for prefix, bound_key in _CEILING_ENV_PREFIXES:
+            if env_key.startswith(prefix) and len(env_key) > len(prefix):
+                value = _get_opt_float(env, env_key)
+                if value is None:
+                    continue
+                entries.append((env_key[len(prefix):].lower(), bound_key, value))
+    return tuple(sorted(entries))
 
 
 def _get_bool(env, key, default=False):
@@ -360,12 +446,28 @@ def load_settings(env=None):
         rawreplay_fetch_timeout_s=_get_float(
             env, "RAWREPLAY_FETCH_TIMEOUT_S",
             DEFAULT_RAWREPLAY_FETCH_TIMEOUT_S),
+        pack_upload_dir=_get(env, "PACK_UPLOAD_DIR", DEFAULT_PACK_UPLOAD_DIR)
+        or DEFAULT_PACK_UPLOAD_DIR,
+        pack_upload_max_archive_bytes=_get_int(
+            env, "PACK_UPLOAD_MAX_ARCHIVE_BYTES",
+            DEFAULT_PACK_UPLOAD_MAX_ARCHIVE_BYTES),
+        pack_upload_max_total_bytes=_get_int(
+            env, "PACK_UPLOAD_MAX_TOTAL_BYTES",
+            DEFAULT_PACK_UPLOAD_MAX_TOTAL_BYTES),
+        pack_upload_max_member_bytes=_get_int(
+            env, "PACK_UPLOAD_MAX_MEMBER_BYTES",
+            DEFAULT_PACK_UPLOAD_MAX_MEMBER_BYTES),
+        pack_upload_max_members=_get_int(
+            env, "PACK_UPLOAD_MAX_MEMBERS", DEFAULT_PACK_UPLOAD_MAX_MEMBERS),
         k8s_namespace=_get(env, "K8S_NAMESPACE", DEFAULT_K8S_NAMESPACE)
         or DEFAULT_K8S_NAMESPACE,
         inprocess_fleet_enabled=_get_bool(env, "STOKER_INPROCESS_FLEET", False),
         inprocess_max_workers=max(1, _get_int(
             env, "STOKER_INPROCESS_MAX_WORKERS", DEFAULT_INPROCESS_MAX_WORKERS)),
         builtin_packs_dir=_get(env, "STOKER_BUILTIN_PACKS_DIR"),
+        max_eps_per_worker=_get_opt_float(env, "STOKER_MAX_EPS_PER_WORKER"),
+        max_gb_day_per_worker=_get_opt_float(env, "STOKER_MAX_GB_DAY_PER_WORKER"),
+        per_engine_ceilings=_parse_engine_ceilings(env),
     )
 
 

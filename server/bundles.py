@@ -1224,6 +1224,425 @@ def build_from_pack(pack_dir, bundle_dir=None, settings=None):
     return BuiltBundle(digest=digest, path=path, size_bytes=len(data), reused=False)
 
 
+# --------------------------------------------------------------------------- #
+# Multi-pack merge: several eventgen packs -> ONE synthesised bundle.
+#
+# A spec may reference extra packs beyond its primary one. Rather than teaching
+# the worker about multiple bundles (which would change the whole worker
+# contract — bundle download, slice, engine subprocess), the control plane
+# merges the selected packs into a single pack here: the merged eventgen.conf
+# holds the union of the input packs' stanzas and the merged samples/ holds the
+# union of their sample files, everything namespaced per pack so two packs that
+# both ship a ``web.sample`` stanza + file can never collide.
+#
+# Namespacing scheme (and why): the vendored eventgen matches a stanza NAME as
+# a regex against the files in ``sampleDir`` and requires the match to cover
+# the whole filename, and the worker's conf-rewrite stamps ONE ``sampleDir``
+# for every stanza — so the merged samples must live in a single flat
+# directory, and stanza names and sample filenames must be renamed
+# consistently. Each pack gets a namespace: its name sanitised to
+# ``[A-Za-z0-9_-]`` with hyphen runs collapsed (so the namespace can never
+# contain the ``--`` separator, keeping ``<ns>--`` prefixes unambiguous), and
+# every stanza and sample file is prefixed ``<ns>--``. All namespace
+# characters are regex literals, so a prefixed stanza regex ``ns--<orig>``
+# matches exactly the files ``ns--<f>`` its original ``<orig>`` matched —
+# intra-pack matching is preserved and cross-pack matching is impossible.
+# Nested sample paths are flattened (``sub/f.csv`` -> ``ns--sub--f.csv``) so
+# the merged samples/ stays flat; ``sampleFile`` values and ``file``/``mvfile``/
+# ``seqfile`` token replacement paths under ``samples/`` are rewritten to the
+# flattened names (the engine runs with cwd = pack root, so those relative
+# paths must resolve inside the MERGED pack). Per-pack ``[global]``/
+# ``[default]`` sections are materialised into that pack's own stanzas (stanza
+# keys win) and dropped, so one pack's globals can never leak into another's.
+#
+# Rate apportionment across merged packs: the worker splits its share across
+# stanzas by declared count/interval (``declared_eps_weights``), so the merged
+# conf keeps every stanza's declaration verbatim and the run rate splits across
+# the UNION of stanzas proportionally to those declarations — a pack declaring
+# 10x the events/s of another receives ~10x the run rate. Stanzas with no
+# declaration take the mean of the declared ones, exactly as in a single pack.
+# The merged ``bytes_per_event`` estimate is the weight-weighted mean of the
+# per-stanza estimates (the expected bytes/event of the merged stream), so the
+# ceiling / target-cap arithmetic stays honest.
+#
+# Determinism: inputs are sorted by namespace before anything is emitted, the
+# conf and manifest are rendered deterministically, and the tarball goes
+# through the same reproducible ``build_tarball_bytes`` — so the same SET of
+# packs always produces the same digest regardless of selection order.
+#
+# Only eventgen packs merge: rawreplay is a single dataset forced to one
+# worker and metrics packs are synthesised from a builder config, so a merge
+# involving either raises :class:`BundleError` (the submit route refuses with
+# a 422 before ever reaching this).
+# --------------------------------------------------------------------------- #
+
+# Separator between a pack namespace and the original stanza/file name. Two
+# hyphens: a sanitised namespace collapses hyphen runs, so ``--`` can never
+# occur inside one and a ``<ns>--`` prefix is unambiguous (no namespace can be
+# a "<other-ns>--..." prefix of another's files).
+MERGE_SEP = "--"
+# FIXED merged-pack basename (like the metrics builder's "metricpack") so the
+# archive arcnames are stable across builds -> reproducible digest / dedup.
+_MERGED_PACK_BASENAME = "mergedpack"
+# Token replacement types whose ``replacement`` is a file path (mirrors the
+# vendored eventgen's eventgentoken handling).
+_FILE_TOKEN_TYPES = frozenset(("file", "mvfile", "seqfile"))
+# Mirrors the worker's confrewrite.EVENTGEN_DEFAULT_INTERVAL_S (the control-
+# plane image does not ship the worker package, so the constant is duplicated;
+# the merged-estimate weights below must match the worker's split exactly).
+_EVENTGEN_DEFAULT_INTERVAL_S = 60.0
+
+
+def merge_namespace(name):
+    # type: (str) -> str
+    """Sanitise a pack name into a merge namespace.
+
+    Keeps ``[A-Za-z0-9_]``, maps every other character to ``-``, collapses
+    hyphen runs and strips edge hyphens. The result contains only regex-literal
+    characters (so a ``<ns>--`` stanza prefix matches itself and nothing else)
+    and can never contain the ``--`` separator. An empty result falls back to
+    ``pack``.
+    """
+    import re
+
+    ns = re.sub(r"[^A-Za-z0-9_]+", "-", name or "")
+    ns = re.sub(r"-{2,}", "-", ns).strip("-")
+    return ns or "pack"
+
+
+def merge_pack_namespaces(pairs):
+    # type: (List[Tuple[str, Any]]) -> List[str]
+    """Unique namespaces for a list of ``(pack_name, unique_key)`` pairs.
+
+    The namespace is normally just the sanitised pack name; when two packs
+    sanitise to the same namespace, each colliding one gets ``-<key>`` (the
+    pack's id) appended so the merged stanzas stay distinct. Deterministic for
+    a given set of pack rows, so the merged digest is stable across rebuilds.
+    Raises :class:`BundleError` if uniqueness still cannot be achieved.
+    """
+    base = [merge_namespace(name) for name, _key in pairs]
+    counts = {}  # type: Dict[str, int]
+    for ns in base:
+        counts[ns] = counts.get(ns, 0) + 1
+    out = []  # type: List[str]
+    for ns, (_name, key) in zip(base, pairs):
+        out.append(ns if counts[ns] == 1 else "%s-%s" % (ns, key))
+    if len(set(out)) != len(out):
+        raise BundleError(
+            "cannot derive unique merge namespaces for packs %r"
+            % [name for name, _key in pairs])
+    return out
+
+
+def _parse_eventgen_pack_for_merge(pack_dir):
+    # type: (str) -> Tuple[LintResult, configparser.RawConfigParser, List[str]]
+    """Lint + parse one pack for merging; only a clean eventgen pack passes.
+
+    Raises :class:`BundleError` for a rawreplay/metrics pack (their bundles are
+    not stanza+samples shaped and cannot merge), a pack that fails lint, or a
+    pack with a ``mode = replay`` stanza (engine-paced, single-worker — it has
+    no meaningful rate share to merge).
+    """
+    lint = lint_pack(pack_dir)
+    if lint.engine != "eventgen":
+        raise BundleError(
+            "pack %r is a %s pack; only eventgen packs can be merged into a "
+            "multi-pack bundle" % (pack_dir, lint.engine))
+    if not lint.ok:
+        raise BundleError("pack %r failed lint: %s" % (pack_dir, "; ".join(lint.errors)))
+    parser = _make_parser()
+    parser.read(os.path.join(pack_dir, CONF_RELPATH), encoding="utf-8")
+    sections = [s for s in parser.sections() if s.lower() not in _GLOBAL_SECTIONS]
+    for section in sections:
+        mode = (parser.get(section, "mode", fallback="sample") or "sample").strip()
+        if mode == "replay":
+            raise BundleError(
+                "pack %r stanza [%s] is mode = replay (engine-paced, single-"
+                "worker); replay stanzas cannot be merged into a multi-pack "
+                "bundle" % (pack_dir, section))
+    return lint, parser, sections
+
+
+def _pack_sample_map(pack_dir, ns):
+    # type: (str, str) -> Dict[str, Tuple[str, str]]
+    """Map each sample's samples/-relative path to ``(abs_path, merged_name)``.
+
+    Reuses :func:`_iter_pack_files` so the symlink / pack-root-escape guards
+    apply to the merge exactly as they do to a single-pack build. Nested paths
+    flatten with the same ``--`` separator (``sub/f.csv`` -> ``ns--sub--f.csv``)
+    so the merged samples directory is a single flat level.
+    """
+    base = os.path.basename(os.path.normpath(pack_dir))
+    prefix = os.path.join(base, "samples") + os.sep
+    out = {}  # type: Dict[str, Tuple[str, str]]
+    for full, arcname in _iter_pack_files(pack_dir):
+        if not arcname.startswith(prefix):
+            continue
+        rel = arcname[len(prefix):].replace(os.sep, "/")
+        merged = ns + MERGE_SEP + rel.replace("/", MERGE_SEP)
+        out[rel] = (full, merged)
+    return out
+
+
+def _rewrite_sample_ref(value, sample_map):
+    # type: (str, Dict[str, Tuple[str, str]]) -> str
+    """Rewrite a conf value referencing a file under ``samples/`` to its merged
+    name; anything unrecognised passes through unchanged.
+
+    Handles the two forms lint accepts for ``sampleFile`` (a plain name
+    resolved under samples/, or a pack-root-relative ``samples/...`` path) and
+    the ``file``/``mvfile`` token replacement form (``samples/x`` with an
+    optional trailing ``:<column>`` mirroring eventgen's own parse).
+    """
+    raw = (value or "").strip()
+    if not raw:
+        return value
+    # mvfile column suffix: "path:3". Split exactly as eventgen does (an int on
+    # the end is a column, anything else is part of the path).
+    parts = raw.split(":")
+    column = None  # type: Optional[str]
+    path = raw
+    if len(parts) > 1:
+        try:
+            int(parts[-1])
+            column = parts[-1]
+            path = ":".join(parts[:-1])
+        except ValueError:
+            pass
+    norm = path[2:] if path.startswith("./") else path
+    rel = None  # type: Optional[str]
+    if norm.startswith("samples/"):
+        rel = norm[len("samples/"):]
+    elif "/" not in norm and norm in sample_map:
+        # A plain name (sampleFile form): resolved under samples/.
+        rel = norm
+    if rel is None or rel not in sample_map:
+        return value
+    merged = "samples/" + sample_map[rel][1]
+    return merged + (":" + column if column is not None else "")
+
+
+def _merged_stanza_options(parser, section, pack_globals, sample_map):
+    # type: (configparser.RawConfigParser, str, Dict[str, Optional[str]], Dict[str, Tuple[str, str]]) -> Dict[str, Optional[str]]
+    """One stanza's merged option dict: pack globals under its own keys, with
+    every ``samples/`` file reference rewritten to its merged name."""
+    merged = dict(pack_globals)
+    # parser.items(section) already folds in the [DEFAULT] defaults.
+    merged.update(dict(parser.items(section)))
+    if merged.get("sampleFile"):
+        merged["sampleFile"] = _rewrite_sample_ref(merged["sampleFile"], sample_map)
+    for key in list(merged):
+        if not key.endswith(".replacementType"):
+            continue
+        if (merged.get(key) or "").strip() not in _FILE_TOKEN_TYPES:
+            continue
+        repl_key = key[: -len(".replacementType")] + ".replacement"
+        if merged.get(repl_key):
+            merged[repl_key] = _rewrite_sample_ref(merged[repl_key], sample_map)
+    return merged
+
+
+def _stanza_raw_eps(options):
+    # type: (Dict[str, Optional[str]]) -> Optional[float]
+    """A stanza's declared events/s (count/interval), None when undeclared.
+
+    Mirrors the worker's ``confrewrite.declared_eps_weights`` per-stanza rule,
+    so the merged-estimate weights below match the split the worker will make.
+    """
+    count = _as_float(options.get("count"))
+    if count is None or count <= 0:
+        return None
+    interval = _as_float(options.get("interval"))
+    step = interval if interval and interval > 0 else _EVENTGEN_DEFAULT_INTERVAL_S
+    return count / step
+
+
+def _fill_weights(raw):
+    # type: (List[Optional[float]]) -> List[float]
+    """Fill undeclared stanzas with the mean of the declared ones (worker rule)."""
+    declared = [w for w in raw if w is not None]
+    fill = (sum(declared) / len(declared)) if declared else 1.0
+    return [w if w is not None else fill for w in raw]
+
+
+def _stanza_bytes_per_event(pack_dir, lint, parser, section):
+    # type: (str, LintResult, configparser.RawConfigParser, str) -> Optional[float]
+    """Best bytes/event estimate for one stanza.
+
+    A pack-declared ``estimates.bytes_per_event`` wins for all its stanzas
+    (the same precedence :func:`lint_pack` gives it); otherwise the stanza's
+    own sample file is measured; otherwise the pack-level estimate stands in.
+    """
+    if lint.declared_bytes_per_event is not None:
+        return lint.declared_bytes_per_event
+    sample_name = parser.get(section, "sampleFile", fallback=None) or section
+    for base in (os.path.join(pack_dir, "samples"), pack_dir):
+        path = os.path.join(base, sample_name)
+        if os.path.isfile(path):
+            mean = _mean_line_bytes(path)
+            if mean is not None:
+                return mean
+    return lint.est_bytes_per_event
+
+
+def merged_est_bytes_per_event(pack_dirs):
+    # type: (List[str]) -> Optional[float]
+    """The weighted bytes/event a merge of ``pack_dirs`` would produce.
+
+    The same weights-times-estimates arithmetic :func:`build_from_packs` bakes
+    into the merged manifest, exposed separately so the submit route's ceiling
+    and target-cap gates can use the merged number BEFORE any bundle is built.
+    Returns ``None`` when the packs cannot be parsed/merged or no stanza has a
+    usable estimate (the caller falls back to the primary pack's estimate).
+    """
+    try:
+        parsed = [(d,) + _parse_eventgen_pack_for_merge(d) for d in pack_dirs]
+    except BundleError:
+        return None
+    raw = []  # type: List[Optional[float]]
+    bpes = []  # type: List[Optional[float]]
+    for pack_dir, lint, parser, sections in parsed:
+        for section in sections:
+            raw.append(_stanza_raw_eps(dict(parser.items(section))))
+            bpes.append(_stanza_bytes_per_event(pack_dir, lint, parser, section))
+    if not raw:
+        return None
+    weights = _fill_weights(raw)
+    num = sum(w * b for w, b in zip(weights, bpes) if b is not None)
+    den = sum(w for w, b in zip(weights, bpes) if b is not None)
+    if den <= 0:
+        return None
+    return round(num / den, 2)
+
+
+def build_from_packs(inputs, bundle_dir=None, settings=None):
+    # type: (List[Tuple[str, str]], Optional[str], Optional[Any]) -> BuiltBundle
+    """Merge two or more eventgen packs into ONE content-addressed bundle.
+
+    ``inputs`` is a list of ``(namespace, pack_dir)`` (namespaces from
+    :func:`merge_pack_namespaces`); it is sorted by namespace here so the same
+    set of packs yields the same digest regardless of selection order. See the
+    section comment above for the namespacing scheme and its rationale.
+
+    Raises :class:`BundleError` for fewer than two packs, a non-eventgen pack,
+    a lint failure or a flattened-sample-name collision. Returns a
+    :class:`BuiltBundle` exactly like :func:`build_from_pack`.
+    """
+    if len(inputs) < 2:
+        raise BundleError("a multi-pack bundle needs at least two packs")
+    if len({ns for ns, _dir in inputs}) != len(inputs):
+        raise BundleError("multi-pack namespaces must be unique: %r"
+                          % [ns for ns, _dir in inputs])
+    ordered = sorted(inputs, key=lambda pair: pair[0])
+
+    if settings is None:
+        from .config import get_settings
+
+        settings = get_settings()
+    if bundle_dir is None:
+        bundle_dir = settings.bundle_dir
+
+    merged = _make_parser()
+    merged_files = {}   # type: Dict[str, str]   merged name -> abs source path
+    stanzas = []        # type: List[str]
+    sourcetypes = []    # type: List[str]
+    provenance = []     # type: List[Dict[str, Any]]
+    raw_eps = []        # type: List[Optional[float]]
+    stanza_bpes = []    # type: List[Optional[float]]
+    declared_gb_total = None  # type: Optional[float]
+
+    for ns, pack_dir in ordered:
+        lint, parser, sections = _parse_eventgen_pack_for_merge(pack_dir)
+        sample_map = _pack_sample_map(pack_dir, ns)
+        for rel, (full, merged_name) in sorted(sample_map.items()):
+            if merged_name in merged_files:
+                raise BundleError(
+                    "merged sample name collision: %r (pack %r sample %r)"
+                    % (merged_name, pack_dir, rel))
+            merged_files[merged_name] = full
+        # Materialise this pack's [global]/[default] keys so they apply only to
+        # its own stanzas in the merged conf (stanza keys win, as in eventgen).
+        pack_globals = {}  # type: Dict[str, Optional[str]]
+        for section in parser.sections():
+            if section.lower() in _GLOBAL_SECTIONS:
+                pack_globals.update(dict(parser.items(section)))
+        for section in sections:
+            options = _merged_stanza_options(parser, section, pack_globals, sample_map)
+            new_name = ns + MERGE_SEP + section
+            merged.add_section(new_name)
+            for key, value in options.items():
+                merged.set(new_name, key, value)
+            stanzas.append(new_name)
+            raw_eps.append(_stanza_raw_eps(options))
+            stanza_bpes.append(
+                _stanza_bytes_per_event(pack_dir, lint, parser, section))
+        sourcetypes.extend(lint.sourcetypes)
+        if lint.declared_per_day_gb is not None:
+            declared_gb_total = (declared_gb_total or 0.0) + lint.declared_per_day_gb
+        provenance.append({
+            "namespace": ns,
+            "stanzas": len(sections),
+            "sourcetypes": lint.sourcetypes,
+        })
+
+    # Merged estimates: weight-weighted mean bytes/event (the expected
+    # bytes/event of the merged stream under the worker's stanza split).
+    weights = _fill_weights(raw_eps)
+    num = sum(w * b for w, b in zip(weights, stanza_bpes) if b is not None)
+    den = sum(w for w, b in zip(weights, stanza_bpes) if b is not None)
+    estimates = {}  # type: Dict[str, Any]
+    if den > 0:
+        estimates["bytes_per_event"] = round(num / den, 2)
+    if declared_gb_total is not None:
+        estimates["per_day_gb"] = declared_gb_total
+
+    manifest = {
+        "name": "+".join(ns for ns, _dir in ordered),
+        "engine": "eventgen",
+        "estimates": estimates,
+        "stanzas": stanzas,
+        "sourcetypes": _unique(sourcetypes),
+        # Provenance so a bundle on disk explains which packs it merged.
+        "merged_packs": provenance,
+    }
+
+    tmp = tempfile.mkdtemp(prefix="stoker-mergedpack-")
+    try:
+        pack_dir = os.path.join(tmp, _MERGED_PACK_BASENAME)
+        os.makedirs(os.path.join(pack_dir, "default"))
+        os.makedirs(os.path.join(pack_dir, "samples"))
+        with open(os.path.join(pack_dir, CONF_RELPATH), "w", encoding="utf-8") as fh:
+            merged.write(fh)
+        for merged_name, full in sorted(merged_files.items()):
+            shutil.copyfile(full, os.path.join(pack_dir, "samples", merged_name))
+        # Belt-and-braces: the merged pack must itself lint clean (every stanza
+        # resolves its renamed sample, every token regex still compiles). A
+        # failure here is a merge bug, not an operator error — fail loudly.
+        merged_lint = lint_pack(pack_dir)
+        if not merged_lint.ok:
+            raise BundleError(
+                "merged pack failed lint (merge bug): %s"
+                % "; ".join(merged_lint.errors))
+        data = build_tarball_bytes(pack_dir, manifest)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    digest = hashlib.sha256(data).hexdigest()
+    os.makedirs(bundle_dir, exist_ok=True)
+    path = os.path.join(bundle_dir, "%s.tgz" % digest)
+    if os.path.isfile(path) and os.path.getsize(path) == len(data):
+        log.info("merged bundle %s already present (dedup)", digest[:12])
+        return BuiltBundle(digest=digest, path=path, size_bytes=len(data), reused=True)
+    tmp_path = path + ".tmp.%d" % os.getpid()
+    with open(tmp_path, "wb") as fh:
+        fh.write(data)
+    os.replace(tmp_path, path)
+    log.info("built merged bundle %s (%d bytes) from %d packs: %s",
+             digest[:12], len(data), len(ordered),
+             ", ".join(ns for ns, _dir in ordered))
+    return BuiltBundle(digest=digest, path=path, size_bytes=len(data), reused=False)
+
+
 def _as_float(value):
     # type: (Any) -> Optional[float]
     if value is None:
@@ -1254,7 +1673,12 @@ __all__ = [
     "is_rawreplay_pack",
     "parse_replay_config",
     "build_from_pack",
+    "build_from_packs",
+    "merge_namespace",
+    "merge_pack_namespaces",
+    "merged_est_bytes_per_event",
     "build_stoker_manifest",
     "build_tarball_bytes",
+    "MERGE_SEP",
     "RAWREPLAY_ENGINE",
 ]

@@ -174,6 +174,14 @@ class Spec(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     pack_id: Mapped[int] = mapped_column(ForeignKey("packs.id"), nullable=False)
+    # Additive multi-pack support: ids of ADDITIONAL packs whose stanzas and
+    # samples are merged with the primary ``pack_id`` into one synthesised
+    # bundle at provision time (eventgen packs only — see bundles.build_from_packs).
+    # Nullable/absent = the classic single-pack spec, so every existing spec,
+    # snapshot and ``db.get(Pack, spec.pack_id)`` caller is untouched. A JSON
+    # list rather than a join table: the list is tiny, ordering is irrelevant
+    # (the merge sorts deterministically) and no query joins on it.
+    extra_pack_ids_json: Mapped[Optional[Any]] = mapped_column(JSON_VARIANT, nullable=True)
     ref: Mapped[str] = mapped_column(String(255), nullable=False, default="local")
     target_id: Mapped[int] = mapped_column(ForeignKey("targets.id"), nullable=False)
     engine: Mapped[str] = mapped_column(String(32), nullable=False, default="eventgen")

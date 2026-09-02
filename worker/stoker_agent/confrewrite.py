@@ -273,6 +273,37 @@ def _rewrite_count_interval(parser, sections, slot, total_workers):
         parser.set(section, "count", str(shares[slot]))
 
 
+def assigned_stanza_count(parser, rate_mode):
+    # type: (configparser.RawConfigParser, str) -> int
+    """How many stanzas of an already-REWRITTEN conf will actually emit.
+
+    This is the worker's own answer to "does this slot hold any work?", used by
+    the agent's heartbeat so an idle worker can explain itself to the control
+    plane instead of showing a healthy lease at 0 EPS forever.
+
+    * Gated modes (``eps`` / ``per_day_gb``): every paced stanza emits (the
+      rewrite forces ``count >= 1`` / a positive ``perDayVolume`` share).
+    * ``count_interval``: the rewrite split each stanza's declared ``count``
+      across the fleet by largest remainder, so a stanza whose rewritten count
+      is 0 emits nothing on this worker. A stanza that declares no ``count``
+      is untouched by the rewrite and emits its engine-default volume, so it
+      always counts as assigned.
+    * ``mode = replay`` stanzas always emit (engine-paced, never split) and
+      count as assigned regardless of mode.
+    """
+    replay = [s for s in sample_sections(parser) if _is_replay(parser, s)]
+    paced = [s for s in sample_sections(parser) if not _is_replay(parser, s)]
+    assigned = len(replay)
+    for section in paced:
+        if rate_mode != "count_interval":
+            assigned += 1
+            continue
+        count = _get_float(parser, section, "count")
+        if count is None or count > 0:
+            assigned += 1
+    return assigned
+
+
 def rewrite_file(src, dst, rate_mode, share_value, overdrive, sample_dir,
                  slot=0, total_workers=1, weights=None, backfill_window_s=None):
     # type: (str, str, str, Optional[float], float, str, int, int, Optional[Sequence[float]], Optional[float]) -> str

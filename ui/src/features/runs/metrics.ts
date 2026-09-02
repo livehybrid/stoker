@@ -3,11 +3,17 @@
 // The API returns raw per-slot metric_samples (server/schemas.py MetricSampleOut):
 // one row per worker slot per heartbeat (~5 s). eps/bps/lag_s/queue_depth/rss_mb
 // are instantaneous per-slot gauges; events_total/bytes_total/hec_* are CUMULATIVE
-// counters. To draw fleet-wide series we:
-//   * bucket rows by timestamp (rows already share a heartbeat instant),
-//   * SUM the gauges (eps, bps) across slots in a bucket for the actual-rate line,
-//   * DIFF the cumulative HEC counters per slot between consecutive buckets and
-//     sum those deltas for the stacked 2xx/4xx/5xx/timeout chart.
+// counters. Slots heartbeat every ~5 s but are NOT synchronised, so any bucket
+// narrower than the heartbeat holds only a subset of the fleet and a naive
+// per-second sum sawtooths between one slot's share and the fleet total. To
+// draw fleet-wide series we:
+//   * bucket rows into heartbeat-sized windows (width estimated from the data),
+//   * take the LATEST gauge (eps, bps) per slot in a bucket, carry a quiet
+//     slot's last value forward (until it goes stale), and SUM across slots for
+//     the actual-rate line,
+//   * DIFF the cumulative HEC counters per slot between consecutive samples and
+//     sum those deltas per bucket for the 2xx/4xx/5xx/timeout chart; a slot's
+//     first sample only seeds its baseline.
 //
 // Pure functions over MetricSampleOut[]; no API access here.
 
@@ -42,21 +48,54 @@ function clockLabel(ms: number): string {
   return new Date(ms).toLocaleTimeString("en-GB");
 }
 
-// Round a sample timestamp to whole seconds so slot rows from the same heartbeat
-// collapse onto one bucket even if their inserts differ by a few milliseconds.
-function bucketKey(iso: string): number {
+// Nominal heartbeat interval — the bucket-width floor and the fallback when
+// the data is too thin (one slot, one sample) to estimate a cadence.
+const HEARTBEAT_MS = 5_000;
+// Stop carrying a slot's last gauge forward once it is this many bucket widths
+// stale: a finished/dead worker must not inflate the fleet total forever.
+const STALE_BUCKETS = 3;
+
+function sampleMs(iso: string): number {
   const ms = Date.parse(iso);
-  if (Number.isNaN(ms)) return 0;
-  return Math.round(ms / 1000) * 1000;
+  return Number.isNaN(ms) ? 0 : ms;
 }
 
-/** Group samples by second, preserving order. */
+/**
+ * Estimate the chart bucket width from the samples: the median gap between a
+ * slot's consecutive heartbeats, rounded up to a whole second, floored at the
+ * nominal 5 s heartbeat. Falls back to the nominal heartbeat when no slot has
+ * two samples to measure a gap from.
+ */
+export function estimateBucketMs(samples: MetricSampleOut[]): number {
+  const bySlot = new Map<number, number[]>();
+  for (const s of samples) {
+    const ms = sampleMs(s.ts);
+    const arr = bySlot.get(s.slot);
+    if (arr) arr.push(ms);
+    else bySlot.set(s.slot, [ms]);
+  }
+  const gaps: number[] = [];
+  for (const times of bySlot.values()) {
+    times.sort((a, b) => a - b);
+    for (let i = 1; i < times.length; i++) {
+      const gap = times[i] - times[i - 1];
+      if (gap > 0) gaps.push(gap);
+    }
+  }
+  if (!gaps.length) return HEARTBEAT_MS;
+  gaps.sort((a, b) => a - b);
+  const median = gaps[Math.floor(gaps.length / 2)];
+  return Math.max(HEARTBEAT_MS, Math.ceil(median / 1000) * 1000);
+}
+
+/** Group samples into fixed-width buckets, preserving order within a bucket. */
 function groupByBucket(
   samples: MetricSampleOut[],
+  bucketMs: number,
 ): Map<number, MetricSampleOut[]> {
   const buckets = new Map<number, MetricSampleOut[]>();
   for (const s of samples) {
-    const key = bucketKey(s.ts);
+    const key = Math.floor(sampleMs(s.ts) / bucketMs) * bucketMs;
     const arr = buckets.get(key);
     if (arr) arr.push(s);
     else buckets.set(key, [s]);
@@ -84,38 +123,67 @@ export function targetEps(leases: LeaseOut[]): number | null {
 }
 
 /**
- * Fleet-wide actual rate series: one point per heartbeat bucket, eps/bps summed
- * across slots, with the (constant) target eps attached for the overlay.
+ * Fleet-wide actual rate series: one point per heartbeat-sized bucket, with
+ * the (constant) target eps attached for the overlay. eps/bps are per-slot
+ * gauges, so within a bucket we keep the LATEST sample per slot (never sum two
+ * samples from one slot), carry a quiet slot's last value forward so a merely
+ * late heartbeat does not dip the total, and sum across slots. A slot more
+ * than STALE_BUCKETS widths stale is dropped from the total for good.
  */
 export function rateSeries(
   samples: MetricSampleOut[],
   leases: LeaseOut[],
+  bucketMs = estimateBucketMs(samples),
 ): RatePoint[] {
   const target = targetEps(leases);
-  const buckets = groupByBucket(samples);
+  const buckets = groupByBucket(samples, bucketMs);
   const keys = [...buckets.keys()].sort((a, b) => a - b);
+
+  // last-known gauge per slot, carried across buckets until it goes stale
+  const lastGauge = new Map<number, { eps: number; bps: number; ts: number }>();
+
   return keys.map((ts) => {
-    const rows = buckets.get(ts)!;
+    for (const r of buckets.get(ts)!) {
+      const ms = sampleMs(r.ts);
+      const prev = lastGauge.get(r.slot);
+      if (prev && prev.ts > ms) continue; // keep only the latest per slot
+      lastGauge.set(r.slot, {
+        eps: typeof r.eps === "number" ? r.eps : prev?.eps ?? 0,
+        bps: typeof r.bps === "number" ? r.bps : prev?.bps ?? 0,
+        ts: ms,
+      });
+    }
     let eps = 0;
     let bps = 0;
-    for (const r of rows) {
-      if (typeof r.eps === "number") eps += r.eps;
-      if (typeof r.bps === "number") bps += r.bps;
+    for (const [slot, g] of lastGauge) {
+      if (ts - g.ts > STALE_BUCKETS * bucketMs) {
+        lastGauge.delete(slot); // stopped reporting — a dead worker rates 0
+        continue;
+      }
+      eps += g.eps;
+      bps += g.bps;
     }
     return { ts, label: clockLabel(ts), eps, bps, target };
   });
 }
 
 /**
- * Stacked HEC outcome series. hec_* are cumulative per slot, so we diff each
- * slot between consecutive buckets and sum the non-negative deltas. Counter
- * resets (a restarted worker) clamp to 0 rather than going negative.
+ * HEC outcome series. hec_* are cumulative per slot, so we diff each slot
+ * between consecutive samples and sum the non-negative deltas per bucket.
+ * A slot's FIRST sample only seeds its baseline — its cumulative total is
+ * history from before we saw it (a late joiner, a restarted worker), not
+ * events delivered in that bucket. Counter resets (a restarted worker) clamp
+ * to 0 rather than going negative. Uses the same bucket width as rateSeries
+ * so the two charts share an x axis.
  */
-export function hecSeries(samples: MetricSampleOut[]): HecPoint[] {
-  const buckets = groupByBucket(samples);
+export function hecSeries(
+  samples: MetricSampleOut[],
+  bucketMs = estimateBucketMs(samples),
+): HecPoint[] {
+  const buckets = groupByBucket(samples, bucketMs);
   const keys = [...buckets.keys()].sort((a, b) => a - b);
 
-  // last-seen cumulative value per slot per counter
+  // last-seen cumulative value per slot per counter (absent until seeded)
   const last: Record<number, { ok: number; client: number; server: number; timeout: number }> = {};
 
   const points: HecPoint[] = [];
@@ -126,29 +194,32 @@ export function hecSeries(samples: MetricSampleOut[]): HecPoint[] {
     let server = 0;
     let timeout = 0;
     for (const r of rows) {
-      const prev = last[r.slot] ?? { ok: 0, client: 0, server: 0, timeout: 0 };
+      const prev = last[r.slot];
       const cur = {
-        ok: r.hec_2xx ?? prev.ok,
-        client: r.hec_4xx ?? prev.client,
-        server: r.hec_5xx ?? prev.server,
-        timeout: r.hec_timeouts ?? prev.timeout,
+        ok: r.hec_2xx ?? prev?.ok ?? 0,
+        client: r.hec_4xx ?? prev?.client ?? 0,
+        server: r.hec_5xx ?? prev?.server ?? 0,
+        timeout: r.hec_timeouts ?? prev?.timeout ?? 0,
       };
-      ok += Math.max(0, cur.ok - prev.ok);
-      client += Math.max(0, cur.client - prev.client);
-      server += Math.max(0, cur.server - prev.server);
-      timeout += Math.max(0, cur.timeout - prev.timeout);
+      if (prev) {
+        ok += Math.max(0, cur.ok - prev.ok);
+        client += Math.max(0, cur.client - prev.client);
+        server += Math.max(0, cur.server - prev.server);
+        timeout += Math.max(0, cur.timeout - prev.timeout);
+      }
       last[r.slot] = cur;
     }
     points.push({ ts, label: clockLabel(ts), ok, client, server, timeout });
   }
-  // Drop the first bucket: with no prior sample its delta is just the baseline
-  // and would spike the chart. Keep it only when it is the sole bucket.
-  return points.length > 1 ? points.slice(1) : points;
+  return points;
 }
 
 /** Lag + queue-depth series (worst-slot lag, summed queue) per bucket. */
-export function lagSeries(samples: MetricSampleOut[]): LagPoint[] {
-  const buckets = groupByBucket(samples);
+export function lagSeries(
+  samples: MetricSampleOut[],
+  bucketMs = estimateBucketMs(samples),
+): LagPoint[] {
+  const buckets = groupByBucket(samples, bucketMs);
   const keys = [...buckets.keys()].sort((a, b) => a - b);
   return keys.map((ts) => {
     const rows = buckets.get(ts)!;

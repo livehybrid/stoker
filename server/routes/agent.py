@@ -39,6 +39,25 @@ log = logging.getLogger("stoker.routes.agent")
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 
 
+class AgentHeartbeatRequest(HeartbeatRequest):
+    """The heartbeat body plus the optional assigned-work declaration.
+
+    A worker MAY declare how much work it actually holds (``assigned_work``:
+    metrics = owned series, eventgen = stanzas that will emit, rawreplay = the
+    one dataset) and, when it holds none, a short human-readable
+    ``assigned_reason``. Both are optional and default to None, so an old
+    worker that never sends them parses identically; ``HeartbeatRequest``'s
+    ``extra="ignore"`` already means a new worker sending them to an old
+    control plane is harmless. Declared here (a subclass local to the agent
+    route) rather than on the shared schema so the base heartbeat shape stays
+    pinned in ``server/schemas.py``; ``lifecycle.record_heartbeat`` parses the
+    two fields defensively either way.
+    """
+
+    assigned_work: Optional[int] = None
+    assigned_reason: Optional[str] = None
+
+
 # --------------------------------------------------------------------------- #
 # Bearer authentication (implemented — shared by every agent endpoint).
 # --------------------------------------------------------------------------- #
@@ -136,7 +155,7 @@ def ready(
              response_model_exclude_none=True)
 def heartbeat(
     run_id: int,
-    body: HeartbeatRequest,
+    body: AgentHeartbeatRequest,
     db: Session = Depends(get_db),
     _claims: Dict[str, Any] = Depends(require_run_jwt),
     token: str = Depends(bearer_token),

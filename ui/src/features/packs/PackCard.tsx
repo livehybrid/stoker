@@ -1,13 +1,19 @@
 import { Link } from "@tanstack/react-router";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 
+import { api } from "../../lib/api";
 import type { PackOut } from "../../lib/types";
 import { Badge, StatusBadge } from "../../components/Badge";
 import { Button } from "../../components/Button";
+import { useToast } from "../../components/Toast";
 import { formatBytes, formatGbDay, shortSha } from "../format";
 import { packIsMetrics } from "../metrics/config";
 
 // A pack card: lint + verified badges, sourcetypes, estimated bytes/event and
 // declared GB/day, with Preview and "New job from pack" (design section 10.4).
+// Local packs (uploaded / registered / built here — no repo) also get Delete;
+// a repo-indexed pack's lifecycle belongs to its repo, so no delete appears
+// for those (the server refuses it anyway).
 interface Props {
   pack: PackOut;
   onPreview: (pack: PackOut) => void;
@@ -19,10 +25,33 @@ function asStringList(v: unknown): string[] {
 }
 
 export function PackCard({ pack, onPreview }: Props) {
+  const qc = useQueryClient();
+  const toast = useToast();
   const sourcetypes = asStringList(pack.sourcetypes_json);
   const engines = asStringList(pack.engines_json);
   const tags = asStringList(pack.tags_json);
   const isMetric = packIsMetrics(pack);
+  const isLocal = pack.repo_id === null || pack.repo_id === undefined;
+
+  const del = useMutation({
+    mutationFn: () => api.packs.delete(pack.id),
+    onSuccess: () => {
+      toast.success(`Pack "${pack.name}" deleted`);
+      qc.invalidateQueries({ queryKey: ["packs"] });
+    },
+    onError: (e) =>
+      toast.error(e instanceof Error ? e.message : "Delete failed"),
+  });
+
+  function confirmDelete() {
+    if (
+      window.confirm(
+        `Delete pack ${pack.name}? An uploaded pack's extracted files are removed too (refused if a spec uses it).`,
+      )
+    ) {
+      del.mutate();
+    }
+  }
 
   return (
     <section className="flex flex-col rounded-lg border border-surface-muted bg-surface-soft p-4 shadow-sm">
@@ -104,6 +133,15 @@ export function PackCard({ pack, onPreview }: Props) {
           {pack.indexed_sha ? `indexed ${shortSha(pack.indexed_sha)}` : "local pack"}
         </span>
         <div className="flex items-center gap-2">
+          {isLocal && (
+            <Button
+              variant="danger"
+              onClick={confirmDelete}
+              disabled={del.isPending}
+            >
+              Delete
+            </Button>
+          )}
           {isMetric ? (
             // A metric pack has no eventgen stanzas to preview; edit it in the
             // builder instead.

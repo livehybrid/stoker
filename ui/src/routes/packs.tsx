@@ -9,13 +9,17 @@ import { Card } from "../components/Card";
 import { Button } from "../components/Button";
 import { Field, Select, TextInput } from "../components/Field";
 import { EmptyState, ErrorState, LoadingState } from "../components/States";
+import { useToast } from "../components/Toast";
+import { Modal } from "../features/ui/Modal";
 import { PackCard } from "../features/packs/PackCard";
 import { PackPreviewDrawer } from "../features/packs/PackPreviewDrawer";
+import { UploadPackForm } from "../features/packs/UploadPackForm";
 
 // Packs page: a filterable grid of indexed sample packs (filter by repo, wired
 // to the URL so a "View indexed packs" link from a repo card deep-links here),
 // each pack shown with lint/verified badges, sourcetypes and size estimates,
-// a preview drawer and a "New job from pack" jump (design section 10.4).
+// a preview drawer, a "New job from pack" jump, an archive upload for the
+// no-git path, and delete for local packs (design section 10.4).
 
 interface PacksSearch {
   repo?: number;
@@ -24,8 +28,10 @@ interface PacksSearch {
 function Packs() {
   const navigate = useNavigate({ from: Route.fullPath });
   const { repo } = Route.useSearch();
+  const toast = useToast();
   const [preview, setPreview] = useState<PackOut | null>(null);
   const [search, setSearch] = useState("");
+  const [uploadOpen, setUploadOpen] = useState(false);
 
   const packsQ = useQuery({
     queryKey: ["packs", repo ?? null],
@@ -66,9 +72,14 @@ function Packs() {
         title="Packs"
         subtitle="Sample packs to launch jobs from: indexed eventgen packs and metric packs you build here."
         actions={
-          <Link to="/metric-packs/new">
-            <Button variant="primary">+ New metric pack</Button>
-          </Link>
+          <div className="flex items-center gap-2">
+            <Button variant="secondary" onClick={() => setUploadOpen(true)}>
+              Upload pack
+            </Button>
+            <Link to="/metric-packs/new">
+              <Button variant="primary">+ New metric pack</Button>
+            </Link>
+          </div>
         }
       />
 
@@ -134,6 +145,20 @@ function Packs() {
           ))}
         </div>
       )}
+
+      <Modal
+        open={uploadOpen}
+        onClose={() => setUploadOpen(false)}
+        title="Upload pack"
+      >
+        <UploadPackForm
+          onCancel={() => setUploadOpen(false)}
+          onUploaded={(pack) => {
+            setUploadOpen(false);
+            toast.success(`Pack "${pack.name}" uploaded and verified`);
+          }}
+        />
+      </Modal>
 
       <PackPreviewDrawer pack={preview} onClose={() => setPreview(null)} />
     </div>

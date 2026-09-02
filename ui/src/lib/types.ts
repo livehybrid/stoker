@@ -120,6 +120,14 @@ export interface PackOut {
   created_at: string;
 }
 
+// Optional form fields accompanying a pack-archive upload
+// (POST /api/packs/upload, multipart). Both fall back to the pack.yaml values
+// (then the archive's directory name) when omitted.
+export interface PackUploadMeta {
+  name?: string;
+  description?: string;
+}
+
 export interface PackPreview {
   stanzas: string[];
   sample_lines: Record<string, string[]>;
@@ -246,6 +254,9 @@ export type RateMode = "eps" | "per_day_gb" | "count_interval";
 export interface SpecCreate {
   name: string;
   pack_id: number;
+  // Additional pack ids merged with pack_id into one bundle at run time
+  // (eventgen packs only). Omitted/empty = the classic single-pack spec.
+  extra_pack_ids?: number[] | null;
   target_id: number;
   ref?: string; // default "local"
   engine?: string; // default "eventgen"
@@ -264,6 +275,8 @@ export interface SpecCreate {
 export type SpecUpdate = Partial<{
   name: string;
   pack_id: number;
+  // A list replaces the merged-pack set; [] clears back to single-pack.
+  extra_pack_ids: number[] | null;
   target_id: number;
   ref: string;
   engine: string;
@@ -282,6 +295,7 @@ export interface SpecOut {
   id: number;
   name: string;
   pack_id: number;
+  extra_pack_ids_json?: number[] | null;
   target_id: number;
   ref: string;
   engine: string;
@@ -348,6 +362,12 @@ export interface RunCreated {
 export interface LeaseOut {
   slot: number;
   lease_id: string;
+  // Alongside the single rate key (eps | per_day_gb | count), share_json may
+  // carry private underscore-prefixed bookkeeping the control plane stores on
+  // the lease: `_assigned_work` (how many work units the worker reported it
+  // holds — metrics series / eventgen stanzas / a replay dataset) and
+  // `_assigned_reason` (a short explanation when it holds none). Read them via
+  // leaseAssignedWork()/leaseAssignedReason() in features/runs/LeaseTable.
   share_json?: Record<string, unknown> | null;
   holder?: string | null;
   node?: string | null;
@@ -355,6 +375,11 @@ export interface LeaseOut {
   last_heartbeat_at?: string | null;
   effective_t0?: string | null;
   restarts: number;
+  // Worker-reported assigned work, once LeaseOut (server/schemas.py) exposes
+  // it top-level; today the same data arrives inside share_json (see above).
+  // Optional in both directions so old servers/new UIs interoperate.
+  assigned_work?: number | null;
+  assigned_reason?: string | null;
 }
 
 export interface RunEventOut {

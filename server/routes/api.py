@@ -19,19 +19,21 @@ import hmac
 import logging
 import os
 import secrets
+import shutil
 import time
 from typing import Any, Dict, List, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import (APIRouter, Depends, File, Form, HTTPException, Query,
+                     Request, Response, UploadFile)
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .. import bundles, crypto, gitsync, lifecycle, preview
+from .. import bundles, crypto, gitsync, lifecycle, packupload, preview
 from ..config import get_settings
 from ..db import get_db
 from ..drivers.base import DriverError
-from ..engines import ceilings
+from ..engines import ceilings, sharding
 from ..models import (
     Fleet,
     MetricSample,
@@ -332,6 +334,8 @@ def delete_repo(repo_id: int, db: Session = Depends(get_db)):
         ref = db.execute(
             select(Spec.id).where(Spec.pack_id.in_(pack_ids)).limit(1)
         ).scalars().first()
+        if ref is None and _spec_referencing_extra_packs(db, pack_ids) is not None:
+            ref = True  # referenced as a multi-pack extra: same guard applies
         if ref is not None:
             raise HTTPException(
                 status_code=409,
@@ -441,6 +445,192 @@ def register_pack(body: PackCreate, db: Session = Depends(get_db)):
     return pack
 
 
+@router.post("/packs/upload", response_model=PackOut, status_code=201)
+async def upload_pack(
+    file: UploadFile = File(...),
+    name: Optional[str] = Form(default=None),
+    description: Optional[str] = Form(default=None),
+    db: Session = Depends(get_db),
+):
+    # type: (...) -> Any
+    """Upload a pack as a tarball/zip and register it like a directory pack.
+
+    The no-git path: the archive (``.tar.gz``/``.tgz``/``.tar`` or ``.zip``,
+    detected by content, not filename) is extracted with every guard in
+    :mod:`server.packupload` — traversal, link, special-member and
+    extraction-bomb defences, caps from the ``PACK_UPLOAD_*`` settings — into a
+    persistent directory under ``PACK_UPLOAD_DIR``. The archive may be rooted at
+    the pack itself or wrap it in a single top-level directory (how a customer
+    tars a folder). The extracted directory then registers through the SAME
+    path as ``POST /api/packs``: linted by ``bundles.lint_pack``, stored as a
+    local Pack row whose ``source_path`` is the extracted directory, flowing
+    into specs/bundles/runs identically.
+
+    A pack that extracts cleanly but FAILS LINT is still registered
+    (``lint_status=error``, run submits stay blocked — the same behaviour as
+    ``POST /api/packs`` and the builtin-pack seeding) so the operator can read
+    the lint errors in the response and on the pack card, rather than losing
+    them to a 400. A structurally-bad upload — not an archive, a hostile
+    member, over a cap, no recognisable pack root — is ``400
+    pack_upload_rejected`` (or ``413`` for an oversized body) with an
+    operator-facing reason, and leaves nothing on disk.
+
+    Mutating, so the auth middleware requires operator+ (a viewer cannot write
+    to the control-plane disk). ``name``/``description`` are optional form
+    fields; a pack.yaml ``name``/``description`` fills whichever is omitted
+    (falling back to the archive's directory name).
+    """
+    settings = get_settings()
+    data = await _read_upload_capped(file, settings.pack_upload_max_archive_bytes)
+    try:
+        pack_dir = packupload.store_uploaded_pack(
+            data, settings.pack_upload_dir,
+            packupload.UploadLimits.from_settings(settings),
+            name_hint=(name or "").strip() or None)
+    except packupload.PackUploadError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "pack_upload_rejected", "detail": str(exc)})
+
+    # Metadata + lint. Unlike register_pack (whose source_path an operator
+    # already vetted), this content is untrusted: an unreadable pack.yaml /
+    # stoker.json raises BundleError from the readers before the linter can
+    # collect it as a lint error, so catch it here — remove the extracted
+    # directory and reject with the reason, rather than 500ing and stranding
+    # the files on disk.
+    try:
+        meta = gitsync.local_pack_metadata(pack_dir)
+        lint = bundles.lint_pack(pack_dir)
+    except bundles.BundleError as exc:
+        _remove_uploaded_pack_dir(pack_dir)
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "pack_upload_rejected",
+                    "detail": "pack metadata unreadable: %s" % exc})
+    pack = Pack(
+        name=(name or "").strip() or meta["name"],
+        source_path=pack_dir,
+        description=(description or "").strip() or meta["description"],
+        tags_json=meta["tags"] or [],
+        engines_json=lint.engines,
+        # A directory metric pack's validated metricgen becomes its builder
+        # config, exactly as in register_pack; None for others.
+        builder_config_json=lint.metricgen,
+        sourcetypes_json=lint.sourcetypes,
+        stanza_count=lint.stanza_count,
+        est_bytes_per_event=lint.est_bytes_per_event,
+        declared_per_day_gb=lint.declared_per_day_gb,
+        verified=lint.ok,
+        lint_status="ok" if lint.ok else "error",
+        lint_errors_json=lint.errors,
+    )
+    db.add(pack)
+    db.commit()
+    db.refresh(pack)
+    log.info("uploaded pack %s (id=%s) -> %s lint=%s stanzas=%d",
+             pack.name, pack.id, pack_dir, pack.lint_status, lint.stanza_count)
+    return pack
+
+
+@router.delete("/packs/{pack_id}", status_code=204)
+def delete_pack(pack_id: int, db: Session = Depends(get_db)):
+    # type: (...) -> Any
+    """Delete a locally-registered pack (guarded when referenced by a spec).
+
+    Exists primarily so an uploaded pack can be removed again. Follows the
+    ``delete_repo`` guard: a pack referenced by any spec is refused (409) so a
+    defined/running job never loses its pack out from under it. A repo-indexed
+    pack is also refused — its lifecycle belongs to the repo (delete or resync
+    the repo instead).
+
+    The extracted directory is removed from disk ONLY when it lives inside the
+    configured ``PACK_UPLOAD_DIR`` (checked by realpath containment). Any other
+    ``source_path`` — an operator-registered directory, the builtin packs dir —
+    is data this API never owned, so the row is deleted but the directory is
+    left untouched (and a builtin pack simply re-registers at next boot).
+    Already-built bundles are content-addressed and shared, so they stay.
+    """
+    pack = db.get(Pack, pack_id)
+    if pack is None:
+        raise HTTPException(status_code=404, detail="unknown pack")
+    if pack.repo_id is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=("pack %s was indexed from repo %s; delete or resync that "
+                    "repo instead" % (pack_id, pack.repo_id)),
+        )
+    ref = db.execute(
+        select(Spec.id).where(Spec.pack_id == pack_id).limit(1)
+    ).scalars().first()
+    if ref is None and _spec_referencing_extra_packs(db, [pack_id]) is not None:
+        ref = True  # referenced as a multi-pack extra: same guard applies
+    if ref is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="pack %s is referenced by one or more specs; delete those first" % pack_id,
+        )
+    _remove_uploaded_pack_dir(pack.source_path)
+    db.delete(pack)
+    db.commit()
+    return Response(status_code=204)
+
+
+async def _read_upload_capped(file, max_bytes):
+    # type: (UploadFile, int) -> bytes
+    """Read the upload body, refusing once it exceeds ``max_bytes`` (413).
+
+    Reads in chunks and stops the moment the cap is crossed rather than
+    trusting a Content-Length header (which a client can omit or understate),
+    so an oversized body is bounded by the cap plus one chunk, never fully
+    buffered. An empty body is a 400 (nothing to extract).
+    """
+    chunks = []  # type: List[bytes]
+    total = 0
+    while True:
+        chunk = await file.read(1 << 20)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail={
+                    "error": "pack_upload_too_large",
+                    "detail": ("upload exceeds the %d-byte archive limit "
+                               "(PACK_UPLOAD_MAX_ARCHIVE_BYTES)" % max_bytes),
+                })
+        chunks.append(chunk)
+    if total == 0:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "pack_upload_rejected", "detail": "empty upload"})
+    return b"".join(chunks)
+
+
+def _remove_uploaded_pack_dir(source_path):
+    # type: (Optional[str]) -> None
+    """Remove a pack directory from disk iff it is an uploaded one.
+
+    Containment by realpath: only a directory strictly INSIDE the configured
+    ``PACK_UPLOAD_DIR`` is removed (never the upload dir itself, never a path
+    merely symlinked to look like one). Everything else — builtin packs,
+    operator-registered directories, a metric pack's ``builder://`` sentinel —
+    is not this API's to delete. Best-effort: a failed rmtree logs and moves on
+    (the row delete still proceeds; a leftover directory is inert).
+    """
+    if not source_path:
+        return
+    upload_root = os.path.realpath(get_settings().pack_upload_dir)
+    real = os.path.realpath(source_path)
+    if not real.startswith(upload_root + os.sep):
+        return
+    if os.path.isdir(real):
+        try:
+            shutil.rmtree(real)
+        except OSError as exc:  # pragma: no cover - defensive
+            log.warning("could not remove uploaded pack dir %s: %s", real, exc)
+
+
 @router.get("/packs", response_model=List[PackOut])
 def list_packs(
     repo: Optional[int] = Query(default=None, description="filter to packs indexed from this repo id"),
@@ -531,6 +721,9 @@ def preview_run_pack(
 _FLEET_CONFIG_PUBLIC_KEYS = (
     "namespace", "kube_context", "context", "in_cluster",
     "portainer_endpoint", "portainer_host", "verify_tls",
+    # Per-fleet ceiling overrides: plain numbers, never credentials, and the
+    # wizard benefits from seeing that a fleet carries its own bounds.
+    "max_eps_per_worker", "max_gb_day_per_worker",
 )
 
 
@@ -541,16 +734,25 @@ def list_fleets(db: Session = Depends(get_db)):
 
     The UI feeds its fleet picker from this, so the choices always match what
     the control plane can actually launch on. ``config`` is redacted to the
-    addressing allowlist.
+    addressing allowlist. ``ceilings`` is each engine's EFFECTIVE per-worker
+    ceiling on this fleet (built-in table + env config + the fleet's own
+    override), so the wizard's live arithmetic uses the same numbers the
+    submit guard will enforce.
     """
+    settings = get_settings()
     fleets = db.execute(select(Fleet).order_by(Fleet.id)).scalars().all()
     out = []
     for fleet in fleets:
         cfg = {k: v for k, v in (fleet.config_json or {}).items()
                if k in _FLEET_CONFIG_PUBLIC_KEYS and v is not None}
+        effective = {
+            engine: ceilings.resolve_ceilings(
+                engine, settings=settings, fleet_config=fleet.config_json or {})
+            for engine in ceilings.CEILINGS
+        }
         out.append(FleetOut(
             id=fleet.id, name=fleet.name, driver=fleet.driver,
-            config=cfg or None, created_at=fleet.created_at))
+            config=cfg or None, ceilings=effective, created_at=fleet.created_at))
     return out
 
 
@@ -561,14 +763,23 @@ def list_fleets(db: Session = Depends(get_db)):
 @router.post("/specs", response_model=SpecOut, status_code=201)
 def create_spec(body: SpecCreate, db: Session = Depends(get_db)):
     # type: (...) -> Any
-    _require_pack(db, body.pack_id)
+    primary = _require_pack(db, body.pack_id)
     _require_target(db, body.target_id)
     _validate_rate(body.rate_mode, body.rate_value)
     if body.workers < 1:
         raise HTTPException(status_code=422, detail="workers must be >= 1")
+    # Multi-pack: normalise the extra ids (dedupe, drop the primary, every id
+    # must exist) and gate the merge up front — only eventgen packs merge, so
+    # the operator learns at save time, not at launch. Submit re-checks (pack
+    # contents can change under a repo resync between save and run).
+    extra_pack_ids = _clean_extra_pack_ids(db, body.pack_id, body.extra_pack_ids)
+    if extra_pack_ids:
+        _multi_pack_guard(db, body.engine, [primary]
+                          + [db.get(Pack, pid) for pid in extra_pack_ids])
     spec = Spec(
         name=body.name,
         pack_id=body.pack_id,
+        extra_pack_ids_json=extra_pack_ids,
         target_id=body.target_id,
         ref=body.ref,
         engine=body.engine,
@@ -608,13 +819,25 @@ def get_spec(spec_id: int, db: Session = Depends(get_db)):
 @router.get("/specs/{spec_id}/estimate", response_model=SpecEstimate)
 def estimate_spec(spec_id: int, db: Session = Depends(get_db)):
     # type: (...) -> Any
-    """Per-worker share, pct of ceiling, approx eps/gb and an ok bool."""
+    """Per-worker share, pct of ceiling, approx eps/gb and an ok bool.
+
+    The ceilings are resolved exactly as the submit guard resolves them
+    (engine table + env config + the spec's fleet override), so what this
+    view shows is what ``POST /specs/{id}/run`` will enforce.
+    """
     spec = db.get(Spec, spec_id)
     if spec is None:
         raise HTTPException(status_code=404, detail="unknown spec")
     pack = db.get(Pack, spec.pack_id)
-    bytes_per_event = pack.est_bytes_per_event if pack is not None else None
-    return _estimate(spec, bytes_per_event)
+    # A multi-pack spec estimates against the MERGED bytes/event (the same
+    # number the submit guard uses), so the view and the gate never disagree.
+    bytes_per_event = _spec_bytes_per_event(db, spec, pack)
+    fleet_row = db.execute(
+        select(Fleet).where(Fleet.name == spec.fleet)).scalars().first()
+    resolved = ceilings.resolve_ceilings(
+        spec.engine, settings=get_settings(),
+        fleet_config=fleet_row.config_json if fleet_row is not None else None)
+    return _estimate(spec, bytes_per_event, resolved)
 
 
 @router.post("/specs/{spec_id}/backfill_estimate", response_model=BackfillEstimate)
@@ -635,7 +858,7 @@ def backfill_estimate(spec_id: int, body: BackfillEstimateRequest,
     res = body.resolution_s or pack_res
     plan = lifecycle.plan_backfill(spec.engine, series, live_eps, body.window_s,
                                    res, body.cap_eps, time.time())
-    bpe = pack.est_bytes_per_event if pack is not None else None
+    bpe = _spec_bytes_per_event(db, spec, pack)
     return BackfillEstimate(
         engine=spec.engine,
         events=plan["events"],
@@ -667,10 +890,30 @@ def update_spec(spec_id: int, body: SpecUpdate, db: Session = Depends(get_db)):
     if "workers" in data and data["workers"] is not None and data["workers"] < 1:
         raise HTTPException(status_code=422, detail="workers must be >= 1")
 
+    # Multi-pack: normalise a supplied extra list against the EFFECTIVE primary
+    # (the patched pack_id when the same request changes it) and re-gate the
+    # merge against the effective engine. ``[]`` clears back to single-pack;
+    # an omitted field leaves the stored set unchanged.
+    effective_primary = data.get("pack_id") or spec.pack_id
+    if "extra_pack_ids" in data:
+        data["extra_pack_ids"] = _clean_extra_pack_ids(
+            db, effective_primary, data["extra_pack_ids"])
+    elif "pack_id" in data and spec.extra_pack_ids_json:
+        # The primary changed under a stored extra list: re-normalise so the
+        # new primary is never also listed as an extra (a double-merge).
+        data["extra_pack_ids"] = _clean_extra_pack_ids(
+            db, effective_primary, spec.extra_pack_ids_json)
+    effective_extras = data.get("extra_pack_ids", spec.extra_pack_ids_json)
+    if effective_extras:
+        _multi_pack_guard(db, data.get("engine", spec.engine),
+                          [db.get(Pack, effective_primary)]
+                          + [_require_pack(db, pid) for pid in effective_extras])
+
     # Map schema field names to their ORM ``*_json`` columns where they differ.
     column_aliases = {
         "overrides": "overrides_json",
         "driver_opts": "driver_opts_json",
+        "extra_pack_ids": "extra_pack_ids_json",
     }
     for key, value in data.items():
         setattr(spec, column_aliases.get(key, key), value)
@@ -713,6 +956,8 @@ def run_spec(spec_id: int, body: RunLaunch, request: Request, db: Session = Depe
 
     Rejections per the contract:
     ``422 slice_exceeds_ceiling{suggested_workers}``,
+    ``422 multi_pack_engine_unsupported`` (a multi-pack spec whose packs
+    cannot merge — only eventgen packs can),
     ``409 target_unhealthy``, ``409 target_cap_exceeded{headroom_gb_day}``,
     ``409 replay_single_worker``. On success ``201 {run_id, state}``.
     """
@@ -725,18 +970,37 @@ def run_spec(spec_id: int, body: RunLaunch, request: Request, db: Session = Depe
     pack = db.get(Pack, spec.pack_id)
     if pack is None:
         raise HTTPException(status_code=404, detail="spec pack no longer exists")
+    # Multi-pack spec: load every extra pack (the run merges them with the
+    # primary into one bundle). A vanished extra is the same operator problem
+    # as a vanished primary, so it gets the same 404 shape.
+    extra_packs = []  # type: List[Pack]
+    for extra_id in (spec.extra_pack_ids_json or []):
+        extra = db.get(Pack, extra_id)
+        if extra is None:
+            raise HTTPException(
+                status_code=404,
+                detail="spec extra pack %s no longer exists" % extra_id)
+        extra_packs.append(extra)
+    all_packs = [pack] + extra_packs
 
     bytes_per_event = pack.est_bytes_per_event
 
     # --- Submit-time validation gates (order: cheap/local first) ----------- #
 
-    # 1. Lint ok: the pack must currently lint clean (a stale/broken pack is a
-    #    hard stop; 422 with the lint errors so the operator can fix it). A
-    #    UI-authored metrics pack has no source directory; lint its stored config.
+    # 1. Lint ok: every referenced pack must currently lint clean (a stale/
+    #    broken pack is a hard stop; 422 with the lint errors so the operator
+    #    can fix it). A UI-authored metrics pack has no source directory; lint
+    #    its stored config. Extra packs' errors are labelled per pack.
     if pack.builder_config_json is not None:
         lint_errors = bundles.lint_metrics_config(pack.builder_config_json)
     else:
         lint_errors = bundles.lint_pack(pack.source_path).errors
+    for extra in extra_packs:
+        if extra.builder_config_json is not None:
+            extra_errors = bundles.lint_metrics_config(extra.builder_config_json)
+        else:
+            extra_errors = bundles.lint_pack(extra.source_path).errors
+        lint_errors.extend("pack %r: %s" % (extra.name, e) for e in extra_errors)
     if lint_errors:
         raise HTTPException(
             status_code=422,
@@ -788,6 +1052,21 @@ def run_spec(spec_id: int, body: RunLaunch, request: Request, db: Session = Depe
                     "detail": "the metrics engine is engine-paced; use "
                               "rate_mode 'count_interval' (interval = resolution)"})
 
+    # 1c2. Multi-pack merge guard: only eventgen packs merge into one bundle.
+    #      rawreplay is a single dataset forced to one worker, metrics packs
+    #      are synthesised from a builder config, and a `mode = replay` stanza
+    #      is engine-paced — none of them has a mergeable stanza+samples shape.
+    #      Re-checked here (not just at spec save) because a repo resync can
+    #      change a pack's engine between save and launch. With the merge
+    #      admitted, the merged bytes/event estimate replaces the primary
+    #      pack's for the ceiling and target-cap arithmetic below.
+    if extra_packs:
+        _multi_pack_guard(db, spec.engine, all_packs)
+        merged_bpe = bundles.merged_est_bytes_per_event(
+            [p.source_path for p in all_packs])
+        if merged_bpe is not None:
+            bytes_per_event = merged_bpe
+
     # 1d. In-process fleet constraints. Workers on an ``inprocess`` fleet run
     #     INSIDE the control-plane container (no isolation), so two extra gates
     #     apply: a hard worker cap (they share the control plane's CPU/memory)
@@ -814,21 +1093,24 @@ def run_spec(spec_id: int, body: RunLaunch, request: Request, db: Session = Depe
                         % (max_workers, max_workers)),
                 },
             )
-        if pack.builder_config_json is None:
-            code_errors = gitsync.custom_code_errors(pack.source_path)
-            if code_errors:
-                raise HTTPException(
-                    status_code=422,
-                    detail={
-                        "error": "inprocess_custom_code_denied",
-                        "errors": code_errors,
-                        "detail": (
-                            "this pack carries custom code, which never runs on "
-                            "the in-process fleet (it would execute inside the "
-                            "control plane, trusted_code or not); use a "
-                            "container-isolated fleet (swarm/k8s)"),
-                    },
-                )
+        code_errors = []  # type: List[str]
+        for code_pack in all_packs:
+            if code_pack.builder_config_json is None:
+                code_errors.extend(
+                    gitsync.custom_code_errors(code_pack.source_path))
+        if code_errors:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "inprocess_custom_code_denied",
+                    "errors": code_errors,
+                    "detail": (
+                        "this pack carries custom code, which never runs on "
+                        "the in-process fleet (it would execute inside the "
+                        "control plane, trusted_code or not); use a "
+                        "container-isolated fleet (swarm/k8s)"),
+                },
+            )
 
     # 2. replay-single-worker: replay is engine-paced and the control plane
     #    guarantees workers = 1. This covers an eventgen pack with a
@@ -847,10 +1129,17 @@ def run_spec(spec_id: int, body: RunLaunch, request: Request, db: Session = Depe
         )
 
     # 3. Ceiling: apportion the rate across workers and check the per-worker
-    #    share against the engine ceiling. Over -> 422 with suggested_workers.
+    #    share against the RESOLVED engine ceiling (built-in table + env config
+    #    + this fleet's config_json override — the same resolution the estimate
+    #    view uses, so the wizard and this guard can never disagree). Over ->
+    #    422 with suggested_workers.
     per_worker = _per_worker_share(spec.rate_mode, spec.rate_value, spec.workers)
+    resolved_ceilings = ceilings.resolve_ceilings(
+        spec.engine, settings=get_settings(),
+        fleet_config=fleet_row.config_json if fleet_row is not None else None)
     check = ceilings.check_slice(
-        spec.rate_mode, per_worker, bytes_per_event=bytes_per_event, engine=spec.engine)
+        spec.rate_mode, per_worker, bytes_per_event=bytes_per_event,
+        engine=spec.engine, ceilings=resolved_ceilings)
     if not check.ok:
         raise HTTPException(
             status_code=422,
@@ -859,6 +1148,29 @@ def run_spec(spec_id: int, body: RunLaunch, request: Request, db: Session = Depe
                 "suggested_workers": check.suggested_workers,
                 "limiting_factor": check.limiting_factor,
                 "detail": check.detail,
+            },
+        )
+
+    # 3b. Sharding: every requested worker must actually receive work. The
+    #     metrics series stride and the count_interval largest-remainder split
+    #     both leave surplus workers with nothing (healthy, heartbeating,
+    #     0 EPS forever), so an over-provisioned fleet is rejected up front.
+    shard = sharding.check_sharding(
+        spec.engine, spec.rate_mode, spec.workers,
+        metrics_config=pack.builder_config_json,
+        pack_dir=pack.source_path if pack.builder_config_json is None else None,
+        # A multi-pack run merges the stanza sets, so the count_interval
+        # prediction must scan the union of the packs' declared counts.
+        pack_dirs=[p.source_path for p in all_packs] if extra_packs else None)
+    if not shard.ok:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "workers_exceed_shardable_work",
+                "suggested_workers": shard.suggested_workers,
+                "active_workers": shard.active_workers,
+                "limiting_factor": shard.limiting_factor,
+                "detail": shard.detail,
             },
         )
 
@@ -1158,6 +1470,102 @@ def _require_target(db, target_id):
     return target
 
 
+def _clean_extra_pack_ids(db, primary_id, extra_ids):
+    # type: (Session, int, Optional[List[int]]) -> Optional[List[int]]
+    """Normalise a spec's extra pack ids: dedupe, drop the primary, verify each.
+
+    Selection order does not matter downstream (the merge sorts by namespace),
+    but the stored list keeps the caller's order for display. Returns ``None``
+    for an empty/absent list so a cleared multi-pack spec stores NULL — the
+    classic single-pack shape.
+    """
+    if not extra_ids:
+        return None
+    out = []  # type: List[int]
+    for pack_id in extra_ids:
+        if pack_id == primary_id or pack_id in out:
+            continue
+        _require_pack(db, pack_id)
+        out.append(pack_id)
+    return out or None
+
+
+def _multi_pack_guard(db, engine, packs):
+    # type: (Session, Optional[str], List[Pack]) -> None
+    """Refuse a multi-pack spec/run whose packs cannot merge (422).
+
+    Only eventgen packs merge into one synthesised bundle: a metrics pack is
+    built from a ``metricgen`` builder config (no stanzas/samples to merge), a
+    rawreplay pack replays a single dataset on exactly one worker, and a
+    ``mode = replay`` stanza is engine-paced with no rate share to apportion.
+    Follows the established submit-gate error-body convention
+    (``error`` slug + ``detail``).
+    """
+    def _refuse(detail):
+        # type: (str) -> None
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "multi_pack_engine_unsupported", "detail": detail})
+
+    if (engine or "eventgen").strip() != "eventgen":
+        _refuse("multiple packs can only merge under the eventgen engine; "
+                "this spec's engine is %r" % engine)
+    for pack in packs:
+        if pack is None:
+            continue  # existence is the caller's gate; this one is about engines
+        if pack.builder_config_json is not None:
+            _refuse("pack %s (%r) is a metrics pack; metrics packs are "
+                    "synthesised from a builder config and cannot merge with "
+                    "other packs" % (pack.id, pack.name))
+        if bundles.is_rawreplay_pack(pack.source_path):
+            _refuse("pack %s (%r) is a rawreplay pack; rawreplay replays a "
+                    "single dataset on exactly 1 worker and cannot merge with "
+                    "other packs" % (pack.id, pack.name))
+        if _pack_has_replay(pack.source_path):
+            _refuse("pack %s (%r) declares a mode = replay stanza; replay is "
+                    "engine-paced and single-worker and cannot merge with "
+                    "other packs" % (pack.id, pack.name))
+
+
+def _spec_referencing_extra_packs(db, pack_ids):
+    # type: (Session, List[int]) -> Optional[Spec]
+    """The first spec whose ``extra_pack_ids_json`` references any of ``pack_ids``.
+
+    ``Spec.pack_id`` referential guards are a plain SQL filter; the extra ids
+    live in a JSON list, so this scans the (small) set of multi-pack specs in
+    Python rather than fighting dialect-specific JSON containment operators.
+    """
+    wanted = set(pack_ids)
+    stmt = select(Spec).where(Spec.extra_pack_ids_json.is_not(None))
+    for spec in db.execute(stmt).scalars().all():
+        if wanted.intersection(spec.extra_pack_ids_json or []):
+            return spec
+    return None
+
+
+def _spec_bytes_per_event(db, spec, pack):
+    # type: (Session, Spec, Optional[Pack]) -> Optional[float]
+    """The spec's effective bytes/event estimate (merged for a multi-pack spec).
+
+    A single-pack spec keeps the pack row's stored estimate. A multi-pack spec
+    uses the weighted merged estimate (the same arithmetic the merged bundle's
+    manifest carries), falling back to the primary's estimate when the merge
+    cannot be evaluated — the estimate views must degrade, never 500.
+    """
+    base = pack.est_bytes_per_event if pack is not None else None
+    extra_ids = list(spec.extra_pack_ids_json or []) if spec is not None else []
+    if not extra_ids or pack is None or pack.builder_config_json is not None:
+        return base
+    dirs = [pack.source_path]
+    for pack_id in extra_ids:
+        extra = db.get(Pack, pack_id)
+        if extra is None or extra.builder_config_json is not None:
+            return base
+        dirs.append(extra.source_path)
+    merged = bundles.merged_est_bytes_per_event(dirs)
+    return merged if merged is not None else base
+
+
 def _validate_rate(rate_mode, rate_value):
     # type: (str, Optional[float]) -> None
     """Reject an inconsistent rate mode / value at spec write time (422)."""
@@ -1189,18 +1597,28 @@ def _per_worker_share(rate_mode, rate_value, workers):
     return max((s.get(key, 0.0) for s in shares), default=0.0)
 
 
-def _estimate(spec, bytes_per_event):
-    # type: (Spec, Optional[float]) -> SpecEstimate
+def _estimate(spec, bytes_per_event, resolved_ceilings=None):
+    # type: (Spec, Optional[float], Optional[Dict[str, Optional[float]]]) -> SpecEstimate
     """Build the estimate view for a spec (per-worker share + ceiling headroom).
 
     For a single-worker engine (rawreplay) the worker count is clamped to 1 so
     the estimate reflects what the run will actually do (the control plane forces
     workers = 1 for a replay run regardless of the spec's requested count).
+
+    ``resolved_ceilings`` is the effective table from
+    :func:`~server.engines.ceilings.resolve_ceilings` (env + fleet overrides
+    applied); the caller resolves it once so this view and the submit guard use
+    the same numbers. ``None`` falls back to resolving the built-in defaults
+    (an unknown engine then has no table and everything passes). A disabled
+    bound (``None`` inside the table) yields no limit and no percentage.
     """
+    if resolved_ceilings is None:
+        resolved_ceilings = ceilings.resolve_ceilings(spec.engine)
     workers = lifecycle.effective_workers(spec.engine, max(1, int(spec.workers)))
     per_worker = _per_worker_share(spec.rate_mode, spec.rate_value, workers)
     check = ceilings.check_slice(
-        spec.rate_mode, per_worker, bytes_per_event=bytes_per_event, engine=spec.engine)
+        spec.rate_mode, per_worker, bytes_per_event=bytes_per_event,
+        engine=spec.engine, ceilings=resolved_ceilings)
 
     per_worker_eps = None  # type: Optional[float]
     per_worker_gb = None  # type: Optional[float]
@@ -1208,7 +1626,7 @@ def _estimate(spec, bytes_per_event):
     ceiling_pct = None  # type: Optional[float]
     limiting = None  # type: Optional[str]
 
-    table = ceilings.ceiling_for(spec.engine)
+    table = resolved_ceilings if resolved_ceilings is not None else {}
     max_eps = table.get("max_eps_per_worker")
     max_gb = table.get("max_gb_day_per_worker")
 
@@ -1246,6 +1664,7 @@ def _estimate(spec, bytes_per_event):
         ok=check.ok,
         suggested_workers=check.suggested_workers,
         detail=check.detail,
+        ceilings=resolved_ceilings,
     )
 
 

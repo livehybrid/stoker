@@ -312,11 +312,17 @@ def provision_run(db, spec, driver, overrides=None, started_by=None, settings=No
 
 def _resolve_bundle(db, spec, settings=None):
     # type: (Session, Spec, Optional[Settings]) -> Bundle
-    """Return the run's bundle, building it from the spec's pack when absent.
+    """Return the run's bundle, building it from the spec's pack(s) when absent.
 
     Content-addressed: an existing bundle row for the built digest is reused, so
     a re-run of the same pack never rebuilds. The bundle row is added/flushed so
     ``bundle.id`` is available for the run's ``bundle_id`` foreign key.
+
+    A multi-pack spec (``extra_pack_ids_json`` set) builds ONE merged bundle
+    via :func:`server.bundles.build_from_packs` — the worker contract does not
+    change, it just downloads a bundle whose conf/samples are the namespaced
+    union of the selected packs. The merge is deterministic (packs sorted by
+    namespace), so the same pack set re-runs on the same digest.
     """
     from .bundles import build_from_metrics_config, build_from_pack
 
@@ -330,10 +336,13 @@ def _resolve_bundle(db, spec, settings=None):
 
     if settings is None:
         settings = get_settings()
+    extra_ids = list(spec.extra_pack_ids_json or [])
     # A UI-authored metrics pack has no source directory: its bundle is
     # synthesised from the stored builder config. Every other pack builds from
     # its on-disk source_path (a local directory or a repo clone).
-    if pack.builder_config_json is not None:
+    if extra_ids:
+        built = _build_merged_bundle(db, spec, pack, extra_ids, settings)
+    elif pack.builder_config_json is not None:
         built = build_from_metrics_config(
             pack.name, pack.builder_config_json, bundle_dir=settings.bundle_dir)
     else:
@@ -388,6 +397,36 @@ def _pack_build_dir(db, pack, settings):
                     "snapshot at %s (%s); building from the live clone path",
                     pack.id, (pack.indexed_sha or "")[:12], exc)
         return pack.source_path
+
+
+def _build_merged_bundle(db, spec, primary_pack, extra_ids, settings):
+    # type: (Session, Spec, Any, List[int], Settings) -> Any
+    """Build the merged bundle for a multi-pack spec.
+
+    Loads the primary + extra pack rows, derives one deterministic namespace
+    per pack (:func:`server.bundles.merge_pack_namespaces` — the sanitised pack
+    name, disambiguated by id on a name clash) and merges via
+    :func:`server.bundles.build_from_packs`. Each pack's build directory goes
+    through :func:`_pack_build_dir`, so a repo-synced pack merges from its
+    pinned per-SHA snapshot exactly as it would build alone. Only eventgen
+    packs are mergeable — the submit route refuses anything else with a 422
+    before provisioning, and ``build_from_packs`` re-checks (BundleError) so no
+    other caller can slip a rawreplay/metrics pack in.
+    """
+    from . import bundles
+    from .models import Pack
+
+    packs = [primary_pack]
+    for pack_id in extra_ids:
+        extra = db.get(Pack, pack_id)
+        if extra is None:
+            raise ValueError(
+                "spec %s references unknown extra pack %s" % (spec.id, pack_id))
+        packs.append(extra)
+    namespaces = bundles.merge_pack_namespaces([(p.name, p.id) for p in packs])
+    inputs = [(ns, _pack_build_dir(db, p, settings))
+              for ns, p in zip(namespaces, packs)]
+    return bundles.build_from_packs(inputs, bundle_dir=settings.bundle_dir)
 
 
 def stop_run(db, run, driver, force=False, actor="operator"):
@@ -1153,6 +1192,14 @@ def claim_lease(db, run, holder, hint_slot=None, settings=None):
     lease.lease_id = new_lease_id()
     if taking_over:
         lease.restarts = (lease.restarts or 0) + 1
+        # The lapsed holder's assigned-work declaration is stale (the new
+        # holder re-reports on its first heartbeat); drop it so the roster
+        # never shows the previous worker's excuse against the new one.
+        share = dict(lease.share_json or {})
+        if ASSIGNED_WORK_KEY in share or ASSIGNED_REASON_KEY in share:
+            share.pop(ASSIGNED_WORK_KEY, None)
+            share.pop(ASSIGNED_REASON_KEY, None)
+            lease.share_json = share
 
     # Re-issue on an already-released run anchors to now so the replacement
     # starts with zero backlog (the worker's effective_t0 pacing anchor). A
@@ -1162,11 +1209,93 @@ def claim_lease(db, run, holder, hint_slot=None, settings=None):
     lease.holder = holder
     lease.state = LEASE_CLAIMED
     lease.last_heartbeat_at = now
+    if taking_over and reissue:
+        # A lost slot re-claimed after release must join the CURRENT
+        # apportionment, not resurrect its pre-release share. After a partial
+        # (degraded) release the full run rate was re-spread across only the
+        # ready slots; a straggler claiming its lost lease with the ORIGINAL
+        # share on top of that would push the fleet's aggregate over the
+        # requested rate. Re-apportion across the now-live slots (scoped to
+        # degraded runs; a plain mid-run takeover's shares are already
+        # consistent and are left untouched — see _reapportion_on_takeover).
+        _reapportion_on_takeover(db, run, lease, leases)
     append_event(db, run, "claim",
                  {"slot": lease.slot, "holder": holder,
                   "reissue": bool(reissue), "takeover": bool(taking_over)},
                  actor="agent")
     return lease
+
+
+def _reapportion_on_takeover(db, run, lease, leases):
+    # type: (Session, Run, WorkerLease, Sequence[WorkerLease]) -> None
+    """Fold a re-claimed lost slot into the fleet's CURRENT apportionment.
+
+    Called when a lost lease is claimed on a released run. The claimer's slot
+    rejoins the fleet, so the run rate is re-split across every now-live slot
+    (claimed/ready/running, the claimer included): the claimer's share is
+    written directly (its slice carries it, no retarget round-trip needed) and
+    any live worker whose stored share differs is flagged to retarget.
+
+    Scoped to a DEGRADED run only: a partial release is the one path that
+    leaves a lost slot's stored share inconsistent with the live fleet's
+    (``_reapportion_ready`` re-spreads the rate across just the ready slots
+    while the stragglers keep their stale 1/N shares). On a non-degraded run a
+    lost slot's share is already the current apportionment (scale/rescale
+    rewrite even non-live leases), and re-splitting across the momentarily-live
+    subset there would *raise* shares that a transiently-lost worker's
+    recovery then double-counts — so those takeovers are left untouched.
+
+    Deliberately convergent, not chatty: shares are recomputed with the same
+    :func:`build_share_list` that seeded / re-apportioned them, so a slot whose
+    stored share already matches its recomputed one is not retargeted.
+
+    A draining/terminal run is left alone (its workers are exiting and the
+    drain command outranks retarget anyway); an unapportionable snapshot
+    (missing rate_value) is skipped rather than raised — the claim itself must
+    never fail over share bookkeeping.
+    """
+    if run.state in TERMINAL_STATES or run.state == STATE_DRAINING:
+        return
+    if not run.degraded:
+        return
+    snap = run.spec_snapshot_json or {}
+    rate_mode = snap.get("rate_mode") or "eps"
+    rate_value = snap.get("rate_value")
+    live = (LEASE_CLAIMED, LEASE_READY, LEASE_RUNNING)
+    participants = sorted((l for l in leases if l.state in live),
+                          key=lambda l: l.slot)
+    if not participants:
+        return
+    try:
+        shares = build_share_list(rate_mode, rate_value, len(participants))
+    except ValueError as exc:  # e.g. eps snapshot with no rate_value
+        log.warning("run %s takeover reapportion skipped: %s", run.id, exc)
+        return
+    changed = []  # type: List[int]
+    for member, share in zip(participants, shares):
+        if public_share(member.share_json) == dict(share):
+            continue
+        if member is lease:
+            # The claimer has no worker holding the old share yet; its claim
+            # slice reads share_json directly, so write it in place.
+            new_share = dict(lease.share_json or {})
+            for key in list(new_share):
+                if not key.startswith("_"):
+                    new_share.pop(key)
+            new_share.update(share)
+            lease.share_json = new_share
+        else:
+            mark_retarget(member, share)
+        changed.append(member.slot)
+    if changed:
+        append_event(db, run, "reapportioned",
+                     {"reason": "lost-lease-takeover", "slot": lease.slot,
+                      "participants": [l.slot for l in participants],
+                      "changed_slots": changed, "rate_mode": rate_mode},
+                     actor="agent")
+        log.info("run %s slot %s takeover: re-apportioned %s across %d live "
+                 "slots (changed %s)", run.id, lease.slot, rate_mode,
+                 len(participants), changed)
 
 
 def _next_claimable(leases, hint_slot=None):
@@ -1253,6 +1382,11 @@ def record_heartbeat(db, run, slot, lease_id, payload, settings=None):
 
     now = utcnow()
     lease.last_heartbeat_at = now
+
+    # Persist the worker's assigned-work declaration (optional, additive: an
+    # old worker never sends it and nothing changes) so the roster can explain
+    # a slot that legitimately holds no work instead of showing a bare 0 EPS.
+    store_assigned_work(lease, payload)
 
     # Persist the counters (defensively parsed; ignores the popped _bearer).
     db.add(build_metric_sample(run, slot, payload))
@@ -1675,16 +1809,68 @@ def public_share(share):
 
 RETARGET_MARKER = "_retarget"
 
+# Assigned-work declaration, persisted on the lease from the worker's optional
+# heartbeat fields (``assigned_work`` / ``assigned_reason``; see
+# docs/WORKER-CONTRACT.md). Stored as private ``_``-prefixed keys in
+# ``share_json`` — the same convention as ``_retarget`` — so they never cross
+# the agent wire (``public_share`` strips them) but DO reach the operator API
+# (``LeaseOut.share_json`` serialises the raw dict), letting the UI show why a
+# slot that holds no work sits at 0 EPS. No schema/migration required.
+ASSIGNED_WORK_KEY = "_assigned_work"
+ASSIGNED_REASON_KEY = "_assigned_reason"
+# Reasons come off the wire from a worker; bound their stored length so a
+# hostile/buggy agent cannot bloat the JSON column via its heartbeats.
+_ASSIGNED_REASON_MAX = 300
+
+
+def store_assigned_work(lease, payload):
+    # type: (WorkerLease, Mapping[str, Any]) -> None
+    """Persist a heartbeat's optional assigned-work declaration on the lease.
+
+    Parsed defensively (mirrors :func:`counters_from_payload`): a missing or
+    non-numeric ``assigned_work`` leaves the lease untouched (an old worker
+    keeps exactly the prior behaviour); a valid one is stored under the private
+    ``_assigned_work`` / ``_assigned_reason`` keys of ``share_json``. The dict
+    is re-assigned (not mutated) so the ORM tracks the JSON change, and only
+    when the values actually changed, so steady-state heartbeats do not churn
+    the row.
+    """
+    assigned = _coerce_int(payload.get("assigned_work"))
+    if assigned is None:
+        return
+    reason = payload.get("assigned_reason")
+    if reason is not None:
+        reason = str(reason)[:_ASSIGNED_REASON_MAX]
+    if assigned > 0:
+        reason = None  # a worker with work needs no excuse
+    share = dict(lease.share_json or {})
+    if share.get(ASSIGNED_WORK_KEY) == assigned \
+            and share.get(ASSIGNED_REASON_KEY) == reason:
+        return
+    share[ASSIGNED_WORK_KEY] = assigned
+    if reason is None:
+        share.pop(ASSIGNED_REASON_KEY, None)
+    else:
+        share[ASSIGNED_REASON_KEY] = reason
+    lease.share_json = share
+
 
 def mark_retarget(lease, share):
     # type: (WorkerLease, Optional[Mapping[str, float]]) -> None
     """Set a lease's share and flag it so the next heartbeat pushes ``retarget``.
 
     Writes the new single-key share into ``share_json`` and stamps the private
-    ``_retarget`` marker. Re-assigns ``share_json`` (rather than mutating in
-    place) so the ORM tracks the change on a JSON column.
+    ``_retarget`` marker. The lease's assigned-work keys (worker-reported; see
+    :func:`store_assigned_work`) are carried over so a retarget does not blank
+    the roster's explanation until the next heartbeat re-reports it.
+    Re-assigns ``share_json`` (rather than mutating in place) so the ORM tracks
+    the change on a JSON column.
     """
     new_share = dict(share or {})
+    old_share = lease.share_json or {}
+    for key in (ASSIGNED_WORK_KEY, ASSIGNED_REASON_KEY):
+        if key in old_share and key not in new_share:
+            new_share[key] = old_share[key]
     new_share[RETARGET_MARKER] = True
     lease.share_json = new_share
 
@@ -1937,6 +2123,12 @@ def build_spec_snapshot(spec, target, overrides=None, rate_mode=None,
             "env_tag": target.env_tag,
         },
     }
+    # Multi-pack spec: freeze the extra pack ids for the audit trail (the run's
+    # bundle digest already pins the merged content). Added only when present so
+    # every single-pack snapshot stays byte-for-byte what it was.
+    extra_pack_ids = list(getattr(spec, "extra_pack_ids_json", None) or [])
+    if extra_pack_ids:
+        snap["extra_pack_ids"] = extra_pack_ids
     if backfill is not None:
         snap["backfill"] = backfill
     return snap
@@ -2373,6 +2565,7 @@ __all__ = [
     "build_share_list", "seed_leases", "get_run_leases", "find_lease",
     "is_lease_holder", "build_bundle_ref", "build_slice", "iso_from_dt",
     "public_share", "mark_retarget", "clear_retarget",
+    "store_assigned_work", "ASSIGNED_WORK_KEY", "ASSIGNED_REASON_KEY",
     "build_spec_snapshot",
     "build_run_snapshot", "counters_from_payload", "build_metric_sample",
     "fold_totals", "maybe_refresh_jwt", "cmd_continue", "cmd_superseded",

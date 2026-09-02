@@ -3,8 +3,11 @@
 The control plane apportions a run's rate across worker slots by largest
 remainder; the integer parts must sum to *exactly* the total (the ±1 % pacing
 guarantee downstream depends on the split being honest). Ceilings reject a
-per-worker share above the engine table and suggest the smallest fleet size that
-would fit. Both are pure functions (no DB), so these are fast and deterministic.
+per-worker share above the RESOLVED engine ceiling (built-in table + env config
++ per-fleet override, layered by ``resolve_ceilings``; a bound of 0 at any
+layer disables it) and suggest the smallest fleet size that would fit. Both are
+pure functions (no DB), so these are fast and deterministic — the env layer is
+exercised through ``load_settings(env=...)`` so the parsing is covered too.
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ import math
 
 import pytest
 
+from server.config import ConfigError, load_settings
 from server.engines.apportion import (
     apportion_shares,
     largest_remainder,
@@ -22,6 +26,7 @@ from server.engines.ceilings import (
     check_slice,
     eps_to_gb_day,
     gb_day_to_eps,
+    resolve_ceilings,
 )
 
 
@@ -140,7 +145,9 @@ def test_apportion_unknown_mode_raises():
 
 
 # --------------------------------------------------------------------------- #
-# Ceilings: within limit ok; over limit rejected + suggested_workers.
+# Ceilings (built-in DEFAULTS — no env, no fleet override): within limit ok;
+# over limit rejected + suggested_workers. check_slice without a ``ceilings``
+# argument must keep behaving exactly like the historical static table.
 # --------------------------------------------------------------------------- #
 
 def test_ceiling_ok_under_eps_limit():
@@ -150,7 +157,7 @@ def test_ceiling_ok_under_eps_limit():
 
 
 def test_ceiling_rejects_over_eps_with_suggestion():
-    # eventgen ceiling is 5000 EPS; 20000 needs at least ceil(20000/5000)=4.
+    # default eventgen ceiling is 5000 EPS; 20000 needs at least ceil(20000/5000)=4.
     result = check_slice("eps", 20000.0, bytes_per_event=None)
     assert not result.ok
     assert result.limiting_factor == "eps"
@@ -162,7 +169,7 @@ def test_ceiling_rejects_over_eps_with_suggestion():
 
 
 def test_ceiling_rejects_over_gb_day_with_suggestion():
-    # 25 GB/day per-worker ceiling; 100 GB/day needs at least 4.
+    # default 25 GB/day per-worker ceiling; 100 GB/day needs at least 4.
     result = check_slice("per_day_gb", 100.0, bytes_per_event=None)
     assert not result.ok
     assert result.limiting_factor == "gb_day"
@@ -201,6 +208,125 @@ def test_ceiling_unknown_engine_passes():
 def test_ceiling_zero_or_none_share_passes():
     assert check_slice("eps", None).ok
     assert check_slice("eps", 0.0).ok
+
+
+# --------------------------------------------------------------------------- #
+# resolve_ceilings: fleet override > env config > built-in table; a value of 0
+# at any layer disables the bound (None in the resolved table); an unknown
+# engine has no table at all (conservative pass preserved).
+# --------------------------------------------------------------------------- #
+
+def _settings(env=None):
+    # Env parsing is part of the surface under test, so build a real Settings
+    # via load_settings; the fixed master key just silences the dev-key warning.
+    env = dict(env or {})
+    env.setdefault("STOKER_MASTER_KEY", "x" * 43 + "=")
+    return load_settings(env=env)
+
+
+def test_resolve_defaults_match_builtin_table():
+    # No settings, no fleet config: the built-in table verbatim, for both
+    # engines that have one.
+    assert resolve_ceilings("eventgen") == CEILINGS["eventgen"]
+    assert resolve_ceilings("rawreplay") == CEILINGS["rawreplay"]
+
+
+def test_resolve_unknown_engine_is_none():
+    assert resolve_ceilings("myengine") is None
+    assert resolve_ceilings("metrics") is None  # engine-paced, no table
+
+
+def test_resolve_env_global_override():
+    settings = _settings({"STOKER_MAX_GB_DAY_PER_WORKER": "100",
+                          "STOKER_MAX_EPS_PER_WORKER": "20000"})
+    for engine in ("eventgen", "rawreplay"):
+        resolved = resolve_ceilings(engine, settings=settings)
+        assert resolved == {"max_gb_day_per_worker": 100.0,
+                            "max_eps_per_worker": 20000.0}
+
+
+def test_resolve_env_partial_override_keeps_other_default():
+    settings = _settings({"STOKER_MAX_GB_DAY_PER_WORKER": "100"})
+    resolved = resolve_ceilings("eventgen", settings=settings)
+    assert resolved["max_gb_day_per_worker"] == 100.0
+    assert resolved["max_eps_per_worker"] == 5000.0  # built-in default kept
+
+
+def test_resolve_env_per_engine_beats_global():
+    settings = _settings({"STOKER_MAX_EPS_PER_WORKER": "8000",
+                          "STOKER_MAX_EPS_PER_WORKER_RAWREPLAY": "1234"})
+    assert resolve_ceilings("eventgen", settings=settings)["max_eps_per_worker"] == 8000.0
+    assert resolve_ceilings("rawreplay", settings=settings)["max_eps_per_worker"] == 1234.0
+
+
+def test_resolve_fleet_override_beats_env():
+    settings = _settings({"STOKER_MAX_GB_DAY_PER_WORKER": "100"})
+    resolved = resolve_ceilings("eventgen", settings=settings,
+                                fleet_config={"max_gb_day_per_worker": 200})
+    assert resolved["max_gb_day_per_worker"] == 200.0
+    assert resolved["max_eps_per_worker"] == 5000.0
+
+
+def test_resolve_zero_disables_at_any_layer():
+    # Env 0 disables globally; a fleet 0 disables even over a raised env value.
+    settings = _settings({"STOKER_MAX_EPS_PER_WORKER": "0"})
+    assert resolve_ceilings("eventgen", settings=settings)["max_eps_per_worker"] is None
+
+    settings = _settings({"STOKER_MAX_GB_DAY_PER_WORKER": "100"})
+    resolved = resolve_ceilings("eventgen", settings=settings,
+                                fleet_config={"max_gb_day_per_worker": 0})
+    assert resolved["max_gb_day_per_worker"] is None
+
+
+def test_resolve_fleet_null_is_treated_as_absent():
+    # A JSON null in config_json falls through to the lower layers (only a
+    # numeric 0 disables).
+    resolved = resolve_ceilings("eventgen",
+                                fleet_config={"max_eps_per_worker": None})
+    assert resolved["max_eps_per_worker"] == 5000.0
+
+
+def test_check_slice_with_raised_ceiling_passes_and_still_suggests():
+    resolved = {"max_gb_day_per_worker": 25.0, "max_eps_per_worker": 50000.0}
+    assert check_slice("eps", 20000.0, ceilings=resolved).ok
+    # Still over a raised ceiling: the suggestion uses the resolved value.
+    result = check_slice("eps", 120000.0, ceilings=resolved)
+    assert not result.ok
+    assert result.limiting_factor == "eps"
+    assert result.suggested_workers == 3  # ceil(120000 / 50000)
+
+
+def test_check_slice_disabled_ceiling_is_no_limit():
+    # Both bounds disabled: nothing blocks and the _exceeded maths is never
+    # touched (no division by a 0/None ceiling).
+    resolved = {"max_gb_day_per_worker": None, "max_eps_per_worker": None}
+    assert check_slice("eps", 10_000_000.0, bytes_per_event=5000,
+                       ceilings=resolved).ok
+    assert check_slice("per_day_gb", 10_000_000.0, bytes_per_event=5000,
+                       ceilings=resolved).ok
+
+
+def test_check_slice_one_disabled_bound_leaves_the_other_binding():
+    # EPS disabled, GB/day kept: the derived GB/day still binds in eps mode.
+    resolved = {"max_gb_day_per_worker": 25.0, "max_eps_per_worker": None}
+    result = check_slice("eps", 1000.0, bytes_per_event=40000, ceilings=resolved)
+    assert not result.ok
+    assert result.limiting_factor == "gb_day"
+
+
+def test_ceiling_env_var_parsing_rejects_garbage():
+    with pytest.raises(ConfigError):
+        _settings({"STOKER_MAX_EPS_PER_WORKER": "lots"})
+    with pytest.raises(ConfigError):
+        _settings({"STOKER_MAX_GB_DAY_PER_WORKER_EVENTGEN": "much"})
+
+
+def test_ceiling_env_blank_values_are_unset():
+    settings = _settings({"STOKER_MAX_EPS_PER_WORKER": "",
+                          "STOKER_MAX_EPS_PER_WORKER_EVENTGEN": " "})
+    assert settings.max_eps_per_worker is None
+    assert settings.per_engine_ceilings == ()
+    assert resolve_ceilings("eventgen", settings=settings) == CEILINGS["eventgen"]
 
 
 # --------------------------------------------------------------------------- #

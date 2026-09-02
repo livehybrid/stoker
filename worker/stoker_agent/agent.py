@@ -109,6 +109,26 @@ def _default_metrics_engine_factory(config_path, socket_path, slot, total_worker
         cwd=cwd, log_dir=log_dir)
 
 
+def _metrics_series_total(metricgen):
+    # type: (Dict[str, Any]) -> int
+    """Size of a metricgen config's dimension cross-product (series count).
+
+    Mirrors the metrics engine's ``build_series`` (and the control plane's
+    ``bundles.metrics_series_count``): each dimension with a key and a
+    non-empty values list multiplies the matrix; no dimensions = one
+    unlabelled series. Duplicated here (it is four lines) so the agent does
+    not import the engine package just to size the shard it already knows the
+    stride of.
+    """
+    dims = metricgen.get("dimensions") or []
+    total = 1
+    for d in dims:
+        if isinstance(d, dict) and d.get("key") and \
+                isinstance(d.get("values"), list) and d["values"]:
+            total *= len(d["values"])
+    return total
+
+
 class Agent(object):
     def __init__(self, config, hec_factory=None, engine_factory=None,
                  control=None, clock=time.time, rawreplay_engine_factory=None,
@@ -137,6 +157,14 @@ class Agent(object):
         self._sock = None
         self._engine = None
         self._engine_started = False
+        # Assigned work: how many discrete work units this worker actually
+        # holds (metrics: owned series; eventgen: stanzas that will emit;
+        # rawreplay: the one dataset). None until known (pre-prepare, or an
+        # engine this agent cannot size). Reported on every heartbeat so a
+        # worker that holds NOTHING (workers > shardable work) explains
+        # itself to the control plane instead of sitting at 0 EPS unexplained.
+        self._assigned_work = None    # type: Optional[int]
+        self._assigned_reason = None  # type: Optional[str]
         # measured-eps window
         self._last_events = 0
         self._last_events_t = None  # type: Optional[float]
@@ -185,6 +213,7 @@ class Agent(object):
                         cfg.overdrive, pack.samples_dir,
                         slot=sl.slot, total_workers=sl.total_workers,
                         backfill_window_s=backfill_window_s)
+                    self._record_assigned_eventgen(conf_path, sl)
                 # PISTON / metrics: the conf-rewrite is skipped entirely; those
                 # engines read their config from the pack (replay / metricgen).
 
@@ -312,6 +341,9 @@ class Agent(object):
         # valid without polluting the pack.
         log_dir = os.path.join(workdir, "rawreplay-logs")
         resolved = _RawReplayView(replay, mode)
+        # Replay is never sharded (the control plane forces workers = 1): this
+        # worker always holds the one dataset.
+        self._set_assigned(1, "dataset")
         return self._rawreplay_engine_factory(
             resolved, self._cfg.output_socket, pack.pack_dir, log_dir=log_dir)
 
@@ -340,12 +372,66 @@ class Agent(object):
             raise EngineError("cannot write metrics config: %s" % exc)
         log_dir = os.path.join(workdir, "metrics-logs")
         resolution = metricgen.get("resolution_s")
+        # This worker's shard of the series matrix is series[slot::total]; the
+        # owned count is knowable up front, so report it (and warn loudly when
+        # it is zero — this worker will generate nothing for the whole run).
+        total_series = _metrics_series_total(metricgen)
+        owned = len(range(sl.slot, total_series, sl.total_workers))
+        self._set_assigned(
+            owned, "series",
+            reason_when_zero=(
+                "no series assigned: the pack's series matrix has %d series "
+                "and slot %d of %d workers owns none"
+                % (total_series, sl.slot, sl.total_workers)))
         return self._metrics_engine_factory(
             config_path, self._cfg.output_socket, sl.slot, sl.total_workers,
             resolution_s=resolution, backfill_start_s=sl.backfill_start_s,
             backfill_end_s=sl.backfill_end_s,
             backfill_resolution_s=sl.backfill_resolution_s,
             cwd=pack.pack_dir, log_dir=log_dir)
+
+    def _set_assigned(self, count, unit, reason_when_zero=None):
+        # type: (int, str, Optional[str]) -> None
+        """Record how much work this worker holds (reported on heartbeats).
+
+        ``count`` is the number of discrete work units (series / stanzas /
+        datasets) this slot owns; ``unit`` names them for the log line. When
+        the count is zero the worker will generate NOTHING for the entire run,
+        so this logs a WARNING and keeps ``reason_when_zero`` (a short human
+        explanation) to send with every heartbeat — the control plane surfaces
+        it on the lease so an operator sees *why* the slot sits at 0 EPS.
+        """
+        self._assigned_work = int(count)
+        if count > 0:
+            self._assigned_reason = None
+            return
+        self._assigned_reason = reason_when_zero or ("no %s assigned" % unit)
+        log.warning("this worker holds no work (%s) and will generate nothing "
+                    "for the entire run", self._assigned_reason)
+
+    def _record_assigned_eventgen(self, conf_path, sl):
+        # type: (str, SpecSlice) -> None
+        """Derive assigned work from the freshly-rewritten eventgen conf.
+
+        Counts the stanzas that will actually emit for this worker (see
+        ``confrewrite.assigned_stanza_count``): in ``count_interval`` mode the
+        per-stanza count split can leave a surplus slot with every count at 0.
+        Best-effort — a conf that was just written but cannot be re-read must
+        not fail the run over telemetry.
+        """
+        try:
+            parser = confrewrite.load_conf(conf_path)
+            assigned = confrewrite.assigned_stanza_count(parser, sl.rate_mode)
+        except confrewrite.ConfRewriteError as exc:
+            log.warning("could not size assigned work from %s: %s",
+                        conf_path, exc)
+            return
+        self._set_assigned(
+            assigned, "stanzas",
+            reason_when_zero=(
+                "no stanza count assigned: the pack's per-stanza counts split "
+                "across %d workers leave slot %d with zero everywhere"
+                % (sl.total_workers, sl.slot)))
 
     def _gating_eps(self, sl, estimates):
         # type: (SpecSlice, Dict[str, Any]) -> Optional[float]
@@ -519,6 +605,7 @@ class Agent(object):
             pack.conf_path, conf_path, sl.rate_mode, sl.rate_value,
             self._cfg.overdrive, pack.samples_dir,
             slot=sl.slot, total_workers=sl.total_workers)
+        self._record_assigned_eventgen(conf_path, sl)
         gap_start = time.monotonic()
         self._engine.restart()
         self._engine_started = True
@@ -554,6 +641,13 @@ class Agent(object):
         payload["state"] = self._state
         if snap.get("auth_failed"):
             payload["auth_failed"] = True
+        # Assigned work (optional, additive): omitted entirely until known, so
+        # the wire body is byte-compatible with a control plane that predates
+        # the field (its heartbeat model ignores unknown keys).
+        if self._assigned_work is not None:
+            payload["assigned_work"] = self._assigned_work
+            if self._assigned_reason:
+                payload["assigned_reason"] = self._assigned_reason
         return payload
 
     # -- drain ---------------------------------------------------------------

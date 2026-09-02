@@ -507,6 +507,89 @@ on argv or in logs) is documented in `server/gitsync/sync.py`.
 
 ---
 
+## Uploading a pack (no git required)
+
+Not every environment can reach a git remote. For those, a pack can be uploaded
+as an **archive** through the Packs page ("Upload pack") or directly via
+`POST /api/packs/upload` (multipart: a `file` part plus optional `name` /
+`description` form fields; operator role required):
+
+```
+tar czf mypack.tar.gz mypack/          # or: zip -r mypack.zip mypack
+curl -H "Authorization: Bearer stk_..." \
+     -F "file=@mypack.tar.gz" https://stoker.example.com/api/packs/upload
+```
+
+- **Formats**: `.tar.gz` / `.tgz` / `.tar` / `.zip`, detected from the file
+  *content* (magic bytes), so a mis-named archive still works.
+- **Shape**: the archive may be rooted at the pack itself
+  (`default/eventgen.conf` at the top) or wrap it in a **single top-level
+  directory** (`mypack/default/eventgen.conf` — what `tar czf … mypack/`
+  produces). Anything else — no pack markers, two top-level directories — is
+  refused with a message describing both accepted shapes.
+- **Registration**: the extracted directory registers exactly like a local
+  pack directory (`POST /api/packs`): same linter, same `verified` /
+  `lint_status` semantics, same bundle build, same runs. A pack that fails
+  lint still registers with its errors in the response and on the pack card —
+  fix the pack and upload again (run submits stay blocked meanwhile).
+- **Storage**: packs land under `PACK_UPLOAD_DIR` (default `/data/uploads`);
+  mount a volume there so uploads survive a control-plane restart. An uploaded
+  pack can be removed again with `DELETE /api/packs/{id}` (refused while a
+  spec references it).
+- **Safety**: the archive is treated as untrusted input. Extraction refuses
+  path-traversal members, symlinks/hardlinks and device nodes, and caps the
+  member count, per-file and total uncompressed bytes (streaming-enforced, so
+  a lying header does not help) plus the upload body itself — see the
+  `PACK_UPLOAD_*` settings in the control-plane reference.
+
+---
+
+## Running more than one pack in a job
+
+A spec normally names one pack. It can instead name a **primary pack plus extra
+packs**, and the control plane merges them into a single bundle when the run is
+provisioned — so a fleet can stream two data types at once against the same
+target. In the job wizard, pick the primary pack and use **+ Add** on any other
+mergeable pack; over the API, send `extra_pack_ids` alongside `pack_id` on
+`POST`/`PUT /api/specs`.
+
+The merge is a *build-time* concern only: the worker still downloads one bundle
+and runs one engine, so pacing, sharding, backfill and the whole worker
+contract behave exactly as they do for a single pack.
+
+**How the merge works.** Each pack gets a namespace — its name sanitised to
+`[A-Za-z0-9_-]`, de-duplicated if two names sanitise alike — and every stanza
+and sample file is prefixed `<namespace>--`. Two packs that both ship a
+`web.sample` stanza reading `samples/web.sample` therefore merge to:
+
+```
+[packa--web.sample]        samples/packa--web.sample
+[packb--web.sample]        samples/packb--web.sample
+```
+
+The stanza and its sample file are renamed *together*, so each stanza still
+resolves its own sample against the single flat `sampleDir` the conf rewrite
+stamps. Inputs are sorted by namespace before the tarball is emitted, so the
+same set of packs always produces the same bundle digest whatever order you
+selected them in — content-addressed dedup still works, and re-running a spec
+does not rebuild.
+
+**Rate apportionment.** The merged conf is one stanza set, so the run's rate is
+split across *all* the stanzas by the usual declared-rate weighting
+(`count`/`interval` per stanza, equal where undeclared) — not evenly per pack.
+A pack contributing eight stanzas therefore draws more of the rate than one
+contributing a single stanza. If you want a specific ratio between two packs,
+set their declared counts to express it, or run them as separate jobs.
+
+**eventgen only.** rawreplay replays one recorded dataset and is pinned to a
+single worker, and a metric pack is synthesised from a `metricgen` config
+rather than from files on disk — neither has stanzas and samples to merge. A
+spec mixing those is refused with `422 multi_pack_engine_unsupported`, at spec
+create, spec update and run submit alike. The wizard only offers **+ Add** on
+packs that can actually merge.
+
+---
+
 ## The built bundle (what the worker consumes)
 
 `server/bundles.build_from_pack` lints the pack, writes a `stoker.json` manifest,
