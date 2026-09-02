@@ -84,8 +84,8 @@ class K8sDriver(object):
     """Kubernetes-backed execution driver (one Indexed ``batch/v1`` Job per run)."""
 
     def __init__(self, namespace="stoker", batch_api=None, core_api=None,
-                 context=None, in_cluster=None):
-        # type: (str, Optional[Any], Optional[Any], Optional[str], Optional[bool]) -> None
+                 context=None, in_cluster=None, node_selector=None):
+        # type: (str, Optional[Any], Optional[Any], Optional[str], Optional[bool], Optional[Dict[str, str]]) -> None
         """
         Args:
             namespace: the namespace all Jobs/Secrets/pods live in.
@@ -97,10 +97,14 @@ class K8sDriver(object):
                 plane running inside the cluster), False forces kubeconfig,
                 None (default) auto-detects: kubeconfig if loadable, else the
                 in-cluster service account.
+            node_selector: fleet-level default nodeSelector for worker pods
+                (from the fleet config, seeded via K8S_NODE_SELECTOR). A run's
+                ``driver_opts.node_selector`` overrides it.
         """
         self._namespace = namespace or "stoker"
         self._context = context
         self._in_cluster = in_cluster
+        self._node_selector = dict(node_selector) if node_selector else None
         # Injectable for unit tests (mocks); built lazily from kubeconfig when
         # absent so a long-lived driver picks up the configured context.
         self._batch = batch_api
@@ -125,7 +129,11 @@ class K8sDriver(object):
         in_cluster = config.get("in_cluster")
         if in_cluster is not None:
             in_cluster = bool(in_cluster)
-        return cls(namespace=namespace, context=context, in_cluster=in_cluster)
+        node_selector = config.get("node_selector")
+        if not isinstance(node_selector, dict):
+            node_selector = None
+        return cls(namespace=namespace, context=context, in_cluster=in_cluster,
+                   node_selector=node_selector)
 
     # -- lazy client construction (never hit in unit tests) --------------- #
 
@@ -434,9 +442,15 @@ class K8sDriver(object):
             "terminationGracePeriodSeconds": int(run.stop_grace_s),
             "containers": [container],
         }  # type: Dict[str, Any]
+        # Placement: the spec's driver_opts.node_selector wins outright; the
+        # fleet-level default (config_json.node_selector, seeded from
+        # K8S_NODE_SELECTOR) fills in when the spec says nothing. No merging —
+        # a spec that sets a selector owns the whole selector.
         node_selector = opts.get("node_selector")
+        if not (isinstance(node_selector, dict) and node_selector):
+            node_selector = self._node_selector
         if isinstance(node_selector, dict) and node_selector:
-            pod_spec["nodeSelector"] = node_selector
+            pod_spec["nodeSelector"] = dict(node_selector)
 
         job_spec = {
             "completionMode": "Indexed",

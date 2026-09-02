@@ -2328,12 +2328,21 @@ def seed_fleets(db, settings=None):
         ))
         log.info("seeded fleet swarm-local (endpoint %s)", settings.portainer_endpoint)
     if "k8s-local" not in existing:
+        k8s_config = {"namespace": settings.k8s_namespace}  # type: Dict[str, Any]
+        # Fleet-level default placement (env K8S_NODE_SELECTOR): every run on
+        # this fleet lands on the selected nodes unless the spec's own
+        # driver_opts.node_selector overrides it. Seeded declaratively so a
+        # rebuilt deployment needs no per-spec step.
+        if settings.k8s_node_selector:
+            k8s_config["node_selector"] = dict(settings.k8s_node_selector)
         db.add(Fleet(
             name="k8s-local",
             driver="k8s",
-            config_json={"namespace": settings.k8s_namespace},
+            config_json=k8s_config,
         ))
-        log.info("seeded fleet k8s-local (namespace %s)", settings.k8s_namespace)
+        log.info("seeded fleet k8s-local (namespace %s, node_selector %s)",
+                 settings.k8s_namespace,
+                 k8s_config.get("node_selector") or "none")
     # The in-process fleet (workers as subprocesses of the control plane) is
     # opt-in: seeded only under STOKER_INPROCESS_FLEET so the picker stays
     # clean for deployments that never use it. If the flag is later removed,

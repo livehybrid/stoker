@@ -719,7 +719,7 @@ def preview_run_pack(
 # The EKS fleet design stores (Fernet-encrypted) access keys in config_json;
 # even ciphertext stays server-side, so this is an allowlist, not a denylist.
 _FLEET_CONFIG_PUBLIC_KEYS = (
-    "namespace", "kube_context", "context", "in_cluster",
+    "namespace", "kube_context", "context", "in_cluster", "node_selector",
     "portainer_endpoint", "portainer_host", "verify_tls",
     # Per-fleet ceiling overrides: plain numbers, never credentials, and the
     # wizard benefits from seeing that a fleet carries its own bounds.

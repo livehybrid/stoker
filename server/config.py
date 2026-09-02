@@ -193,6 +193,12 @@ class Settings:
     # Namespace the seeded ``k8s-local`` fleet runs worker Jobs in (env
     # K8S_NAMESPACE); per-fleet ``config_json.namespace`` still overrides it.
     k8s_namespace: str = DEFAULT_K8S_NAMESPACE
+    # Default nodeSelector for the seeded ``k8s-local`` fleet (env
+    # K8S_NODE_SELECTOR, ``key=value[,key=value...]``), stored as sorted pairs
+    # for the frozen dataclass. Seeded into the fleet's config_json at first
+    # boot so a fresh deployment lands worker Jobs on dedicated node groups
+    # declaratively; a spec's ``driver_opts.node_selector`` overrides per run.
+    k8s_node_selector: Tuple[Tuple[str, str], ...] = ()
 
     # --- In-process fleet (workers inside the control-plane container) ------- #
     # Opt-in (env STOKER_INPROCESS_FLEET): seeds the ``inprocess-local`` fleet,
@@ -283,6 +289,31 @@ def _get_opt_float(env, key):
         return float(raw)
     except ValueError:
         raise ConfigError("%s must be a number, got %r" % (key, raw))
+
+
+def _parse_node_selector(env):
+    # type: (Mapping[str, str]) -> Tuple[Tuple[str, str], ...]
+    """Parse ``K8S_NODE_SELECTOR`` (``key=value[,key=value...]``) into pairs.
+
+    The seeded ``k8s-local`` fleet stores these as its default nodeSelector so
+    a fresh deployment places worker Jobs on dedicated node groups with no
+    per-spec step. A malformed entry is a hard :class:`ConfigError` at boot
+    (matching the numeric settings); blank/unset means no selector.
+    """
+    raw = _get(env, "K8S_NODE_SELECTOR")
+    if not raw:
+        return ()
+    pairs = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        key, sep, value = part.partition("=")
+        if not sep or not key.strip() or not value.strip():
+            raise ConfigError(
+                "K8S_NODE_SELECTOR entries must be key=value, got %r" % part)
+        pairs.append((key.strip(), value.strip()))
+    return tuple(pairs)
 
 
 def _parse_engine_ceilings(env):
@@ -461,6 +492,7 @@ def load_settings(env=None):
             env, "PACK_UPLOAD_MAX_MEMBERS", DEFAULT_PACK_UPLOAD_MAX_MEMBERS),
         k8s_namespace=_get(env, "K8S_NAMESPACE", DEFAULT_K8S_NAMESPACE)
         or DEFAULT_K8S_NAMESPACE,
+        k8s_node_selector=_parse_node_selector(env),
         inprocess_fleet_enabled=_get_bool(env, "STOKER_INPROCESS_FLEET", False),
         inprocess_max_workers=max(1, _get_int(
             env, "STOKER_INPROCESS_MAX_WORKERS", DEFAULT_INPROCESS_MAX_WORKERS)),

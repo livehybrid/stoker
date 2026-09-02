@@ -229,6 +229,63 @@ def test_k8s_create_unbounded_run_has_no_active_deadline():
     assert "activeDeadlineSeconds" not in spec
 
 
+def test_k8s_create_spec_node_selector_reaches_pod_spec():
+    batch, core = _mock_apis()
+    driver = _driver(batch, core)
+
+    driver.create(_snapshot(
+        driver_opts={"node_selector": {"workload": "stoker"}}), 2)
+
+    pod_spec = _created_job_body(batch)["spec"]["template"]["spec"]
+    assert pod_spec["nodeSelector"] == {"workload": "stoker"}
+
+
+def test_k8s_create_fleet_default_node_selector_fills_in():
+    """A fleet-level node_selector (K8S_NODE_SELECTOR seed) places every run
+    whose spec sets no selector of its own."""
+    batch, core = _mock_apis()
+    driver = K8sDriver(namespace="stoker", batch_api=batch, core_api=core,
+                       node_selector={"workload": "stoker"})
+
+    driver.create(_snapshot(driver_opts={}), 2)
+
+    pod_spec = _created_job_body(batch)["spec"]["template"]["spec"]
+    assert pod_spec["nodeSelector"] == {"workload": "stoker"}
+
+
+def test_k8s_create_spec_node_selector_overrides_fleet_default():
+    """The spec's selector wins outright — no merging with the fleet default."""
+    batch, core = _mock_apis()
+    driver = K8sDriver(namespace="stoker", batch_api=batch, core_api=core,
+                       node_selector={"workload": "stoker"})
+
+    driver.create(_snapshot(
+        driver_opts={"node_selector": {"pool": "spot"}}), 2)
+
+    pod_spec = _created_job_body(batch)["spec"]["template"]["spec"]
+    assert pod_spec["nodeSelector"] == {"pool": "spot"}
+
+
+def test_k8s_create_no_selector_anywhere_leaves_pod_spec_clean():
+    batch, core = _mock_apis()
+    driver = _driver(batch, core)
+
+    driver.create(_snapshot(driver_opts={}), 2)
+
+    pod_spec = _created_job_body(batch)["spec"]["template"]["spec"]
+    assert "nodeSelector" not in pod_spec
+
+
+def test_from_fleet_config_node_selector_reaches_driver(settings):
+    driver = K8sDriver.from_fleet_config(
+        {"namespace": "ns", "node_selector": {"workload": "stoker"}})
+    assert driver._node_selector == {"workload": "stoker"}
+    # A malformed (non-dict) value is ignored rather than crashing the build.
+    assert K8sDriver.from_fleet_config(
+        {"namespace": "ns", "node_selector": "workload=stoker"}
+    )._node_selector is None
+
+
 def test_k8s_create_passes_completion_index_as_hint_slot():
     """JOB_COMPLETION_INDEX is surfaced to the worker as STOKER_HINT_SLOT."""
     batch, core = _mock_apis()

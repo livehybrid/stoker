@@ -56,6 +56,54 @@ def test_seed_fleets_namespace_follows_settings(db_session, settings):
     assert (k8s.config_json or {}).get("namespace") == "loadtest-ns"
 
 
+def test_seed_fleets_node_selector_follows_settings(db_session, settings):
+    custom = dataclasses.replace(
+        settings, k8s_node_selector=(("workload", "stoker"),))
+    lifecycle.seed_fleets(db_session, settings=custom)
+    k8s = db_session.execute(
+        select(Fleet).where(Fleet.name == "k8s-local")).scalars().first()
+    assert (k8s.config_json or {}).get("node_selector") == {"workload": "stoker"}
+
+
+def test_seed_fleets_no_node_selector_key_when_unset(db_session, settings):
+    lifecycle.seed_fleets(db_session, settings=settings)
+    k8s = db_session.execute(
+        select(Fleet).where(Fleet.name == "k8s-local")).scalars().first()
+    # Absent, not present-and-empty: the driver treats a missing key as "no
+    # fleet default" and the config stays byte-identical to pre-feature seeds.
+    assert "node_selector" not in (k8s.config_json or {})
+
+
+def test_parse_node_selector_env():
+    from server.config import ConfigError, _parse_node_selector
+
+    assert _parse_node_selector({}) == ()
+    assert _parse_node_selector(
+        {"K8S_NODE_SELECTOR": "workload=stoker"}) == (("workload", "stoker"),)
+    assert _parse_node_selector(
+        {"K8S_NODE_SELECTOR": " workload = stoker , pool = spot "}
+    ) == (("workload", "stoker"), ("pool", "spot"))
+    with pytest.raises(ConfigError):
+        _parse_node_selector({"K8S_NODE_SELECTOR": "workload"})
+    with pytest.raises(ConfigError):
+        _parse_node_selector({"K8S_NODE_SELECTOR": "=stoker"})
+
+
+def test_list_fleets_shows_node_selector(client, db_session):
+    # node_selector is addressing, not a credential: it must survive the
+    # config redaction allowlist so operators can see fleet placement.
+    db_session.add(Fleet(name="eks-pinned", driver="k8s", config_json={
+        "namespace": "stoker",
+        "node_selector": {"workload": "stoker"},
+    }))
+    db_session.commit()
+
+    resp = client.get("/api/fleets")
+    assert resp.status_code == 200
+    fleet = next(f for f in resp.json() if f["name"] == "eks-pinned")
+    assert (fleet["config"] or {}).get("node_selector") == {"workload": "stoker"}
+
+
 def test_seed_fleets_is_idempotent_and_preserves_edits(db_session, settings):
     lifecycle.seed_fleets(db_session, settings=settings)
     k8s = db_session.execute(
