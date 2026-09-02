@@ -132,6 +132,43 @@ def test_stray_sweep_writes_audit_event_when_run_row_exists(
 
 
 # --------------------------------------------------------------------------- #
+# Concurrency: a run launched during the sweep must never be swept.
+# --------------------------------------------------------------------------- #
+
+def test_live_run_not_swept_when_liveness_snapshot_is_stale(
+        db_session, make_pack, settings, fake_driver, monkeypatch):
+    """A live run committed after the sweep's liveness snapshot survives.
+
+    Boot reconciliation runs concurrently with request serving, so a run can be
+    launched (in a separate session) after the sweep reads its liveness set.
+    Before the fix the sweep took one snapshot up front and destroyed any owned
+    workload not in it — killing a run launched in the seconds after a restart,
+    which is exactly when operators fire a short backfill run. Simulate the
+    worst case: force the liveness snapshot to miss the run entirely, and assert
+    the per-candidate re-verify still spares its fleet.
+    """
+    pack_dir = make_pack()
+    live = _helpers.full_run(db_session, pack_dir, settings, driver=fake_driver,
+                             workers=2)["run"]
+    live_ref = lifecycle.driver_ref_of(live)
+    assert live.id in fake_driver.list_run_ids()
+    assert live.state not in lifecycle.TERMINAL_STATES
+
+    # Worst-case stale snapshot: the run is entirely absent from the liveness
+    # read (as it was before the fix, when the read happened before the launch
+    # committed). The per-candidate re-verify (a fresh db.get) must still hold.
+    monkeypatch.setattr(lifecycle, "_live_run_ids", lambda db: set())
+
+    lifecycle.reconcile_on_boot(db_session, {"fake-local": fake_driver})
+    db_session.commit()
+
+    assert not fake_driver.is_destroyed(live_ref)
+    assert live.id in fake_driver.list_run_ids()
+    db_session.refresh(live)
+    assert live.state not in lifecycle.TERMINAL_STATES
+
+
+# --------------------------------------------------------------------------- #
 # Safety: never destroy the estate on an empty/errored enumeration.
 # --------------------------------------------------------------------------- #
 

@@ -294,6 +294,15 @@ def provision_run(db, spec, driver, overrides=None, started_by=None, settings=No
     run_snapshot = build_run_snapshot(run, spec, target, hec_token,
                                       settings=settings, workers=workers,
                                       duration_s=eff_duration_s)
+    # Commit the run row (state=preparing) BEFORE the workload exists. Until now
+    # the run was only flushed, so a concurrent session — notably boot
+    # reconciliation's stray sweep, which runs alongside request serving — could
+    # not see it: it would enumerate the freshly created fleet, find no live DB
+    # run for it and destroy the workload out from under a launch. Committing
+    # here makes the run discoverable before its fleet is asked for, and is also
+    # crash-safe: a preparing run left with no driver_ref is failed then swept on
+    # the next boot, rather than a workload existing with no DB trace at all.
+    db.commit()
     try:
         ref = driver.create(run_snapshot, workers)
     except Exception as exc:
@@ -1028,10 +1037,23 @@ def _sweep_stray_fleets(db, drivers):
       logged — never coerced into "everything is a stray";
     * a workload mapping to a live run is never destroyed;
     * a per-stray destroy failure is logged and the sweep continues.
+
+    Concurrency: boot reconciliation runs in the supervisor task, which is
+    scheduled concurrently with request serving — so a run can be launched
+    (in a separate request session) *while* this sweep is in flight. The
+    liveness read is therefore taken FRESH per driver and RE-VERIFIED against a
+    fresh read immediately before each destroy, so a run committed by another
+    session after enumeration is seen as live and never swept. Without this a
+    run launched in the seconds after a control-plane restart is destroyed
+    mid-flight — it delivers a fraction of its data and looks broken (acutely
+    so for the short backfill runs operators fire right after a restart).
     """
     if not drivers:
         return
-    live = _live_run_ids(db)
+    # Persist phase-1's adopt/fail writes and end this session's read snapshot,
+    # so the liveness reads below begin fresh transactions that see runs another
+    # session committed during boot.
+    db.commit()
     # One enumeration per distinct driver instance (a fleet map may point several
     # names at the same driver; id() de-dupes so we do not list an estate twice).
     seen = set()  # type: set
@@ -1050,12 +1072,25 @@ def _sweep_stray_fleets(db, drivers):
             log.warning("boot sweep: enumeration for fleet %s failed (%s); "
                         "skipping sweep for this driver", fleet_name, exc)
             continue
+        # Fresh read AFTER enumerating this driver: a run created during
+        # enumeration is now visible.
+        db.commit()
+        live = _live_run_ids(db)
         strays = {rid for rid in owned if rid not in live}
         if not strays:
             log.info("boot sweep: fleet %s clean (%d owned, 0 stray)",
                      fleet_name, len(owned))
             continue
         for run_id in sorted(strays):
+            # Re-verify against a fresh read immediately before the irreversible
+            # destroy: a run committed since the liveness read above must not be
+            # swept out from under itself.
+            db.commit()
+            live_run = db.get(Run, run_id)
+            if live_run is not None and live_run.state not in TERMINAL_STATES:
+                log.info("boot sweep: run %s is live (%s); not a stray, skipping",
+                         run_id, live_run.state)
+                continue
             _destroy_stray(db, driver, fleet_name, run_id)
 
 
