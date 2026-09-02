@@ -1,0 +1,5 @@
+<nav search_view="search">
+  <view name="stoker_fleet_observability" default="true" />
+  <view name="stoker_run_detail" />
+  <view name="search" />
+</nav>

@@ -372,6 +372,15 @@ def _aggregate_run_metrics(db, run):
         "lag_s_max": round(max(lag_vals), 3) if lag_vals else None,
     }
     body.update(hec)
+    # The run's intended fleet-wide rate, so the observability dashboard can plot
+    # delivered eps against target. Only meaningful for an eps run (per_day_gb /
+    # count_interval do not pace to an eps figure); omitted otherwise.
+    snap = run.spec_snapshot_json or {}
+    if snap.get("rate_mode") == "eps" and snap.get("rate_value") is not None:
+        try:
+            body["target_eps"] = round(float(snap["rate_value"]), 3)
+        except (TypeError, ValueError):
+            pass
     return body
 
 

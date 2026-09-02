@@ -1,0 +1,5 @@
+# Everything in this app is world-readable so any Splunk user can view the
+# dashboards; admin retains write. Adjust to your RBAC as needed.
+[]
+access = read : [ * ], write : [ admin, power ]
+export = system

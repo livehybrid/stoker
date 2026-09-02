@@ -62,7 +62,7 @@ The control plane never generates load itself. It owns state in Postgres (the so
 - **Packs from git — or uploaded.** Register a git repo (HTTPS PAT or SSH deploy key); Stoker clones it, indexes pack roots, lints them and resyncs on a GitHub push webhook (per-repo HMAC). No git access? Upload a pack as a tarball/zip from the Packs page (`POST /api/packs/upload`; extraction is traversal/symlink/zip-bomb hardened). A local pack directory can also be registered directly (`POST /api/packs`).
 - **Bundled starter packs, out of the box.** The server image ships the repo's `packs/` set (web/AWS/tutorial eventgen packs, the attack-replay Piston pack, the operational metric packs) and registers them automatically at boot — a fresh deployment has runnable packs with no git repo or sideloading. Opt out by unsetting `STOKER_BUILTIN_PACKS_DIR`.
 - **Replay is single-worker.** A rawreplay run is forced to one worker (a multi-worker replay spec is rejected `409 replay_single_worker` at submit, and pinned at provision and scale).
-- **Dogfood telemetry.** The control plane can stream its own run metrics to a HEC target for self-observability (off unless configured).
+- **Dogfood telemetry.** The control plane can stream its own run metrics to a HEC target for self-observability (off unless configured). The shippable [`dashboards/stoker-observability`](dashboards/stoker-observability/README.md) Splunk app renders that stream: a fleet overview (delivered-vs-target eps, pacing lag, HEC outcomes, all runs) and a per-run drill-down.
 
 ## Quick starts
 

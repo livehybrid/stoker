@@ -1,0 +1,173 @@
+<form version="1.1" theme="dark">
+  <label>Stoker — Fleet Observability</label>
+  <description>Live view across every Stoker run, over the control plane's dogfood telemetry (sourcetypes stoker:metrics and stoker:job). Click a run to drill into it.</description>
+
+  <fieldset submitButton="false" autoRun="true">
+    <input type="time" token="tr">
+      <label>Time range</label>
+      <default>
+        <earliest>-60m</earliest>
+        <latest>now</latest>
+      </default>
+    </input>
+    <input type="text" token="index">
+      <label>Index (dogfood target)</label>
+      <default>*</default>
+      <initialValue>*</initialValue>
+    </input>
+  </fieldset>
+
+  <row>
+    <panel>
+      <title>Active runs (in window)</title>
+      <single>
+        <search>
+          <query>index=$index$ sourcetype=stoker:metrics
+| stats latest(state) as state by run_id
+| search state IN (provisioning, releasing, running, draining)
+| stats count</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="rangeColors">["0x555555","0x53a051"]</option>
+        <option name="rangeValues">[0]</option>
+        <option name="useColors">1</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Fleet delivered eps (latest)</title>
+      <single>
+        <search>
+          <query>index=$index$ sourcetype=stoker:metrics
+| stats latest(eps) as eps by run_id
+| stats sum(eps) as fleet_eps</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="numberPrecision">0</option>
+        <option name="unit">eps</option>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Events delivered (window)</title>
+      <single>
+        <search>
+          <query>index=$index$ sourcetype=stoker:metrics
+| stats max(events_total) as ev by run_id
+| stats sum(ev) as total</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="numberPrecision">0</option>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+    <panel>
+      <title>HEC errors (4xx+5xx+timeouts, window)</title>
+      <single>
+        <search>
+          <query>index=$index$ sourcetype=stoker:metrics
+| stats max(hec_4xx) as e4 max(hec_5xx) as e5 max(hec_timeouts) as et by run_id
+| eval errs = e4 + e5 + et
+| stats sum(errs) as total_errors</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="numberPrecision">0</option>
+        <option name="drilldown">none</option>
+        <option name="rangeColors">["0x53a051","0xdc4e41"]</option>
+        <option name="rangeValues">[0]</option>
+        <option name="useColors">1</option>
+      </single>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Delivered eps — fleet total</title>
+      <chart>
+        <search>
+          <query>index=$index$ sourcetype=stoker:metrics
+| timechart span=30s sum(eps) as "Delivered eps" sum(target_eps) as "Target eps"</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="charting.axisTitleY.text">events / s</option>
+        <option name="charting.legend.placement">bottom</option>
+        <option name="charting.chart.nullValueMode">connect</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Worst-worker pacing lag (max lag_s across the fleet)</title>
+      <chart>
+        <search>
+          <query>index=$index$ sourcetype=stoker:metrics
+| timechart span=30s max(lag_s_max) as "Max pacing lag (s)"</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="charting.axisTitleY.text">seconds behind schedule</option>
+        <option name="charting.legend.placement">bottom</option>
+      </chart>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>HEC outcomes — fleet cumulative (2xx vs errors)</title>
+      <chart>
+        <search>
+          <query>index=$index$ sourcetype=stoker:metrics
+| timechart span=30s sum(hec_2xx) as "2xx" sum(hec_4xx) as "4xx" sum(hec_5xx) as "5xx" sum(hec_timeouts) as "timeouts" sum(retries) as "retries"</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="charting.axisTitleY.text">cumulative count</option>
+        <option name="charting.legend.placement">bottom</option>
+      </chart>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Runs — latest state (click a row to drill in)</title>
+      <table>
+        <search>
+          <query>index=$index$ sourcetype=stoker:metrics
+| stats latest(state) as state latest(eps) as eps latest(target_eps) as target_eps max(events_total) as events latest(live_workers) as live latest(reporting_workers) as reporting latest(lag_s_max) as lag_s latest(_time) as last_seen by run_id spec_id
+| eval last_seen = strftime(last_seen, "%H:%M:%S")
+| sort - run_id
+| rename run_id as "Run" spec_id as "Spec" state as "State" eps as "Delivered eps" target_eps as "Target eps" events as "Events" live as "Live workers" reporting as "Reporting" lag_s as "Lag (s)" last_seen as "Last seen"</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">row</option>
+        <option name="count">20</option>
+        <drilldown>
+          <link target="_blank">stoker_run_detail?form.run_id=$row.Run$&amp;form.index=$index$&amp;form.tr.earliest=$tr.earliest$&amp;form.tr.latest=$tr.latest$</link>
+        </drilldown>
+      </table>
+    </panel>
+    <panel>
+      <title>Recent run lifecycle (stoker:job transitions)</title>
+      <table>
+        <search>
+          <query>index=$index$ sourcetype=stoker:job
+| sort - _time
+| eval when = strftime(_time, "%H:%M:%S")
+| table when run_id from to end_reason degraded
+| rename when as "Time" run_id as "Run" from as "From" to as "To" end_reason as "End reason" degraded as "Degraded"</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="count">20</option>
+      </table>
+    </panel>
+  </row>
+</form>
