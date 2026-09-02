@@ -9,9 +9,30 @@ on:
 env:
   IMAGE_NAME: ghcr.io/livehybrid/stoker-worker
 
+# Concurrency is set per job, not once at workflow level, because the two halves
+# of this pipeline want opposite behaviour.
+#
+# Test-shaped jobs are cancelled the moment a newer commit lands on the same PR
+# or branch. A superseded test run tells you about code nobody will merge, so it
+# is pure waste of Actions minutes.
+#
+# The publish chain (cp-build, build, smoke, sign) is not cancelled. Pushing a
+# multi-arch manifest, smoking it and cosign-signing its digest is meant to be
+# one atomic act, and a cancellation landing part-way through leaves an unsigned
+# digest in the registry: it looks published, it pulls fine, and it fails
+# verification. Those jobs get a group keyed on the commit SHA, which is unique
+# per run anyway, with cancellation switched off.
+#
+# This is not a licence to build stale commits: every publish job is gated
+# behind a test job, so when a newer push cancels the tests the publish behind
+# them never starts.
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.workflow }}-test-${{ github.event.pull_request.number || github.ref }}-${{ matrix.python-version }}
+      cancel-in-progress: true
     strategy:
       fail-fast: false
       matrix:
@@ -53,6 +74,9 @@ jobs:
 
   server-test:
     runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.workflow }}-test-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
 
@@ -74,6 +98,9 @@ jobs:
 
   ui-build:
     runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.workflow }}-test-${{ github.event.pull_request.number || github.ref }}-ui
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
 
@@ -92,6 +119,9 @@ jobs:
     needs: [server-test, ui-build]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.workflow }}-publish-cp-${{ github.sha }}
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: write
@@ -139,6 +169,9 @@ jobs:
     needs: test
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.workflow }}-publish-worker-${{ github.sha }}
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: write
@@ -182,6 +215,9 @@ jobs:
   smoke:
     needs: build
     runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.workflow }}-publish-worker-${{ github.sha }}
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: read
@@ -203,6 +239,9 @@ jobs:
   sign:
     needs: [build, smoke]
     runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.workflow }}-publish-worker-${{ github.sha }}
+      cancel-in-progress: false
     permissions:
       packages: write
       id-token: write
