@@ -124,6 +124,13 @@ jobs:
     concurrency:
       group: ${{ github.workflow }}-publish-cp-${{ github.sha }}
       cancel-in-progress: false
+    # Docker Hub push is opt-in: set repository secrets DOCKERHUB_USERNAME and
+    # DOCKERHUB_TOKEN to also publish to docker.io/livehybrid/stoker. Absent
+    # them, the build still succeeds and publishes to ghcr only (this env maps
+    # the secret so a step `if:` can gate on it — secrets are not allowed in
+    # `if` directly).
+    env:
+      DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
     permissions:
       contents: read
       packages: write
@@ -141,10 +148,20 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Log in to Docker Hub
+        if: env.DOCKERHUB_USER != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - uses: docker/metadata-action@v5
         id: meta
         with:
-          images: ghcr.io/livehybrid/stoker
+          # docker.io line is empty (ignored) unless Docker Hub is configured.
+          images: |
+            ghcr.io/livehybrid/stoker
+            ${{ env.DOCKERHUB_USER != '' && 'docker.io/livehybrid/stoker' || '' }}
           tags: |
             type=sha
             type=ref,event=tag
@@ -164,8 +181,12 @@ jobs:
 
       - uses: sigstore/cosign-installer@v3
 
-      - name: Keyless sign the pushed digest
+      - name: Keyless sign the pushed digest (ghcr)
         run: cosign sign --yes "ghcr.io/livehybrid/stoker@${{ steps.push.outputs.digest }}"
+
+      - name: Keyless sign the pushed digest (Docker Hub)
+        if: env.DOCKERHUB_USER != ''
+        run: cosign sign --yes "docker.io/livehybrid/stoker@${{ steps.push.outputs.digest }}"
 
   build:
     needs: test
@@ -174,6 +195,11 @@ jobs:
     concurrency:
       group: ${{ github.workflow }}-publish-worker-${{ github.sha }}
       cancel-in-progress: false
+    # Docker Hub push is opt-in (see cp-build): with DOCKERHUB_USERNAME /
+    # DOCKERHUB_TOKEN set, the worker image also publishes to
+    # docker.io/livehybrid/stoker-worker; without them, ghcr only.
+    env:
+      DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
     permissions:
       contents: read
       packages: write
@@ -193,10 +219,19 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Log in to Docker Hub
+        if: env.DOCKERHUB_USER != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - uses: docker/metadata-action@v5
         id: meta
         with:
-          images: ${{ env.IMAGE_NAME }}
+          images: |
+            ${{ env.IMAGE_NAME }}
+            ${{ env.DOCKERHUB_USER != '' && 'docker.io/livehybrid/stoker-worker' || '' }}
           tags: |
             type=sha
             type=ref,event=tag
