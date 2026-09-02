@@ -27,7 +27,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r worker/requirements.txt
-          pip install pytest pytest-timeout
+          # PyYAML: the security_content resolver (tools/security_content_packs.py)
+          # parses a security_content checkout; its tests skip without it.
+          pip install pytest pytest-timeout pyyaml
 
       - name: Unit tests (agent)
         run: python -m pytest worker/tests -q

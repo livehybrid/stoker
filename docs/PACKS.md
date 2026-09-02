@@ -341,6 +341,40 @@ wired an untrusted repo plus a rawreplay pack.
 > at the `media.githubusercontent.com/media/...` raw URL (or vendor the file and
 > use a local `dataset:`), **not** the GitHub HTML `/tree/` or `/blob/` page.
 
+### Materialising packs from `splunk/security_content`
+
+`tools/security_content_packs.py` turns a **security_content checkout** into
+rawreplay packs automatically — one pack per `tests[].attack_data[]` dataset —
+so you can replay the exact telemetry a chosen detection fires on. It never
+downloads a dataset: each emitted pack records the `dataset_url`, and Stoker's
+own rawreplay build fetches it through the [SSRF-safe path](#dataset_url-safety)
+when a run launches.
+
+```bash
+git clone --depth 1 https://github.com/splunk/security_content
+python tools/security_content_packs.py \
+    --checkout ./security_content --out ./sc-packs \
+    --subset T1003,lsass,cloudtrail   # optional: name / MITRE id / source substrings
+    # --limit 25   --index attack   --mode cadence   --dry-run
+```
+
+Each pack carries the detection's name, id, description and MITRE ids (as tags),
+plus the dataset's `source` / `sourcetype`. Register the output like any pack
+directory: git-sync a repo of them, `POST /api/packs` with the path, or drop it
+under `STOKER_BUILTIN_PACKS_DIR`. Requires PyYAML (`pip install pyyaml`) for the
+checkout parse.
+
+**Replaying faithfully vs looping.** The engine mode follows the **run's**
+pacing, not the pack (see [rate vs cadence](#rate-vs-cadence)): launch a spec
+with `rate_mode = count_interval` for a single faithful pass at the recorded
+cadence, re-stamped to now (the right choice for a finite `attack_data`
+capture — it lands each event once); use `eps` to loop the capture at a fixed
+rate. The pack's declared `mode` is advisory.
+
+**Refreshing.** Re-run the tool against an updated checkout; output is
+deterministic (packs are named `sc-<detection>` and sorted), so re-materialising
+overwrites in place and a git diff shows exactly which detections changed.
+
 ---
 
 ## Metric packs (metricgen)
