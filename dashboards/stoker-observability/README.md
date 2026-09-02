@@ -10,6 +10,22 @@ that stream into two dashboards:
 - **Run Detail** — one run by id: delivered eps vs target, pacing lag, HEC
   outcomes (2xx/4xx/5xx/timeouts/retries) and the run's lifecycle transitions.
 
+Each dashboard ships in **two builds**: a **Dashboard Studio** version (the
+default in the app nav) and a **Simple XML** ("Classic") version with identical
+queries. Use whichever you prefer — Studio for the modern builder, Simple XML if
+you want to hand-edit or run on an older Splunk. The Studio views are generated
+from `tools/gen_studio_dashboards.py` (edit the panel model there and re-run
+rather than hand-editing the JSON).
+
+### Where the data comes from
+
+The control plane **pushes** its own telemetry to Splunk over HEC — nothing
+pulls from Stoker. The load-generation workers report real measurements
+(delivered eps, HEC outcomes, pacing lag) to the control plane on their
+heartbeats; the control plane aggregates them per run and POSTs `stoker:job` /
+`stoker:metrics` events to the HEC target you configure. These dashboards read
+those events back out of Splunk.
+
 The React run view in the control plane already shows **per-slot** live charts
 for a single run. This app is the complement: a **cross-run, historical**
 view in Splunk, alongside every other index you already have, that survives past

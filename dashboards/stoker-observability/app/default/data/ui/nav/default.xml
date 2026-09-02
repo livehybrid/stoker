@@ -1,5 +1,9 @@
 <nav search_view="search">
-  <view name="stoker_fleet_observability" default="true" />
-  <view name="stoker_run_detail" />
+  <view name="stoker_fleet_observability_studio" default="true" />
+  <view name="stoker_run_detail_studio" />
+  <collection label="Classic (Simple XML)">
+    <view name="stoker_fleet_observability" />
+    <view name="stoker_run_detail" />
+  </collection>
   <view name="search" />
 </nav>

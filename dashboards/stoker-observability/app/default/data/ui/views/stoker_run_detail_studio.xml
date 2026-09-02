@@ -1,0 +1,371 @@
+<dashboard version="2" theme="dark">
+  <label>Stoker — Run Detail (Studio)</label>
+  <definition><![CDATA[
+{
+  "visualizations": {
+    "viz_state": {
+      "type": "splunk.singlevalue",
+      "options": {
+        "majorValue": "> primary | seriesByName('state') | lastPoint()",
+        "sparklineDisplay": "off",
+        "trendDisplay": "off"
+      },
+      "dataSources": {
+        "primary": "ds_state"
+      },
+      "title": "Current state"
+    },
+    "viz_workers": {
+      "type": "splunk.singlevalue",
+      "options": {
+        "majorValue": "> primary | seriesByName('workers') | lastPoint()",
+        "sparklineDisplay": "off",
+        "trendDisplay": "off"
+      },
+      "dataSources": {
+        "primary": "ds_workers"
+      },
+      "title": "Reporting / live workers"
+    },
+    "viz_eps": {
+      "type": "splunk.singlevalue",
+      "options": {
+        "majorValue": "> primary | seriesByName('eps') | lastPoint()",
+        "sparklineDisplay": "off",
+        "trendDisplay": "off",
+        "unit": "eps",
+        "unitPosition": "after"
+      },
+      "dataSources": {
+        "primary": "ds_eps"
+      },
+      "title": "Delivered eps"
+    },
+    "viz_events": {
+      "type": "splunk.singlevalue",
+      "options": {
+        "majorValue": "> primary | seriesByName('events') | lastPoint()",
+        "sparklineDisplay": "off",
+        "trendDisplay": "off"
+      },
+      "dataSources": {
+        "primary": "ds_events"
+      },
+      "title": "Events delivered"
+    },
+    "viz_bytes": {
+      "type": "splunk.singlevalue",
+      "options": {
+        "majorValue": "> primary | seriesByName('mb') | lastPoint()",
+        "sparklineDisplay": "off",
+        "trendDisplay": "off",
+        "unit": "MB",
+        "unitPosition": "after"
+      },
+      "dataSources": {
+        "primary": "ds_bytes"
+      },
+      "title": "MB delivered"
+    },
+    "viz_eps_ts": {
+      "type": "splunk.line",
+      "options": {
+        "legendDisplay": "bottom",
+        "yAxisTitleText": "events / s",
+        "nullValueDisplay": "connect"
+      },
+      "dataSources": {
+        "primary": "ds_eps_ts"
+      },
+      "title": "Delivered eps vs target"
+    },
+    "viz_lag_ts": {
+      "type": "splunk.line",
+      "options": {
+        "legendDisplay": "bottom",
+        "yAxisTitleText": "seconds behind",
+        "nullValueDisplay": "connect"
+      },
+      "dataSources": {
+        "primary": "ds_lag_ts"
+      },
+      "title": "Pacing lag (max across workers)"
+    },
+    "viz_hec_ts": {
+      "type": "splunk.line",
+      "options": {
+        "legendDisplay": "bottom",
+        "yAxisTitleText": "count",
+        "nullValueDisplay": "connect"
+      },
+      "dataSources": {
+        "primary": "ds_hec_ts"
+      },
+      "title": "HEC outcomes (cumulative)"
+    },
+    "viz_life": {
+      "type": "splunk.table",
+      "options": {
+        "count": 20
+      },
+      "dataSources": {
+        "primary": "ds_life"
+      },
+      "title": "Lifecycle (state transitions)"
+    }
+  },
+  "dataSources": {
+    "ds_state": {
+      "type": "ds.search",
+      "options": {
+        "query": "index=$index_tok$ sourcetype=stoker:metrics run_id=$run_id_tok$\n| stats latest(state) as state",
+        "queryParameters": {
+          "earliest": "$global_time.earliest$",
+          "latest": "$global_time.latest$"
+        }
+      },
+      "name": "State"
+    },
+    "ds_workers": {
+      "type": "ds.search",
+      "options": {
+        "query": "index=$index_tok$ sourcetype=stoker:metrics run_id=$run_id_tok$\n| stats latest(reporting_workers) as reporting latest(live_workers) as live\n| eval workers = reporting . \" / \" . live",
+        "queryParameters": {
+          "earliest": "$global_time.earliest$",
+          "latest": "$global_time.latest$"
+        }
+      },
+      "name": "Workers"
+    },
+    "ds_eps": {
+      "type": "ds.search",
+      "options": {
+        "query": "index=$index_tok$ sourcetype=stoker:metrics run_id=$run_id_tok$\n| stats latest(eps) as eps",
+        "queryParameters": {
+          "earliest": "$global_time.earliest$",
+          "latest": "$global_time.latest$"
+        }
+      },
+      "name": "Delivered eps"
+    },
+    "ds_events": {
+      "type": "ds.search",
+      "options": {
+        "query": "index=$index_tok$ sourcetype=stoker:metrics run_id=$run_id_tok$\n| stats max(events_total) as events",
+        "queryParameters": {
+          "earliest": "$global_time.earliest$",
+          "latest": "$global_time.latest$"
+        }
+      },
+      "name": "Events"
+    },
+    "ds_bytes": {
+      "type": "ds.search",
+      "options": {
+        "query": "index=$index_tok$ sourcetype=stoker:metrics run_id=$run_id_tok$\n| stats max(bytes_total) as bytes\n| eval mb = round(bytes/1024/1024, 1)",
+        "queryParameters": {
+          "earliest": "$global_time.earliest$",
+          "latest": "$global_time.latest$"
+        }
+      },
+      "name": "Bytes"
+    },
+    "ds_eps_ts": {
+      "type": "ds.search",
+      "options": {
+        "query": "index=$index_tok$ sourcetype=stoker:metrics run_id=$run_id_tok$\n| timechart span=30s avg(eps) as \"Delivered eps\" avg(target_eps) as \"Target eps\"",
+        "queryParameters": {
+          "earliest": "$global_time.earliest$",
+          "latest": "$global_time.latest$"
+        }
+      },
+      "name": "Delivered vs target"
+    },
+    "ds_lag_ts": {
+      "type": "ds.search",
+      "options": {
+        "query": "index=$index_tok$ sourcetype=stoker:metrics run_id=$run_id_tok$\n| timechart span=30s max(lag_s_max) as \"Max pacing lag (s)\"",
+        "queryParameters": {
+          "earliest": "$global_time.earliest$",
+          "latest": "$global_time.latest$"
+        }
+      },
+      "name": "Pacing lag"
+    },
+    "ds_hec_ts": {
+      "type": "ds.search",
+      "options": {
+        "query": "index=$index_tok$ sourcetype=stoker:metrics run_id=$run_id_tok$\n| timechart span=30s max(hec_2xx) as \"2xx\" max(hec_4xx) as \"4xx\" max(hec_5xx) as \"5xx\" max(hec_timeouts) as \"timeouts\" max(retries) as \"retries\"",
+        "queryParameters": {
+          "earliest": "$global_time.earliest$",
+          "latest": "$global_time.latest$"
+        }
+      },
+      "name": "HEC outcomes"
+    },
+    "ds_life": {
+      "type": "ds.search",
+      "options": {
+        "query": "index=$index_tok$ sourcetype=stoker:job run_id=$run_id_tok$\n| sort - _time\n| table _time from to end_reason degraded",
+        "queryParameters": {
+          "earliest": "$global_time.earliest$",
+          "latest": "$global_time.latest$"
+        }
+      },
+      "name": "Lifecycle"
+    }
+  },
+  "defaults": {
+    "dataSources": {
+      "ds.search": {
+        "options": {
+          "queryParameters": {
+            "earliest": "$global_time.earliest$",
+            "latest": "$global_time.latest$"
+          }
+        }
+      }
+    }
+  },
+  "inputs": {
+    "input_runid": {
+      "type": "input.text",
+      "title": "Run id",
+      "options": {
+        "token": "run_id_tok",
+        "defaultValue": ""
+      }
+    },
+    "input_time": {
+      "type": "input.timerange",
+      "title": "Time range",
+      "options": {
+        "token": "global_time",
+        "defaultValue": "-60m,now"
+      }
+    },
+    "input_index": {
+      "type": "input.text",
+      "title": "Index (dogfood target)",
+      "options": {
+        "token": "index_tok",
+        "defaultValue": "*"
+      }
+    }
+  },
+  "layout": {
+    "type": "absolute",
+    "options": {
+      "width": 1200,
+      "height": 900,
+      "display": "auto"
+    },
+    "structure": [
+      {
+        "item": "viz_state",
+        "type": "block",
+        "position": {
+          "x": 0,
+          "y": 0,
+          "w": 240,
+          "h": 150
+        }
+      },
+      {
+        "item": "viz_workers",
+        "type": "block",
+        "position": {
+          "x": 240,
+          "y": 0,
+          "w": 240,
+          "h": 150
+        }
+      },
+      {
+        "item": "viz_eps",
+        "type": "block",
+        "position": {
+          "x": 480,
+          "y": 0,
+          "w": 240,
+          "h": 150
+        }
+      },
+      {
+        "item": "viz_events",
+        "type": "block",
+        "position": {
+          "x": 720,
+          "y": 0,
+          "w": 240,
+          "h": 150
+        }
+      },
+      {
+        "item": "viz_bytes",
+        "type": "block",
+        "position": {
+          "x": 960,
+          "y": 0,
+          "w": 240,
+          "h": 150
+        }
+      },
+      {
+        "item": "viz_eps_ts",
+        "type": "block",
+        "position": {
+          "x": 0,
+          "y": 160,
+          "w": 600,
+          "h": 300
+        }
+      },
+      {
+        "item": "viz_lag_ts",
+        "type": "block",
+        "position": {
+          "x": 610,
+          "y": 160,
+          "w": 590,
+          "h": 300
+        }
+      },
+      {
+        "item": "viz_hec_ts",
+        "type": "block",
+        "position": {
+          "x": 0,
+          "y": 470,
+          "w": 600,
+          "h": 300
+        }
+      },
+      {
+        "item": "viz_life",
+        "type": "block",
+        "position": {
+          "x": 610,
+          "y": 470,
+          "w": 590,
+          "h": 300
+        }
+      }
+    ],
+    "globalInputs": [
+      "input_runid",
+      "input_time",
+      "input_index"
+    ]
+  },
+  "title": "Stoker \u2014 Run Detail",
+  "description": "One run by id, over dogfood telemetry: delivered vs target eps, pacing lag, HEC outcomes and lifecycle."
+}
+]]></definition>
+  <meta type="hiddenElements"><![CDATA[
+{
+  "hideEdit": false,
+  "hideOpenInSearch": false
+}
+]]></meta>
+</dashboard>

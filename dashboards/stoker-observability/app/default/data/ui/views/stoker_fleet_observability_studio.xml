@@ -1,0 +1,368 @@
+<dashboard version="2" theme="dark">
+  <label>Stoker — Fleet Observability (Studio)</label>
+  <definition><![CDATA[
+{
+  "visualizations": {
+    "viz_active": {
+      "type": "splunk.singlevalue",
+      "options": {
+        "majorValue": "> primary | seriesByName('active_runs') | lastPoint()",
+        "sparklineDisplay": "off",
+        "trendDisplay": "off"
+      },
+      "dataSources": {
+        "primary": "ds_active"
+      },
+      "title": "Active runs"
+    },
+    "viz_eps": {
+      "type": "splunk.singlevalue",
+      "options": {
+        "majorValue": "> primary | seriesByName('fleet_eps') | lastPoint()",
+        "sparklineDisplay": "off",
+        "trendDisplay": "off",
+        "unit": "eps",
+        "unitPosition": "after"
+      },
+      "dataSources": {
+        "primary": "ds_eps"
+      },
+      "title": "Fleet delivered eps"
+    },
+    "viz_events": {
+      "type": "splunk.singlevalue",
+      "options": {
+        "majorValue": "> primary | seriesByName('events') | lastPoint()",
+        "sparklineDisplay": "off",
+        "trendDisplay": "off"
+      },
+      "dataSources": {
+        "primary": "ds_events"
+      },
+      "title": "Events delivered (window)"
+    },
+    "viz_errors": {
+      "type": "splunk.singlevalue",
+      "options": {
+        "majorValue": "> primary | seriesByName('errors') | lastPoint()",
+        "sparklineDisplay": "off",
+        "trendDisplay": "off"
+      },
+      "dataSources": {
+        "primary": "ds_errors"
+      },
+      "title": "HEC errors (window)"
+    },
+    "viz_eps_ts": {
+      "type": "splunk.line",
+      "options": {
+        "legendDisplay": "bottom",
+        "yAxisTitleText": "events / s",
+        "nullValueDisplay": "connect"
+      },
+      "dataSources": {
+        "primary": "ds_eps_ts"
+      },
+      "title": "Delivered eps vs target \u2014 fleet total"
+    },
+    "viz_lag_ts": {
+      "type": "splunk.line",
+      "options": {
+        "legendDisplay": "bottom",
+        "yAxisTitleText": "seconds behind",
+        "nullValueDisplay": "connect"
+      },
+      "dataSources": {
+        "primary": "ds_lag_ts"
+      },
+      "title": "Worst-worker pacing lag"
+    },
+    "viz_hec_ts": {
+      "type": "splunk.line",
+      "options": {
+        "legendDisplay": "bottom",
+        "yAxisTitleText": "count",
+        "nullValueDisplay": "connect"
+      },
+      "dataSources": {
+        "primary": "ds_hec_ts"
+      },
+      "title": "HEC outcomes \u2014 cumulative"
+    },
+    "viz_runs": {
+      "type": "splunk.table",
+      "options": {
+        "count": 20,
+        "drilldown": "row"
+      },
+      "dataSources": {
+        "primary": "ds_runs"
+      },
+      "title": "Runs \u2014 click a row to drill in",
+      "eventHandlers": [
+        {
+          "type": "drilldown.customUrl",
+          "options": {
+            "url": "/app/stoker_observability/stoker_run_detail_studio?form.run_id_tok=$row.run_id.value$&form.global_time.earliest=$global_time.earliest$&form.global_time.latest=$global_time.latest$&form.index_tok=$index_tok$",
+            "newTab": true
+          }
+        }
+      ]
+    },
+    "viz_life": {
+      "type": "splunk.table",
+      "options": {
+        "count": 20
+      },
+      "dataSources": {
+        "primary": "ds_life"
+      },
+      "title": "Recent run lifecycle"
+    }
+  },
+  "dataSources": {
+    "ds_active": {
+      "type": "ds.search",
+      "options": {
+        "query": "index=$index_tok$ sourcetype=stoker:metrics\n| stats latest(state) as state by run_id\n| search state IN (provisioning, releasing, running, draining)\n| stats count as active_runs",
+        "queryParameters": {
+          "earliest": "$global_time.earliest$",
+          "latest": "$global_time.latest$"
+        }
+      },
+      "name": "Active runs"
+    },
+    "ds_eps": {
+      "type": "ds.search",
+      "options": {
+        "query": "index=$index_tok$ sourcetype=stoker:metrics\n| stats latest(eps) as eps by run_id\n| stats sum(eps) as fleet_eps",
+        "queryParameters": {
+          "earliest": "$global_time.earliest$",
+          "latest": "$global_time.latest$"
+        }
+      },
+      "name": "Fleet delivered eps"
+    },
+    "ds_events": {
+      "type": "ds.search",
+      "options": {
+        "query": "index=$index_tok$ sourcetype=stoker:metrics\n| stats max(events_total) as ev by run_id\n| stats sum(ev) as events",
+        "queryParameters": {
+          "earliest": "$global_time.earliest$",
+          "latest": "$global_time.latest$"
+        }
+      },
+      "name": "Events delivered"
+    },
+    "ds_errors": {
+      "type": "ds.search",
+      "options": {
+        "query": "index=$index_tok$ sourcetype=stoker:metrics\n| stats max(hec_4xx) as e4 max(hec_5xx) as e5 max(hec_timeouts) as et by run_id\n| eval errs = e4 + e5 + et\n| stats sum(errs) as errors",
+        "queryParameters": {
+          "earliest": "$global_time.earliest$",
+          "latest": "$global_time.latest$"
+        }
+      },
+      "name": "HEC errors"
+    },
+    "ds_eps_ts": {
+      "type": "ds.search",
+      "options": {
+        "query": "index=$index_tok$ sourcetype=stoker:metrics\n| timechart span=30s sum(eps) as \"Delivered eps\" sum(target_eps) as \"Target eps\"",
+        "queryParameters": {
+          "earliest": "$global_time.earliest$",
+          "latest": "$global_time.latest$"
+        }
+      },
+      "name": "Delivered vs target"
+    },
+    "ds_lag_ts": {
+      "type": "ds.search",
+      "options": {
+        "query": "index=$index_tok$ sourcetype=stoker:metrics\n| timechart span=30s max(lag_s_max) as \"Max pacing lag (s)\"",
+        "queryParameters": {
+          "earliest": "$global_time.earliest$",
+          "latest": "$global_time.latest$"
+        }
+      },
+      "name": "Pacing lag"
+    },
+    "ds_hec_ts": {
+      "type": "ds.search",
+      "options": {
+        "query": "index=$index_tok$ sourcetype=stoker:metrics\n| timechart span=30s sum(hec_2xx) as \"2xx\" sum(hec_4xx) as \"4xx\" sum(hec_5xx) as \"5xx\" sum(hec_timeouts) as \"timeouts\" sum(retries) as \"retries\"",
+        "queryParameters": {
+          "earliest": "$global_time.earliest$",
+          "latest": "$global_time.latest$"
+        }
+      },
+      "name": "HEC outcomes"
+    },
+    "ds_runs": {
+      "type": "ds.search",
+      "options": {
+        "query": "index=$index_tok$ sourcetype=stoker:metrics\n| stats latest(state) as state latest(eps) as eps latest(target_eps) as target_eps max(events_total) as events latest(live_workers) as live latest(reporting_workers) as reporting latest(lag_s_max) as lag_s by run_id spec_id\n| sort - run_id",
+        "queryParameters": {
+          "earliest": "$global_time.earliest$",
+          "latest": "$global_time.latest$"
+        }
+      },
+      "name": "Runs"
+    },
+    "ds_life": {
+      "type": "ds.search",
+      "options": {
+        "query": "index=$index_tok$ sourcetype=stoker:job\n| sort - _time\n| table _time run_id from to end_reason degraded",
+        "queryParameters": {
+          "earliest": "$global_time.earliest$",
+          "latest": "$global_time.latest$"
+        }
+      },
+      "name": "Lifecycle"
+    }
+  },
+  "defaults": {
+    "dataSources": {
+      "ds.search": {
+        "options": {
+          "queryParameters": {
+            "earliest": "$global_time.earliest$",
+            "latest": "$global_time.latest$"
+          }
+        }
+      }
+    }
+  },
+  "inputs": {
+    "input_time": {
+      "type": "input.timerange",
+      "title": "Time range",
+      "options": {
+        "token": "global_time",
+        "defaultValue": "-60m,now"
+      }
+    },
+    "input_index": {
+      "type": "input.text",
+      "title": "Index (dogfood target)",
+      "options": {
+        "token": "index_tok",
+        "defaultValue": "*"
+      }
+    }
+  },
+  "layout": {
+    "type": "absolute",
+    "options": {
+      "width": 1200,
+      "height": 1200,
+      "display": "auto"
+    },
+    "structure": [
+      {
+        "item": "viz_active",
+        "type": "block",
+        "position": {
+          "x": 0,
+          "y": 0,
+          "w": 300,
+          "h": 150
+        }
+      },
+      {
+        "item": "viz_eps",
+        "type": "block",
+        "position": {
+          "x": 300,
+          "y": 0,
+          "w": 300,
+          "h": 150
+        }
+      },
+      {
+        "item": "viz_events",
+        "type": "block",
+        "position": {
+          "x": 600,
+          "y": 0,
+          "w": 300,
+          "h": 150
+        }
+      },
+      {
+        "item": "viz_errors",
+        "type": "block",
+        "position": {
+          "x": 900,
+          "y": 0,
+          "w": 300,
+          "h": 150
+        }
+      },
+      {
+        "item": "viz_eps_ts",
+        "type": "block",
+        "position": {
+          "x": 0,
+          "y": 160,
+          "w": 600,
+          "h": 300
+        }
+      },
+      {
+        "item": "viz_lag_ts",
+        "type": "block",
+        "position": {
+          "x": 610,
+          "y": 160,
+          "w": 590,
+          "h": 300
+        }
+      },
+      {
+        "item": "viz_hec_ts",
+        "type": "block",
+        "position": {
+          "x": 0,
+          "y": 470,
+          "w": 1200,
+          "h": 280
+        }
+      },
+      {
+        "item": "viz_runs",
+        "type": "block",
+        "position": {
+          "x": 0,
+          "y": 760,
+          "w": 600,
+          "h": 360
+        }
+      },
+      {
+        "item": "viz_life",
+        "type": "block",
+        "position": {
+          "x": 610,
+          "y": 760,
+          "w": 590,
+          "h": 360
+        }
+      }
+    ],
+    "globalInputs": [
+      "input_time",
+      "input_index"
+    ]
+  },
+  "title": "Stoker \u2014 Fleet Observability",
+  "description": "Every Stoker run at once, over the control plane's dogfood telemetry. Click a run to drill in."
+}
+]]></definition>
+  <meta type="hiddenElements"><![CDATA[
+{
+  "hideEdit": false,
+  "hideOpenInSearch": false
+}
+]]></meta>
+</dashboard>
