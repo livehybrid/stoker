@@ -1494,6 +1494,17 @@ def mark_ready(db, run, slot, lease_id):
     if lease.state in (LEASE_CLAIMED, LEASE_READY):
         lease.state = LEASE_READY
         append_event(db, run, "ready", {"slot": slot}, actor="agent")
+    # Persist this READY and end the read snapshot BEFORE evaluating release.
+    # Each worker's ready POST runs in its own session; under a snapshot-isolating
+    # backend (SQLite, the default store) a session that began before its siblings
+    # committed would not see them as READY, so evaluate_release finds "pending"
+    # workers, the all-ready release never fires, and the run only releases at the
+    # 120 s provision timeout. In that window every worker sits warmed-but-paused
+    # (eventgen started pre-T0 against a paused socket) delivering 0 eps — and the
+    # zero-output watchdog can kill them before T0 ever arrives. Committing here
+    # resets the snapshot so evaluate_release sees every committed READY, and the
+    # last worker to ready releases the fleet at once.
+    db.commit()
     # All non-lost leases ready -> set T0 and release the fleet.
     evaluate_release(db, run)
 
