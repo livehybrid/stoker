@@ -49,6 +49,13 @@ def line(ds_id, title, y_title):
             "dataSources": {"primary": ds_id}, "title": title}
 
 
+def area_stacked(ds_id, title, y_title):
+    return {"type": "splunk.area",
+            "options": {"legendDisplay": "right", "yAxisTitleText": y_title,
+                        "stackMode": "stacked", "nullValueDisplay": "zero"},
+            "dataSources": {"primary": ds_id}, "title": title}
+
+
 def table(ds_id, title, drilldown_url=None):
     viz = {"type": "splunk.table", "options": {"count": 20},
            "dataSources": {"primary": ds_id}, "title": title}
@@ -113,6 +120,11 @@ def fleet():
                         'sum(target_eps) as "Target eps"', "Delivered vs target"),
         "ds_lag_ts": ds(METRICS + '\n| timechart span=30s max(lag_s_max) as "Max pacing lag (s)"',
                         "Pacing lag"),
+        "ds_eps_by_run": ds(METRICS + "\n| timechart span=30s sum(eps) by run_id",
+                            "Delivered eps by run"),
+        "ds_mbps_by_run": ds(METRICS + "\n| eval mbps = bps / 1048576"
+                             "\n| timechart span=30s sum(mbps) by run_id",
+                             "MB/s by run"),
         "ds_hec_ts": ds(METRICS + '\n| timechart span=30s sum(hec_2xx) as "2xx" '
                         'sum(hec_4xx) as "4xx" sum(hec_5xx) as "5xx" '
                         'sum(hec_timeouts) as "timeouts" sum(retries) as "retries"',
@@ -137,13 +149,17 @@ def fleet():
         "viz_errors": single("ds_errors", "errors", "HEC errors (window)"),
         "viz_eps_ts": line("ds_eps_ts", "Delivered eps vs target — fleet total", "events / s"),
         "viz_lag_ts": line("ds_lag_ts", "Worst-worker pacing lag", "seconds behind"),
+        "viz_eps_by_run": area_stacked("ds_eps_by_run",
+                                       "Throughput — eps by run (stacked)", "events / s"),
+        "viz_mbps_by_run": area_stacked("ds_mbps_by_run",
+                                        "Throughput — MB/s by run (stacked)", "MB / s"),
         "viz_hec_ts": line("ds_hec_ts", "HEC outcomes — cumulative", "count"),
         "viz_runs": table("ds_runs", "Runs — click a row to drill in", drilldown_url=drill),
         "viz_life": table("ds_life", "Recent run lifecycle"),
     }
     layout = {
         "type": "absolute",
-        "options": {"width": 1200, "height": 1200, "display": "auto"},
+        "options": {"width": 1200, "height": 1500, "display": "auto"},
         "structure": [
             block("viz_active", 0, 0, 300, 150),
             block("viz_eps", 300, 0, 300, 150),
@@ -151,9 +167,11 @@ def fleet():
             block("viz_errors", 900, 0, 300, 150),
             block("viz_eps_ts", 0, 160, 600, 300),
             block("viz_lag_ts", 610, 160, 590, 300),
-            block("viz_hec_ts", 0, 470, 1200, 280),
-            block("viz_runs", 0, 760, 600, 360),
-            block("viz_life", 610, 760, 590, 360),
+            block("viz_eps_by_run", 0, 470, 600, 300),
+            block("viz_mbps_by_run", 610, 470, 590, 300),
+            block("viz_hec_ts", 0, 780, 1200, 280),
+            block("viz_runs", 0, 1070, 600, 360),
+            block("viz_life", 610, 1070, 590, 360),
         ],
         "globalInputs": ["input_time", "input_index"],
     }
@@ -186,6 +204,9 @@ def detail():
                        "\n| eval mb = round(bytes/1024/1024, 1)", "Bytes"),
         "ds_eps_ts": ds(R + '\n| timechart span=30s avg(eps) as "Delivered eps" '
                         'avg(target_eps) as "Target eps"', "Delivered vs target"),
+        "ds_mbps_ts": ds(R + "\n| eval mbps = bps / 1048576"
+                         '\n| timechart span=30s avg(mbps) as "Delivered MB/s"',
+                         "Delivered MB/s"),
         "ds_lag_ts": ds(R + '\n| timechart span=30s max(lag_s_max) as "Max pacing lag (s)"',
                         "Pacing lag"),
         "ds_hec_ts": ds(R + '\n| timechart span=30s max(hec_2xx) as "2xx" '
@@ -202,13 +223,14 @@ def detail():
         "viz_events": single("ds_events", "events", "Events delivered"),
         "viz_bytes": single("ds_bytes", "mb", "MB delivered", unit="MB"),
         "viz_eps_ts": line("ds_eps_ts", "Delivered eps vs target", "events / s"),
+        "viz_mbps_ts": line("ds_mbps_ts", "Delivered MB/s", "MB / s"),
         "viz_lag_ts": line("ds_lag_ts", "Pacing lag (max across workers)", "seconds behind"),
         "viz_hec_ts": line("ds_hec_ts", "HEC outcomes (cumulative)", "count"),
         "viz_life": table("ds_life", "Lifecycle (state transitions)"),
     }
     layout = {
         "type": "absolute",
-        "options": {"width": 1200, "height": 900, "display": "auto"},
+        "options": {"width": 1200, "height": 1100, "display": "auto"},
         "structure": [
             block("viz_state", 0, 0, 240, 150),
             block("viz_workers", 240, 0, 240, 150),
@@ -216,9 +238,10 @@ def detail():
             block("viz_events", 720, 0, 240, 150),
             block("viz_bytes", 960, 0, 240, 150),
             block("viz_eps_ts", 0, 160, 600, 300),
-            block("viz_lag_ts", 610, 160, 590, 300),
-            block("viz_hec_ts", 0, 470, 600, 300),
-            block("viz_life", 610, 470, 590, 300),
+            block("viz_mbps_ts", 610, 160, 590, 300),
+            block("viz_lag_ts", 0, 470, 600, 300),
+            block("viz_hec_ts", 610, 470, 590, 300),
+            block("viz_life", 0, 780, 1200, 280),
         ],
         "globalInputs": ["input_runid", "input_time", "input_index"],
     }

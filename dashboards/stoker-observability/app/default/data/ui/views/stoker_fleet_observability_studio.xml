@@ -77,6 +77,32 @@
       },
       "title": "Worst-worker pacing lag"
     },
+    "viz_eps_by_run": {
+      "type": "splunk.area",
+      "options": {
+        "legendDisplay": "right",
+        "yAxisTitleText": "events / s",
+        "stackMode": "stacked",
+        "nullValueDisplay": "zero"
+      },
+      "dataSources": {
+        "primary": "ds_eps_by_run"
+      },
+      "title": "Throughput \u2014 eps by run (stacked)"
+    },
+    "viz_mbps_by_run": {
+      "type": "splunk.area",
+      "options": {
+        "legendDisplay": "right",
+        "yAxisTitleText": "MB / s",
+        "stackMode": "stacked",
+        "nullValueDisplay": "zero"
+      },
+      "dataSources": {
+        "primary": "ds_mbps_by_run"
+      },
+      "title": "Throughput \u2014 MB/s by run (stacked)"
+    },
     "viz_hec_ts": {
       "type": "splunk.line",
       "options": {
@@ -187,6 +213,28 @@
       },
       "name": "Pacing lag"
     },
+    "ds_eps_by_run": {
+      "type": "ds.search",
+      "options": {
+        "query": "index=$index_tok$ sourcetype=stoker:metrics\n| timechart span=30s sum(eps) by run_id",
+        "queryParameters": {
+          "earliest": "$global_time.earliest$",
+          "latest": "$global_time.latest$"
+        }
+      },
+      "name": "Delivered eps by run"
+    },
+    "ds_mbps_by_run": {
+      "type": "ds.search",
+      "options": {
+        "query": "index=$index_tok$ sourcetype=stoker:metrics\n| eval mbps = bps / 1048576\n| timechart span=30s sum(mbps) by run_id",
+        "queryParameters": {
+          "earliest": "$global_time.earliest$",
+          "latest": "$global_time.latest$"
+        }
+      },
+      "name": "MB/s by run"
+    },
     "ds_hec_ts": {
       "type": "ds.search",
       "options": {
@@ -255,7 +303,7 @@
     "type": "absolute",
     "options": {
       "width": 1200,
-      "height": 1200,
+      "height": 1500,
       "display": "auto"
     },
     "structure": [
@@ -320,11 +368,31 @@
         }
       },
       {
-        "item": "viz_hec_ts",
+        "item": "viz_eps_by_run",
         "type": "block",
         "position": {
           "x": 0,
           "y": 470,
+          "w": 600,
+          "h": 300
+        }
+      },
+      {
+        "item": "viz_mbps_by_run",
+        "type": "block",
+        "position": {
+          "x": 610,
+          "y": 470,
+          "w": 590,
+          "h": 300
+        }
+      },
+      {
+        "item": "viz_hec_ts",
+        "type": "block",
+        "position": {
+          "x": 0,
+          "y": 780,
           "w": 1200,
           "h": 280
         }
@@ -334,7 +402,7 @@
         "type": "block",
         "position": {
           "x": 0,
-          "y": 760,
+          "y": 1070,
           "w": 600,
           "h": 360
         }
@@ -344,7 +412,7 @@
         "type": "block",
         "position": {
           "x": 610,
-          "y": 760,
+          "y": 1070,
           "w": 590,
           "h": 360
         }

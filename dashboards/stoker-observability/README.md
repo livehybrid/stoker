@@ -5,10 +5,15 @@ control plane ships its own metrics to a Splunk HEC target, and this app turns
 that stream into two dashboards:
 
 - **Fleet Observability** — every run at once: active runs, fleet delivered eps
-  (with target overlay), worst-worker pacing lag, HEC outcomes, a runs table
-  (click a row to drill in) and a recent-lifecycle feed.
-- **Run Detail** — one run by id: delivered eps vs target, pacing lag, HEC
-  outcomes (2xx/4xx/5xx/timeouts/retries) and the run's lifecycle transitions.
+  (with target overlay), worst-worker pacing lag, **stacked throughput by run in
+  both eps and MB/s** (each run's contribution to the fleet total), HEC
+  outcomes, a runs table (click a row to drill in) and a recent-lifecycle feed.
+- **Run Detail** — one run by id: delivered eps vs target, **delivered MB/s**,
+  pacing lag, HEC outcomes (2xx/4xx/5xx/timeouts/retries) and the run's
+  lifecycle transitions.
+
+Throughput is derived from the telemetry's `eps` and `bps` (MB/s = `bps` ÷
+1048576); the stacked areas make each run's share of the fleet total visible.
 
 Each dashboard ships in **two builds**: a **Dashboard Studio** version (the
 default in the app nav) and a **Simple XML** ("Classic") version with identical

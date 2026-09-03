@@ -79,6 +79,18 @@
       },
       "title": "Delivered eps vs target"
     },
+    "viz_mbps_ts": {
+      "type": "splunk.line",
+      "options": {
+        "legendDisplay": "bottom",
+        "yAxisTitleText": "MB / s",
+        "nullValueDisplay": "connect"
+      },
+      "dataSources": {
+        "primary": "ds_mbps_ts"
+      },
+      "title": "Delivered MB/s"
+    },
     "viz_lag_ts": {
       "type": "splunk.line",
       "options": {
@@ -181,6 +193,17 @@
       },
       "name": "Delivered vs target"
     },
+    "ds_mbps_ts": {
+      "type": "ds.search",
+      "options": {
+        "query": "index=$index_tok$ sourcetype=stoker:metrics run_id=$run_id_tok$\n| eval mbps = bps / 1048576\n| timechart span=30s avg(mbps) as \"Delivered MB/s\"",
+        "queryParameters": {
+          "earliest": "$global_time.earliest$",
+          "latest": "$global_time.latest$"
+        }
+      },
+      "name": "Delivered MB/s"
+    },
     "ds_lag_ts": {
       "type": "ds.search",
       "options": {
@@ -257,7 +280,7 @@
     "type": "absolute",
     "options": {
       "width": 1200,
-      "height": 900,
+      "height": 1100,
       "display": "auto"
     },
     "structure": [
@@ -322,7 +345,7 @@
         }
       },
       {
-        "item": "viz_lag_ts",
+        "item": "viz_mbps_ts",
         "type": "block",
         "position": {
           "x": 610,
@@ -332,7 +355,7 @@
         }
       },
       {
-        "item": "viz_hec_ts",
+        "item": "viz_lag_ts",
         "type": "block",
         "position": {
           "x": 0,
@@ -342,13 +365,23 @@
         }
       },
       {
-        "item": "viz_life",
+        "item": "viz_hec_ts",
         "type": "block",
         "position": {
           "x": 610,
           "y": 470,
           "w": 590,
           "h": 300
+        }
+      },
+      {
+        "item": "viz_life",
+        "type": "block",
+        "position": {
+          "x": 0,
+          "y": 780,
+          "w": 1200,
+          "h": 280
         }
       }
     ],
