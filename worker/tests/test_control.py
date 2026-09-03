@@ -302,3 +302,47 @@ class TestStandaloneControl:
         control = StandaloneControl(clock=FakeClock(), out=out)
         assert control.final(0, {"events_total": 10}, []) is True
         assert "[stoker] final" in out.getvalue()
+
+
+# --------------------------------------------------------------------------- #
+# Heartbeat resilience to a stale keep-alive connection (RemoteDisconnected):
+# one retry on a ConnectionError gets a fresh connection so a transport hiccup
+# is not a missed ack. Uses an injected mock session (no live server).
+# --------------------------------------------------------------------------- #
+
+from unittest import mock as _mock  # noqa: E402
+
+import requests as _requests  # noqa: E402
+
+from stoker_agent.control import ControlClient as _ControlClient  # noqa: E402
+
+
+def _ok_response(doc):
+    import json as _json
+    r = _mock.Mock()
+    r.status_code = 200
+    r.content = _json.dumps(doc).encode()
+    r.json.return_value = doc
+    return r
+
+
+def test_heartbeat_retries_once_on_connection_error():
+    session = _mock.Mock()
+    session.post.side_effect = [
+        _requests.exceptions.ConnectionError("Connection aborted / RemoteDisconnected"),
+        _ok_response({"command": "continue"}),
+    ]
+    client = _ControlClient("http://ctl", 1, "jwt", session=session,
+                            clock=lambda: 0.0)
+    resp = client.heartbeat({"slot": 0, "lease_id": "le"})
+    assert resp == {"command": "continue"}
+    assert session.post.call_count == 2  # retried on the fresh connection
+
+
+def test_heartbeat_missed_after_two_connection_errors():
+    session = _mock.Mock()
+    session.post.side_effect = _requests.exceptions.ConnectionError("down")
+    client = _ControlClient("http://ctl", 1, "jwt", session=session,
+                            clock=lambda: 0.0)
+    assert client.heartbeat({"slot": 0, "lease_id": "le"}) is None
+    assert session.post.call_count == 2  # one retry, then give up (missed)

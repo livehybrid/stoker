@@ -141,6 +141,18 @@ class ControlClient(object):
         body.setdefault("protocol_version", PROTOCOL_VERSION)
         try:
             doc = self._post(body=body, path="heartbeat")
+        except requests.exceptions.ConnectionError:
+            # A keep-alive connection the server closed while idle between
+            # heartbeats (uvicorn's default 5 s keep-alive vs the ~5 s heartbeat
+            # cadence, or a proxy) reuses to a RemoteDisconnected. One retry gets
+            # a fresh connection; a heartbeat is an idempotent status report, so
+            # re-sending is safe. Belt-and-braces to the server's raised
+            # keep-alive timeout.
+            try:
+                doc = self._post(body=body, path="heartbeat")
+            except (requests.exceptions.RequestException, ControlError) as exc:
+                log.warning("heartbeat missed: %s", exc)
+                return None
         except (requests.exceptions.RequestException, ControlError) as exc:
             log.warning("heartbeat missed: %s", exc)
             return None

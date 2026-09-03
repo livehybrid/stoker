@@ -69,4 +69,9 @@ EXPOSE 8080
 USER stoker
 
 # uvicorn entry: server/app.py exposes `app = create_app()`.
-CMD ["sh", "-c", "uvicorn server.app:app --host 0.0.0.0 --port ${PORT:-8080}"]
+# --timeout-keep-alive 75: workers heartbeat every ~5 s over a keep-alive
+# connection; uvicorn's DEFAULT 5 s keep-alive timeout closes the idle socket
+# right between heartbeats, and the reused socket then fails with
+# RemoteDisconnected ("heartbeat missed"). Holding idle connections well past
+# the heartbeat interval removes that collision. Override via UVICORN_KEEP_ALIVE.
+CMD ["sh", "-c", "uvicorn server.app:app --host 0.0.0.0 --port ${PORT:-8080} --timeout-keep-alive ${UVICORN_KEEP_ALIVE:-75}"]
