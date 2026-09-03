@@ -134,6 +134,14 @@ curl -sX POST https://stoker.mydomain.com/api/specs/42/run \
 
 A token carries its own role (a CI token can be `operator` without holding admin), can be revoked (`DELETE /api/tokens/{id}`) or expired, and is attributed in the audit trail (`started_by = token:github-ci`). Interactive docs: **Swagger UI at `/docs`**, ReDoc at `/redoc`, spec at `/openapi.json` (the `bearerAuth` scheme drives the Authorize box and client codegen).
 
+To capture an existing spec as reproducible automation, `GET /api/specs/{id}/export` returns the `POST /api/specs` body, the pack/target it references (by id **and** name, for remapping across environments), and a ready-to-run curl — so a spec built once in the UI can be checked into a pipeline. Targets and specs are created the same way (`POST /api/targets`, `POST /api/specs`); the export never includes the target's HEC token, so inject that from a CI secret when recreating the target.
+
+```bash
+# Export a spec built in the UI, then recreate it elsewhere
+curl -s https://stoker.mydomain.com/api/specs/42/export \
+  -H "Authorization: Bearer $STOKER_CI_TOKEN" | jq -r .curl
+```
+
 ## Configuration
 
 Everything is set through environment variables, parsed once at boot into a

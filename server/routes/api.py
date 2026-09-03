@@ -16,6 +16,7 @@ from __future__ import annotations
 import configparser
 import hashlib
 import hmac
+import json
 import logging
 import os
 import secrets
@@ -814,6 +815,63 @@ def get_spec(spec_id: int, db: Session = Depends(get_db)):
     if spec is None:
         raise HTTPException(status_code=404, detail="unknown spec")
     return spec
+
+
+@router.get("/specs/{spec_id}/export")
+def export_spec(spec_id: int, db: Session = Depends(get_db)):
+    # type: (...) -> Any
+    """Export a spec as a reproducible ``POST /api/specs`` request, for CI/CD.
+
+    Returns three things: ``spec`` (exactly a ``SpecCreate`` body that recreates
+    this spec, minimal — None fields dropped so the endpoint's own defaults
+    apply), ``references`` (the pack and target by id **and** name, so the body
+    can be remapped when replaying into another Stoker where ids differ), and
+    ``curl`` (a ready-to-run command using ``$STOKER_URL`` / ``$STOKER_TOKEN``).
+    No secrets: the target's HEC token stays server-side, so recreate the target
+    separately (``POST /api/targets``) and map its id.
+    """
+    spec = db.get(Spec, spec_id)
+    if spec is None:
+        raise HTTPException(status_code=404, detail="unknown spec")
+
+    body = {
+        "name": spec.name,
+        "pack_id": spec.pack_id,
+        "target_id": spec.target_id,
+        "ref": spec.ref,
+        "engine": spec.engine,
+        "rate_mode": spec.rate_mode,
+        "rate_value": spec.rate_value,
+        "interval_s": spec.interval_s,
+        "workers": spec.workers,
+        "duration_s": spec.duration_s,
+        "fleet": spec.fleet,
+        "strict_release": spec.strict_release,
+        "extra_pack_ids": spec.extra_pack_ids_json or None,
+        "overrides": spec.overrides_json or None,
+        "driver_opts": spec.driver_opts_json or None,
+    }
+    body = {k: v for k, v in body.items() if v is not None}
+
+    pack = db.get(Pack, spec.pack_id)
+    target = db.get(Target, spec.target_id)
+    references = {
+        "pack": {"id": spec.pack_id, "name": pack.name if pack else None},
+        "target": {"id": spec.target_id, "name": target.name if target else None},
+    }
+    if spec.extra_pack_ids_json:
+        references["extra_packs"] = [
+            {"id": pid, "name": (p.name if (p := db.get(Pack, pid)) else None)}
+            for pid in spec.extra_pack_ids_json]
+
+    payload = json.dumps(body, separators=(",", ":"))
+    curl = (
+        'curl -sS -X POST "$STOKER_URL/api/specs" '
+        '-H "Authorization: Bearer $STOKER_TOKEN" '
+        '-H "Content-Type: application/json" '
+        "-d '%s'" % payload.replace("'", "'\\''")
+    )
+    return {"spec": body, "references": references, "curl": curl}
 
 
 @router.get("/specs/{spec_id}/estimate", response_model=SpecEstimate)
