@@ -97,6 +97,8 @@ Defaults in brackets; each is validated with the stated minimum:
 | `STOKER_DEADMAN_S` | `600.0` | managed dead-man window (min 1). Drivers do not project it by default, so the 600 s default applies unless an operator sets it |
 | `STOKER_DRAIN_BUDGET_S` | `40.0` | whole-drain deadline (min 1); kept under the 45 s SIGTERM budget |
 | `STOKER_HEC_VERIFY_TLS` | `1` | verify HEC TLS certificates; `0` disables (self-signed labs) |
+| `STOKER_ZERO_OUTPUT_S` | `45.0` | zero-output watchdog (eventgen only): a released worker that reads nothing from the engine socket for this long restarts the engine in place (a non-deterministic multiprocessing fork hang can leave `splunk_eventgen generate` alive but silent at 0 eps). `0` disables |
+| `STOKER_ZERO_OUTPUT_MAX_RESTARTS` | `3` | how many in-place engine restarts the watchdog attempts before failing the slot (`exit 5`) |
 | `STOKER_LOG_LEVEL` | `INFO` | root log level (stderr) |
 | `STOKER_ENGINE_CMD` | none | eventgen launcher override; `{conf}` placeholder or the conf is appended |
 | `EVENTGEN_LOG_DIR` | `<workdir>/eventgen-logs` | eventgen's rotating log dir (created if absent); the agent sets it when unset |

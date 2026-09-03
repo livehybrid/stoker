@@ -27,6 +27,14 @@ DEFAULT_OVERDRIVE = 1.15
 DEFAULT_CATCHUP_S = 5.0
 DEFAULT_METRICS_PORT = 9100
 DEFAULT_DEADMAN_S = 600.0
+# Zero-output watchdog (eventgen only): if a RELEASED worker reads nothing from
+# the engine socket for this long, the engine is silently wedged (a
+# non-deterministic multiprocessing hang at fork can leave `splunk_eventgen
+# generate` alive but producing nothing, giving 0 eps with no error). Restart
+# the engine in place up to ``..._MAX_RESTARTS`` times to clear the race; a
+# fresh fork usually recovers. 0 disables the watchdog.
+DEFAULT_ZERO_OUTPUT_S = 45.0
+DEFAULT_ZERO_OUTPUT_MAX_RESTARTS = 3
 # Whole-drain budget; the contract requires SIGTERM to exit within 45 s, so the
 # default leaves margin. Every drain stage is clamped against this.
 DEFAULT_DRAIN_BUDGET_S = 40.0
@@ -71,6 +79,8 @@ class Config:
     deadman_s: float
     drain_budget_s: float
     hec_verify_tls: bool
+    zero_output_s: float = DEFAULT_ZERO_OUTPUT_S
+    zero_output_max_restarts: int = DEFAULT_ZERO_OUTPUT_MAX_RESTARTS
 
 
 def _get(env, key):
@@ -153,6 +163,13 @@ def load_config(env=None):
                                minimum=1.0)
     hec_verify_tls = _as_bool("STOKER_HEC_VERIFY_TLS",
                               _get(env, "STOKER_HEC_VERIFY_TLS") or "1")
+    zero_output_s = _as_float("STOKER_ZERO_OUTPUT_S",
+                              _get(env, "STOKER_ZERO_OUTPUT_S")
+                              or str(DEFAULT_ZERO_OUTPUT_S), minimum=0.0)
+    zero_output_max_restarts = _as_int(
+        "STOKER_ZERO_OUTPUT_MAX_RESTARTS",
+        _get(env, "STOKER_ZERO_OUTPUT_MAX_RESTARTS")
+        or str(DEFAULT_ZERO_OUTPUT_MAX_RESTARTS), minimum=0)
 
     hec_token = _require(env, "STOKER_HEC_TOKEN")
 
@@ -218,6 +235,8 @@ def load_config(env=None):
             deadman_s=deadman_s,
             drain_budget_s=drain_budget_s,
             hec_verify_tls=hec_verify_tls,
+            zero_output_s=zero_output_s,
+            zero_output_max_restarts=zero_output_max_restarts,
         )
 
     # Managed mode.
@@ -256,4 +275,6 @@ def load_config(env=None):
         deadman_s=deadman_s,
         drain_budget_s=drain_budget_s,
         hec_verify_tls=hec_verify_tls,
+        zero_output_s=zero_output_s,
+        zero_output_max_restarts=zero_output_max_restarts,
     )

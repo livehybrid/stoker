@@ -35,6 +35,7 @@ EXIT_OK = 0
 EXIT_CONFIG = 2
 EXIT_AUTH_STANDALONE = 3
 EXIT_DEADMAN = 4
+EXIT_NO_OUTPUT = 5  # the engine produced nothing post-T0 and would not recover
 
 RETARGET_IN_PLACE_BAND = 0.15
 DEFAULT_BYTES_PER_EVENT = 256.0
@@ -491,6 +492,16 @@ class Agent(object):
         # type: (Any, SpecSlice, Optional[float], CpuTracker, Metrics, str, Any) -> None
         interval = sl.telemetry_interval_s
         next_hb = time.monotonic() + interval
+        # Zero-output watchdog (eventgen only): a fresh fork can leave the engine
+        # alive but producing nothing (a non-deterministic multiprocessing hang),
+        # giving 0 eps with no error. Track socket progress and restart the engine
+        # in place if it stalls; the process-group stop() clears the hung tree.
+        zero_out_s = self._cfg.zero_output_s if self._cfg else 0.0
+        watchdog_on = (zero_out_s > 0 and sl.engine == "eventgen"
+                       and self._sock is not None and self._engine is not None)
+        last_received = self._sock.received if self._sock else 0
+        last_progress = time.monotonic()
+        engine_restarts = 0
         while not self._drain_event.is_set():
             now_wall = self._clock()
             if deadline is not None and now_wall >= deadline:
@@ -501,6 +512,33 @@ class Agent(object):
                             self._engine.returncode)
                 self.request_drain("engine-exit")
                 break
+            if watchdog_on and self._engine.is_alive():
+                received = self._sock.received
+                if received > last_received:
+                    last_received = received
+                    last_progress = time.monotonic()
+                elif time.monotonic() - last_progress >= zero_out_s:
+                    if engine_restarts < self._cfg.zero_output_max_restarts:
+                        engine_restarts += 1
+                        log.warning("no engine output for %.0fs (0 eps); "
+                                    "restarting engine (attempt %d/%d)",
+                                    zero_out_s, engine_restarts,
+                                    self._cfg.zero_output_max_restarts)
+                        try:
+                            self._engine.restart()
+                        except EngineError as exc:
+                            log.error("engine restart failed: %s; draining", exc)
+                            self._exit_code = EXIT_NO_OUTPUT
+                            self.request_drain("no-engine-output")
+                            break
+                        last_progress = time.monotonic()
+                        last_received = self._sock.received
+                    else:
+                        log.error("engine produced nothing after %d restarts; "
+                                  "draining as failed", engine_restarts)
+                        self._exit_code = EXIT_NO_OUTPUT
+                        self.request_drain("no-engine-output")
+                        break
             snap = self._hec.snapshot()
             if snap.get("auth_failed"):
                 if self._cfg.standalone:
