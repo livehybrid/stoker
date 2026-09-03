@@ -62,6 +62,53 @@ export function liveMetrics(metrics: MetricsOut | undefined): LiveMetrics {
   return { eps, workers: newestBySlot.size, hasData: true };
 }
 
+/** One time bucket of fleet-wide throughput: summed eps and MB/s across runs. */
+export interface FleetPoint {
+  t: number; // bucket start, epoch ms
+  eps: number;
+  mbps: number;
+}
+
+/**
+ * Aggregate every active run's metric samples into one fleet throughput series.
+ *
+ * Samples are one row per slot per tick. We bucket by time (default 30 s), keep
+ * the latest eps/bps per (run, slot) within a bucket, then sum across all slots
+ * of all runs — so each point is the whole fleet's delivered eps and MB/s at
+ * that moment (bps / 1048576). Runs with no data contribute nothing.
+ */
+export function fleetThroughputSeries(
+  list: (MetricsOut | undefined)[],
+  bucketMs = 30_000,
+): FleetPoint[] {
+  const buckets = new Map<number, Map<string, { eps: number; bps: number }>>();
+  list.forEach((m, runIdx) => {
+    if (!m) return;
+    for (const s of m.samples) {
+      const ms = new Date(s.ts).getTime();
+      if (!Number.isFinite(ms)) continue;
+      const t = Math.floor(ms / bucketMs) * bucketMs;
+      let b = buckets.get(t);
+      if (!b) {
+        b = new Map();
+        buckets.set(t, b);
+      }
+      b.set(`${runIdx}:${s.slot}`, { eps: s.eps ?? 0, bps: s.bps ?? 0 });
+    }
+  });
+  const points: FleetPoint[] = [];
+  for (const [t, b] of [...buckets.entries()].sort((a, c) => a[0] - c[0])) {
+    let eps = 0;
+    let bps = 0;
+    for (const v of b.values()) {
+      eps += v.eps;
+      bps += v.bps;
+    }
+    points.push({ t, eps, mbps: bps / 1_048_576 });
+  }
+  return points;
+}
+
 /** Format an EPS number compactly (e.g. 1 040, 12.3k). */
 export function formatEps(eps: number): string {
   if (!Number.isFinite(eps)) return "0";

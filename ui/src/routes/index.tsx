@@ -12,10 +12,12 @@ import { EmptyState, ErrorState, LoadingState } from "../components/States";
 import { ActiveRunCard } from "../features/dashboard/ActiveRunCard";
 import {
   activeRuns,
+  fleetThroughputSeries,
   formatEps,
   liveMetrics,
   recentFailures,
 } from "../features/dashboard/metrics";
+import { FleetThroughputChart } from "../features/dashboard/FleetThroughputChart";
 
 // Dashboard: fleet health and live runs at a glance. Active-run cards (live EPS,
 // target, workers), an aggregate strip, a target-health strip and the most
@@ -59,7 +61,9 @@ function Dashboard() {
   const metricsResults = useQueries({
     queries: active.map((run) => ({
       queryKey: ["run", run.id, "metrics", "dashboard"],
-      queryFn: () => api.runs.metrics(run.id, "5s", "60s"),
+      // A 15 m window at 30 s resolution feeds both the live-EPS tiles (newest
+      // sample per slot) and the fleet throughput chart (the whole series).
+      queryFn: () => api.runs.metrics(run.id, "30s", "15m"),
       refetchInterval: POLL_MS,
     })),
   });
@@ -79,6 +83,12 @@ function Dashboard() {
   });
 
   const totalEps = perRun.reduce((sum, r) => sum + r.eps, 0);
+  const throughput = fleetThroughputSeries(
+    metricsResults.map((r) => r.data as MetricsOut | undefined),
+  );
+  const totalMbps = throughput.length
+    ? throughput[throughput.length - 1].mbps
+    : 0;
 
   const failureColumns: Column<RunOut>[] = [
     { key: "id", header: "Run", cell: (r) => `#${r.id}` },
@@ -110,7 +120,7 @@ function Dashboard() {
       />
 
       {/* Aggregate strip */}
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
         <StatTile
           label="Active runs"
           value={runsQ.isPending ? "…" : String(active.length)}
@@ -120,10 +130,19 @@ function Dashboard() {
           value={runsQ.isPending ? "…" : formatEps(totalEps)}
         />
         <StatTile
+          label="Total MB / s"
+          value={runsQ.isPending ? "…" : totalMbps.toFixed(totalMbps >= 10 ? 0 : 1)}
+        />
+        <StatTile
           label="Targets"
           value={targetsQ.isPending ? "…" : String((targetsQ.data ?? []).length)}
         />
       </div>
+
+      {/* Fleet throughput over time (delivered eps + MB/s across all runs) */}
+      <Card title="Fleet throughput">
+        <FleetThroughputChart points={throughput} />
+      </Card>
 
       {/* Active runs */}
       <Card
