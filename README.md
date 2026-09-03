@@ -55,6 +55,8 @@ The control plane never generates load itself. It owns state in Postgres (the so
 - **Metric builder.** Author a matrix of Splunk metrics (dimensions × metrics) with day-shaped values (sine, business double-hump, ramp, random-walk, …) in the UI, with a live daily-curve preview; `gauge` / `count` / `counter` kinds and per-cell scaling. Runs on the `metrics` engine, sharding the series matrix across workers. See [docs/PACKS.md](docs/PACKS.md#metric-packs-metricgen).
 - **Exact-rate pacing.** A token bucket paces delivery against the wall clock to within ~+/-1% of the target aggregate rate, sharded across N workers by largest-remainder. Modes: EPS, GB/day, or count/interval. A submit-time guard rejects a per-worker slice above the engine's **configurable ceiling** (default 25 GB/day and 5000 EPS per worker) and suggests the fleet size that would fit; raise or disable it globally (`STOKER_MAX_GB_DAY_PER_WORKER` / `STOKER_MAX_EPS_PER_WORKER`, `0` = no limit, per-engine `_EVENTGEN`-style suffixes) or per fleet (`config_json.max_gb_day_per_worker` / `max_eps_per_worker` — a fleet of beefy nodes on the target's LAN can go much harder). The wizard's live estimate uses the same resolved values the guard enforces.
 - **Backfill.** Any run can prepend the last N hours or days of history: events are stamped at their historical time and delivered fast (up to a 5000-eps ceiling) before the run finishes. Metrics sweep the diurnal shape across the window; eventgen fills it at uniform density; the delivery rate honours the spec's own eps, clamped to the ceiling. Opt in per run in the wizard (with a live event/time/size estimate) or via `backfill_window_s` on the launch API.
+- **Target-health backpressure.** Opt-in (`STOKER_BACKPRESSURE_DRAIN`): when a HEC target stops accepting data — a sustained share of the fleet's recent delivery attempts failing with 5xx/timeouts — the supervisor drains the run cleanly rather than keep hammering it, flags the target red and records the decision. A single bad tick only starts the clock; a healthy one clears it, so a blip never drains. Thresholds are tunable (`STOKER_BACKPRESSURE_MIN_FAILED_FRACTION`, `STOKER_BACKPRESSURE_SUSTAINED_S`); disabled by default.
+- **Dedicated node placement (Kubernetes).** `K8S_NODE_SELECTOR` (e.g. `workload=stoker`) seeds the `k8s-local` fleet with a default nodeSelector so worker Jobs land on node groups you set aside for load generation; a spec's `driver_opts.node_selector` overrides per run. See [Configuration](#configuration).
 - **Two execution drivers, plus in-process.** SwarmDriver (Docker Swarm via the Portainer API, never mounting docker.sock) and K8sDriver (Kubernetes elastic Indexed `batch/v1` Jobs, k3s or EKS — via a kubeconfig, or the pod service account when the control plane itself runs in-cluster, auto-detected). For small workloads, an opt-in **in-process fleet** (`STOKER_INPROCESS_FLEET=1`) runs real workers as subprocesses of the control-plane container — no execution backend at all — capped in worker count and with custom-code packs refused. A FakeDriver backs the tests. Fleets `fake-local`, `swarm-local` and `k8s-local` (and `inprocess-local` when enabled) are seeded at first boot and listed by `GET /api/fleets`. EKS Terraform under `infra/aws/stoker-eks/`. The SwarmDriver pins each run's worker image to a registry digest, so a fleet always runs the intended build (a floating `:latest` that a node has cached is never silently reused).
 - **App-level auth.** Local password users (bcrypt) with a signed HttpOnly session cookie, roles `viewer < operator < admin`, a default admin seeded from env or a first-visit setup screen, user management, and trusted-proxy-header SSO (a header honoured only from a trusted peer). Vendor-neutral: no dependency on any specific IdP. `/api/agent` (per-run JWT) and `/api/hooks` (webhook HMAC) are exempt.
 - **API access for CI/CD + Swagger.** Admin-issued API tokens (`stk_...`, role-scoped, stored only as a SHA-256 hash, revocable, optional expiry) authenticate non-interactive callers via `Authorization: Bearer`, alongside the browser session. The whole REST API is documented as OpenAPI with **Swagger UI at `/docs`** (an Authorize box takes a token), so the spec drives client codegen.
@@ -132,6 +134,71 @@ curl -sX POST https://stoker.mydomain.com/api/specs/42/run \
 
 A token carries its own role (a CI token can be `operator` without holding admin), can be revoked (`DELETE /api/tokens/{id}`) or expired, and is attributed in the audit trail (`started_by = token:github-ci`). Interactive docs: **Swagger UI at `/docs`**, ReDoc at `/redoc`, spec at `/openapi.json` (the `bearerAuth` scheme drives the Authorize box and client codegen).
 
+## Configuration
+
+Everything is set through environment variables, parsed once at boot into a
+frozen `Settings`. The full list is in
+[server/CONTROL-PLANE.md](server/CONTROL-PLANE.md#config-env); the table below is
+the subset that matters for a fleet deployment. Secrets (`*_TOKEN`,
+`*_PASSWORD`, `STOKER_MASTER_KEY`) are never logged.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DATABASE_URL` | `sqlite:///./stoker.db` | Postgres in prod: `postgresql+psycopg://…`. |
+| `STOKER_MASTER_KEY` / `…_FILE` | dev key (loud warning) | Fernet key encrypting target tokens at rest. **Set a stable one** or every stored token becomes undecryptable on restart. |
+| `PUBLIC_BASE_URL` | `http://localhost:<PORT>` | What workers use to reach the control plane. In-cluster: the Service URL, **not** the external ALB. |
+| `WORKER_IMAGE` | `ghcr.io/livehybrid/stoker-worker:latest` | Worker image the drivers launch; pin `@sha256:…` in prod. |
+| **`K8S_NAMESPACE`** | `stoker` | Namespace the seeded `k8s-local` fleet runs worker Jobs in. Point it at the namespace the control plane actually runs in. |
+| **`K8S_NODE_SELECTOR`** | unset | Fleet-wide default nodeSelector for worker Jobs, `key=value[,key=value…]` (e.g. `workload=stoker`). Lands workers on dedicated node groups. |
+| **`STOKER_MAX_EPS_PER_WORKER`** | `5000` | Submit-time per-worker events/second ceiling (every engine). `0`/negative disables it. |
+| **`STOKER_MAX_GB_DAY_PER_WORKER`** | `25` | Submit-time per-worker GB/day ceiling (every engine). `0`/negative disables it. |
+| `STOKER_MAX_EPS_PER_WORKER_<ENGINE>` | — | Same, narrowed to one engine (e.g. `…_EVENTGEN`). |
+| `STOKER_MAX_GB_DAY_PER_WORKER_<ENGINE>` | — | Same, narrowed to one engine. |
+| `STOKER_BACKPRESSURE_DRAIN` | off | Opt-in: drain a run whose HEC target is failing to accept data (sustained 5xx/timeouts). |
+| `STOKER_BACKPRESSURE_MIN_FAILED_FRACTION` | `0.5` | Share of recent fleet delivery attempts that must fail to count as struggling. |
+| `STOKER_BACKPRESSURE_SUSTAINED_S` | `60` | How long that must hold before draining. |
+| `DOGFOOD_HEC_URL` / `DOGFOOD_HEC_TOKEN` | unset | Enable self-telemetry (`stoker:job` / `stoker:metrics`) to a HEC target — feeds the [observability dashboards](dashboards/stoker-observability/README.md). |
+| `STOKER_ADMIN_USER` / `STOKER_ADMIN_PASSWORD` | first-visit setup | Bootstrap admin; unset shows a first-visit setup screen instead. |
+| `PORTAINER_HOST` / `PORTAINER_TOKEN` / `PORTAINER_ENDPOINT` | — / — / `6` | Swarm fleet only (Portainer API). |
+
+Both per-worker ceilings **and** the worker node placement resolve through the
+same precedence: a per-run/per-fleet value wins, then env, then the built-in
+default.
+
+**Per-worker ceiling resolution** (EPS and GB/day, independently; whichever
+binds first wins, so raising only EPS does not lift a run whose GB/day still
+trips):
+
+```mermaid
+flowchart LR
+    A["per-worker ceiling"] --> B{"fleet config_json<br/>max_eps_per_worker /<br/>max_gb_day_per_worker?"}
+    B -- set --> U1["use fleet value"]
+    B -- unset --> C{"STOKER_MAX_..._PER_WORKER_&lt;ENGINE&gt;?"}
+    C -- set --> U2["use per-engine env"]
+    C -- unset --> D{"STOKER_MAX_..._PER_WORKER?"}
+    D -- set --> U3["use global env"]
+    D -- unset --> E["built-in default<br/>5000 EPS / 25 GB/day"]
+    U1 --> N["0 or negative<br/>at any layer = disabled"]
+    U2 --> N
+    U3 --> N
+```
+
+**Worker node placement** (Kubernetes fleets):
+
+```mermaid
+flowchart LR
+    A["worker Job nodeSelector"] --> B{"spec driver_opts<br/>node_selector?"}
+    B -- set --> U1["use the spec selector<br/>(this run only)"]
+    B -- unset --> C{"fleet config_json<br/>node_selector?<br/>(seeded from K8S_NODE_SELECTOR)"}
+    C -- set --> U2["use the fleet default"]
+    C -- unset --> D["no nodeSelector<br/>scheduler places anywhere"]
+```
+
+> On Kubernetes, `K8S_NODE_SELECTOR` seeds the `k8s-local` fleet's default
+> nodeSelector **at first boot only**. To change it on an existing database,
+> delete the `k8s-local` fleet row and restart so it re-seeds; on an
+> ephemeral/rebuilt estate a fresh boot picks it up automatically.
+
 ## Live deployment
 
 - UI + operator API: **https://stoker.mydomain.com** (protected by app-level auth)
@@ -203,8 +270,9 @@ tools/     hec_sink test collector + smoke scripts
 The full docs are published at **[livehybrid.github.io/stoker](https://livehybrid.github.io/stoker/)** (rendered from `docs/`).
 
 - [docs/WORKER-CONTRACT.md](docs/WORKER-CONTRACT.md) — the worker image's environment contract, socket protocol, pacing, backfill and drain behaviour.
-- [server/CONTROL-PLANE.md](server/CONTROL-PLANE.md) — the control-plane data model, agent + operator API (incl. API tokens + OpenAPI), auth and run lifecycle.
-- [docs/PACKS.md](docs/PACKS.md) — the authoritative pack-format reference (eventgen, Piston and metric packs, `dataset_url` safety, git sync).
+- [server/CONTROL-PLANE.md](server/CONTROL-PLANE.md) — the control-plane data model, agent + operator API (incl. API tokens + OpenAPI), auth, run lifecycle and the **full environment-variable reference**.
+- [docs/PACKS.md](docs/PACKS.md) — the authoritative pack-format reference (eventgen, Piston and metric packs, `dataset_url` safety, git sync, materialising `security_content` attack_data).
+- [dashboards/stoker-observability/README.md](dashboards/stoker-observability/README.md) — the shippable Splunk app (Dashboard Studio + Simple XML) over the dogfood telemetry: fleet overview + per-run drill-down.
 - [harness/README.md](harness/README.md) — the integration harness: minting an operator token, the env vars, and running the live end-to-end checks.
 - [packs/attack-replay/README.md](packs/attack-replay/README.md) — the pack format worked through a real raw-replay pack.
 - [infra/k8s/README.md](infra/k8s/README.md), [infra/aws/stoker-eks/README.md](infra/aws/stoker-eks/README.md) — Kubernetes and EKS deployment.
