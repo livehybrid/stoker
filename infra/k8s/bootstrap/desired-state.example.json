@@ -1,0 +1,50 @@
+{
+  "_comment": "Declarative Stoker bootstrap. bootstrap.py reconciles this against the operator API (create-if-absent by natural key; a run is launched only when the spec has no active run). HEC tokens are named via token_env and read from a mounted Secret, never stored here.",
+
+  "targets": [
+    {
+      "name": "sok-hec",
+      "hec_url": "https://splunk-hec.splunk.svc.cluster.local:8088",
+      "token_env": "STOKER_TARGET_HEC_TOKEN",
+      "default_index": "loadtest",
+      "env_tag": "sok",
+      "verify_tls": false
+    }
+  ],
+
+  "repos": [
+    {
+      "url": "https://github.com/livehybrid/stoker-sample-packs",
+      "default_ref": "master",
+      "sync": true
+    }
+  ],
+
+  "specs": [
+    {
+      "name": "flatline-baseline",
+      "pack": "flatline",
+      "target": "sok-hec",
+      "engine": "eventgen",
+      "rate_mode": "eps",
+      "rate_value": 1000,
+      "workers": 3,
+      "fleet": "k8s-local",
+      "overrides": { "index": "loadtest" },
+      "run": true
+    },
+    {
+      "name": "cloudtrail-24h-backfill",
+      "pack": "aws-cloudtrail",
+      "target": "sok-hec",
+      "engine": "eventgen",
+      "rate_mode": "eps",
+      "rate_value": 200,
+      "workers": 2,
+      "fleet": "k8s-local",
+      "overrides": { "index": "loadtest" },
+      "backfill": { "hours": 24 },
+      "run": true
+    }
+  ]
+}
