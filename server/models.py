@@ -30,6 +30,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    TypeDecorator,
     UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -47,9 +48,31 @@ def utcnow():
     return datetime.datetime.now(datetime.timezone.utc)
 
 
+class UtcDateTime(TypeDecorator):
+    """``DateTime(timezone=True)`` that always reads back tz-aware UTC.
+
+    SQLite has no native timezone type, so a value written as tz-aware UTC reads
+    back NAIVE. That naive value then serialises to JSON with no tz suffix (e.g.
+    ``2026-09-03T12:04:51``), which a browser parses as LOCAL time — an hour off
+    under BST, so "now" shows as "60 minutes ago". Re-stamping UTC on read makes
+    both SQLite and Postgres yield aware UTC, so the API always emits a
+    tz-qualified ISO timestamp and no server-side comparison ever sees a naive
+    value. (Postgres already returns aware values; this is then a no-op there.)
+    """
+
+    impl = DateTime(timezone=True)
+    cache_ok = True
+
+    def process_result_value(self, value, dialect):
+        # type: (Optional[datetime.datetime], Any) -> Optional[datetime.datetime]
+        if value is not None and value.tzinfo is None:
+            return value.replace(tzinfo=datetime.timezone.utc)
+        return value
+
+
 def _ts_column(**kwargs):
     # type: (Any) -> Mapped[Optional[datetime.datetime]]
-    return mapped_column(DateTime(timezone=True), **kwargs)
+    return mapped_column(UtcDateTime(), **kwargs)
 
 
 class Target(Base):
