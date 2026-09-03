@@ -1602,15 +1602,22 @@ def _heartbeat_command(db, run, lease, protocol_version, now):
         lease.state = LEASE_RUNNING if run.t0 is not None else LEASE_READY
 
     # Release: T0 is set and this worker has not yet been promoted past it. The
-    # worker acks release in its pre-generation poll; once T0 has elapsed we
-    # promote the lease to running and stop repeating the release command.
+    # worker learns T0 from the release command and only then starts generating
+    # (a worker in _await_release blocks until it sees "release"). We must issue
+    # release EVEN when T0 is already in the past: a worker whose first post-T0
+    # heartbeat lands after T0 (heartbeat cadence, a slow warm-up, network lag)
+    # would otherwise be promoted to running server-side and handed "continue",
+    # never told to start, and sit forever warmed-but-paused at 0 eps while the
+    # roster shows it running. Promoting to running here keeps it exactly-once:
+    # this heartbeat still carries release, but the next (lease now running)
+    # falls through to steady state, so release is never repeated. An already-
+    # generating worker treats a late release as a no-op (see _apply_command).
     if run.t0 is not None and lease.state in (LEASE_CLAIMED, LEASE_READY):
         if now >= _as_aware(run.t0):
             lease.state = LEASE_RUNNING
             append_event(db, run, "running", {"slot": lease.slot}, actor="agent")
             # Once the whole fleet is running, promote the run to running.
             _maybe_mark_running(db, run)
-            return cmd_continue()
         return cmd_release(run.t0)
 
     # Retarget: a scale/rescale changed this slot's share; push it once.

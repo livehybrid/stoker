@@ -196,6 +196,47 @@ def test_heartbeat_release_after_t0(db_session, make_pack, settings, fake_driver
     assert command.get("t0", "").endswith("Z")
 
 
+def test_heartbeat_release_when_first_hb_lands_after_t0(db_session, make_pack, settings, fake_driver):
+    """A worker still awaiting release whose first heartbeat lands AFTER T0 must
+    still be told release (with T0), not continue.
+
+    Regression: a worker blocks in _await_release until it sees a release
+    command. If its first post-T0 heartbeat arrived after T0 had elapsed, the
+    promotion branch used to return continue -- the worker never learnt T0,
+    stayed warmed-but-paused and delivered 0 eps forever while the roster showed
+    it running. With N workers this stranded whichever ones did not happen to
+    heartbeat inside the brief [release, T0) window (the reported "some workers
+    sit at 0 eps"). The promoting heartbeat must carry release exactly once.
+    """
+    run = _provisioned(db_session, make_pack, settings, fake_driver, workers=1)
+    lease = _claim(db_session, run)
+    _skip_if_stubbed(lifecycle.mark_ready, db_session, run, lease.slot, lease.lease_id)
+    if run.t0 is None:
+        _skip_if_stubbed(lifecycle.evaluate_release, db_session, run)
+    if run.t0 is None:
+        pytest.skip("release not set by Core in this configuration")
+    # Force the worker's first heartbeat to land strictly after T0 while the
+    # lease is still READY (never promoted): back-date T0 into the past.
+    run.t0 = utcnow() - datetime.timedelta(seconds=1)
+    db_session.flush()
+    assert _helpers.leases_by_slot(db_session, run)[lease.slot].state == lifecycle.LEASE_READY
+
+    payload = _helpers.heartbeat_payload(lease, state="ready", events_total=0)
+    payload["_bearer"] = _helpers.bearer_for(run, settings)
+    command = _skip_if_stubbed(lifecycle.record_heartbeat, db_session, run,
+                               lease.slot, lease.lease_id, payload)
+    # The worker learns T0 (release) even though T0 is already past ...
+    assert command.get("command") == "release"
+    assert command.get("t0", "").endswith("Z")
+    # ... and is promoted, so the next heartbeat is steady-state continue.
+    assert _helpers.leases_by_slot(db_session, run)[lease.slot].state == lifecycle.LEASE_RUNNING
+    payload2 = _helpers.heartbeat_payload(lease, state="generating", events_total=1)
+    payload2["_bearer"] = _helpers.bearer_for(run, settings)
+    second = _skip_if_stubbed(lifecycle.record_heartbeat, db_session, run,
+                              lease.slot, lease.lease_id, payload2)
+    assert second.get("command") == "continue"
+
+
 def test_heartbeat_drain_when_run_draining(db_session, make_pack, settings, fake_driver):
     run = _provisioned(db_session, make_pack, settings, fake_driver, workers=1)
     lease = _claim(db_session, run)
@@ -252,7 +293,10 @@ def test_heartbeat_retarget_after_mark_retarget(db_session, make_pack, settings,
     promote["_bearer"] = _helpers.bearer_for(run, settings)
     first = _skip_if_stubbed(lifecycle.record_heartbeat, db_session, run, 0,
                              lease.lease_id, promote)
-    assert first.get("command") == "continue"  # promoted past release
+    # The promoting heartbeat still carries release (so a worker whose first
+    # post-T0 heartbeat lands here learns T0 and starts) but promotes the lease
+    # to running, so the NEXT heartbeat falls through to steady state.
+    assert first.get("command") == "release"
     assert _helpers.leases_by_slot(db_session, run)[0].state == lifecycle.LEASE_RUNNING
 
     # Now flag the live (running) lease for retarget exactly as scale/rescale would.
