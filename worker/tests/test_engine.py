@@ -66,3 +66,76 @@ def test_engine_default_cwd_is_none(tmp_path, monkeypatch):
         assert calls["cwd"] is None  # inherit: the pre-fix behaviour
     finally:
         runner.stop()
+
+
+# --------------------------------------------------------------------------- #
+# Process-group teardown: eventgen forks worker children into the engine's
+# session group. stop() must reap the WHOLE group, or a child orphans onto the
+# workdir the agent then deletes and crash-loops at 0 eps (the "some workers
+# emit nothing" bug). These use a REAL subprocess (no faked Popen).
+# --------------------------------------------------------------------------- #
+
+import os as _os
+import signal as _signal
+import sys as _sys
+import time as _time
+
+import pytest
+
+
+def _alive(pid):
+    try:
+        _os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # exists, not ours (won't happen in-test)
+        return True
+
+
+# A fake engine that forks a SIGTERM-ignoring child (like an eventgen worker),
+# records both pids, and — as the group leader — exits cleanly on SIGTERM. So a
+# plain proc.terminate() reaps the leader but ORPHANS the child; only a group
+# kill clears it. argv[1] is the "conf" path, which we set to the pidfile.
+_FAKE_ENGINE = (
+    "import os, signal, sys, time\n"
+    "pidfile = sys.argv[1]\n"
+    "pid = os.fork()\n"
+    "if pid == 0:\n"
+    "    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+    "    time.sleep(120)\n"
+    "    os._exit(0)\n"
+    "signal.signal(signal.SIGTERM, lambda *a: os._exit(0))\n"
+    "open(pidfile, 'w').write('%d %d' % (os.getpid(), pid))\n"
+    "time.sleep(120)\n"
+)
+
+
+@pytest.mark.skipif(not hasattr(_os, "fork") or not hasattr(_os, "killpg"),
+                    reason="needs POSIX fork + process groups")
+def test_stop_reaps_the_whole_engine_group(tmp_path, monkeypatch):
+    pidfile = tmp_path / "pids.txt"
+    script = tmp_path / "fake_engine.py"
+    script.write_text(_FAKE_ENGINE)
+    monkeypatch.setenv("STOKER_ENGINE_CMD", "%s %s" % (_sys.executable, script))
+
+    # conf_path == pidfile: build_command appends it as the script's argv[1].
+    runner = EngineRunner(str(pidfile), str(tmp_path / "out.sock"),
+                          cwd=str(tmp_path))
+    runner.start()
+    deadline = _time.time() + 10
+    while _time.time() < deadline and not pidfile.exists():
+        _time.sleep(0.05)
+    assert pidfile.exists(), "fake engine never wrote its pids"
+    parent_pid, child_pid = (int(x) for x in pidfile.read_text().split())
+    assert _alive(parent_pid) and _alive(child_pid)
+
+    runner.stop(grace_s=2.0)
+
+    deadline = _time.time() + 5
+    while _time.time() < deadline and (_alive(parent_pid) or _alive(child_pid)):
+        _time.sleep(0.05)
+    assert not _alive(parent_pid), "engine leader survived stop()"
+    # The load-bearing assertion: the SIGTERM-ignoring child (an orphaned
+    # eventgen worker) is gone because stop() killed the whole group.
+    assert not _alive(child_pid), "orphaned engine child survived stop()"

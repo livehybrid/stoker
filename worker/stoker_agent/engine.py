@@ -3,7 +3,10 @@
 Builds the engine command (STOKER_ENGINE_CMD override, otherwise the
 contract fallback `python -m splunk_eventgen generate <conf>` with the
 vendored tree on PYTHONPATH), captures the last 50 output lines in a ring
-buffer for the final POST and stops with SIGTERM, 10 s grace, SIGKILL.
+buffer for the final POST and stops with SIGTERM, 10 s grace, SIGKILL — applied
+to the engine's whole process GROUP (it is a session leader and eventgen forks
+worker processes into it), so a worker can never orphan onto the workdir the
+agent is about to delete.
 """
 
 from __future__ import annotations
@@ -12,6 +15,7 @@ import collections
 import logging
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import threading
@@ -21,6 +25,30 @@ log = logging.getLogger("stoker.engine")
 
 DEFAULT_RING_SIZE = 50
 STOP_GRACE_S = 10.0
+
+
+def _signal_engine(proc, pgid, sig):
+    # type: (subprocess.Popen, Optional[int], int) -> None
+    """Signal the engine's whole process GROUP, falling back to the leader.
+
+    The engine is launched ``start_new_session=True`` so it leads its own
+    process group, and eventgen's ``generate`` mode forks generator/output
+    worker processes into that group. Signalling only the direct child
+    (``proc.terminate()`` / ``proc.kill()``) leaves those workers orphaned: they
+    outlive the leader, lose their workdir/conf to the agent's cleanup and then
+    crash-loop at 0 eps holding a slot. ``os.killpg`` reaches the whole tree.
+    Falls back to the single process where process groups are unavailable or the
+    group has already gone (``os.killpg`` is Unix-only; a dead group raises)."""
+    if pgid is not None:
+        try:
+            os.killpg(pgid, sig)
+            return
+        except OSError:
+            pass  # group gone; fall through to the direct signal
+    try:
+        proc.kill() if sig == signal.SIGKILL else proc.terminate()
+    except OSError:
+        pass
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 # worker/stoker_agent/ -> worker/engines/eventgen
@@ -95,6 +123,7 @@ class EngineRunner(object):
         self._ring = collections.deque(maxlen=ring_size)
         self._ring_lock = threading.Lock()
         self._proc = None    # type: Optional[subprocess.Popen]
+        self._pgid = None    # type: Optional[int]
         self._reader = None  # type: Optional[threading.Thread]
 
     def _build_env(self):
@@ -137,6 +166,19 @@ class EngineRunner(object):
             )
         except OSError as exc:
             raise EngineError("failed to start engine %r: %s" % (cmd, exc))
+        # Capture the process-group id now, while the leader is definitely alive.
+        # start_new_session=True makes the leader its own group, and eventgen
+        # forks its workers into it; stop() signals this whole group so a worker
+        # can never outlive the leader as an orphan. Captured here (not in stop)
+        # because once the leader is reaped its pgid is no longer resolvable.
+        self._pgid = None
+        if hasattr(os, "getpgid"):
+            try:
+                self._pgid = os.getpgid(self._proc.pid)
+            except (OSError, AttributeError):
+                # OSError: leader already gone. AttributeError: a test Popen mock
+                # with no real pid. Either way, fall back to per-process signals.
+                self._pgid = None
         self._reader = threading.Thread(
             target=self._pump_output, args=(self._proc,),
             name="stoker-engine-log", daemon=True)
@@ -163,23 +205,29 @@ class EngineRunner(object):
         proc = self._proc
         if proc is None:
             return None
+        # The group id was captured at start() while the leader was alive, so it
+        # is usable even now if the leader has since exited leaving orphans.
+        pgid = self._pgid
         if proc.poll() is None:
-            try:
-                proc.terminate()
-            except OSError:
-                pass
+            _signal_engine(proc, pgid, signal.SIGTERM)
             try:
                 proc.wait(grace_s)
             except subprocess.TimeoutExpired:
                 log.warning("engine ignored SIGTERM for %.0f s; killing", grace_s)
-                try:
-                    proc.kill()
-                except OSError:
-                    pass
+                _signal_engine(proc, pgid, signal.SIGKILL)
                 try:
                     proc.wait(5.0)
                 except subprocess.TimeoutExpired:
                     log.error("engine unkillable; abandoning")
+        # Belt and braces: SIGKILL the whole group even after a clean leader exit,
+        # so an eventgen worker that outlived its parent can never orphan onto the
+        # workdir the agent is about to delete. A group that already exited raises
+        # and is ignored.
+        if pgid is not None:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except OSError:
+                pass
         if self._reader is not None:
             self._reader.join(2.0)
         return proc.poll()
