@@ -169,6 +169,8 @@ class Agent(object):
         # measured-eps window
         self._last_events = 0
         self._last_events_t = None  # type: Optional[float]
+        self._last_bytes = 0
+        self._last_bytes_t = None  # type: Optional[float]
 
     # -- public ------------------------------------------------------------
 
@@ -663,6 +665,21 @@ class Agent(object):
         self._last_events, self._last_events_t = events_total, now
         return round(eps, 3)
 
+    def _measured_bps(self, bytes_total):
+        # type: (int) -> float
+        """Bytes/second over the interval, from the cumulative bytes_total delta
+        (the mirror of _measured_eps). The control plane derives bps nowhere, so
+        without this the dashboard's MB/s series is flat at 0 even while eps
+        flows. First call seeds the baseline and returns 0."""
+        now = time.monotonic()
+        if self._last_bytes_t is None:
+            self._last_bytes, self._last_bytes_t = bytes_total, now
+            return 0.0
+        delta_t = now - self._last_bytes_t
+        bps = (bytes_total - self._last_bytes) / delta_t if delta_t > 0 else 0.0
+        self._last_bytes, self._last_bytes_t = bytes_total, now
+        return round(bps, 1)
+
     def _heartbeat_payload(self, sl, cpu=None, snap=None):
         # type: (SpecSlice, Optional[CpuTracker], Optional[Dict[str, Any]]) -> Dict[str, Any]
         if snap is None:
@@ -672,6 +689,7 @@ class Agent(object):
             payload[key] = snap.get(key, 0)
         payload["dropped"] = snap.get("dropped", 0)
         payload["eps"] = self._measured_eps(payload["events_total"])
+        payload["bps"] = self._measured_bps(payload["bytes_total"])
         payload["lag_s"] = round(self._bucket.lag_s(), 3) if self._bucket \
             and not self._bucket.closed else 0.0
         payload["rss_mb"] = round(read_rss_mb(), 1)

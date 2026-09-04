@@ -136,6 +136,26 @@ def test_heartbeat_positive_assigned_has_no_reason():
     assert "assigned_reason" not in payload
 
 
+def test_heartbeat_reports_bps_from_bytes_total_delta(monkeypatch):
+    """The dashboard's MB/s reads the heartbeat's bps; the control plane derives
+    it nowhere, so the worker must compute it from the bytes_total delta exactly
+    as it does eps. Without this the MB/s series stays flat at 0 while eps flows.
+    """
+    from stoker_agent import agent as agent_mod
+    agent = _agent()
+    sl = _slice()
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(agent_mod.time, "monotonic", lambda: clock["t"])
+    # First heartbeat seeds the baseline (no interval yet -> 0).
+    p0 = agent._heartbeat_payload(sl, snap={"bytes_total": 5000, "events_total": 50})
+    assert p0["bps"] == 0.0
+    # 2 s later, +20000 bytes and +200 events -> 10000 B/s and 100 eps.
+    clock["t"] = 1002.0
+    p1 = agent._heartbeat_payload(sl, snap={"bytes_total": 25000, "events_total": 250})
+    assert p1["bps"] == pytest.approx(10000.0)
+    assert p1["eps"] == pytest.approx(100.0)
+
+
 def test_metrics_series_total_matches_engine_matrix():
     metricgen = {
         "dimensions": [

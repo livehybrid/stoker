@@ -156,15 +156,24 @@ class StokerOutputPlugin(OutputPlugin):
         OutputPlugin.__init__(self, sample, output_counter)
 
     def flush(self, q):
+        # Encode the whole batch into one buffer and write it with a SINGLE
+        # sendall, rather than one sendall syscall per event. On the single
+        # GIL-bound generator thread the per-event syscall was a real ceiling on
+        # per-worker EPS; one write per flush (up to MAXQUEUELENGTH events) cuts
+        # that overhead. Backpressure is unchanged: a blocked write of the whole
+        # buffer still stalls generation, and the agent reader splits the stream
+        # on newlines so a multi-line write parses identically. Encoding is done
+        # outside the lock (CPU only); only the socket write holds it.
+        buf = b"".join(_encode(item) for item in q)
+        if not buf:
+            return
         conn = _CONNECTION
         with conn.lock:
             sock = conn.ensure()
-            for item in q:
-                line = _encode(item)
-                try:
-                    sock.sendall(line)
-                except OSError as exc:
-                    conn.fail(exc)
+            try:
+                sock.sendall(buf)
+            except OSError as exc:
+                conn.fail(exc)
 
 
 def load():
