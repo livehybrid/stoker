@@ -299,3 +299,70 @@ except OSError:
     # Roughly rate x duration delivered (the stub floods; the bucket paces).
     delivered = len(sinks[0])
     assert abs(delivered - 80 * 2.0) <= 80 * 2.0 * 0.1
+
+
+@pytest.mark.timeout(60)
+def test_gated_rawreplay_starts_at_t0_not_warmed_pre_release(tmp_path):
+    """Regression: a gated (eps) rawreplay engine must start at T0 into an ACTIVE
+    bucket, never during the pre-T0 warm-up while the bucket is paused.
+
+    rawreplay (PISTON) streams the dataset hot and relies entirely on socket
+    backpressure, so warming it into a paused pipeline wedges it: it fills the
+    socket, blocks, and delivers 0 events even after T0 (the zero-output watchdog
+    is eventgen-only, so nothing recovers it). Mirrors the metrics warm/T0 gating.
+    Fails if rawreplay is ever added back to the pre-T0 warm-up branch.
+    """
+    holder = {}
+    seen = {}
+
+    class RecordingEngine:
+        def start(self):
+            # Paused at start => warmed pre-T0 (the bug); active => T0 (correct).
+            seen["paused_at_start"] = holder["agent"]._bucket.paused
+            # Exit immediately so the agent drains cleanly to rc 0.
+
+        def stop(self, grace_s=None):
+            return 0
+
+        def is_alive(self):
+            return False
+
+        @property
+        def returncode(self):
+            return 0
+
+        def restart(self):
+            self.start()
+
+        def log_tail(self):
+            return []
+
+    def rr_factory(replay, socket_path, cwd=None, log_dir=None):
+        return RecordingEngine()
+
+    env = {
+        "STOKER_STANDALONE": "1",
+        "STOKER_ENGINE": "rawreplay",
+        "STOKER_BUNDLE": make_replay_pack(tmp_path, mode="rate"),
+        "STOKER_HEC_URL": "http://fake-hec:8088",
+        "STOKER_HEC_TOKEN": "tok",
+        "STOKER_INDEX": "loadtest",
+        "STOKER_RATE_MODE": "eps",   # gated
+        "STOKER_RATE_VALUE": "100",
+        "STOKER_DURATION_S": "1",
+        "STOKER_OUTPUT_SOCKET": str(tmp_path / "out.sock"),
+        "STOKER_METRICS_PORT": "0",
+        "STOKER_HEARTBEAT_S": "1",
+    }
+    cfg = load_config(env)
+    sinks = []
+    agent = Agent(
+        cfg,
+        hec_factory=lambda url, token, gzip_enabled, verify_tls, ack:
+            sinks.append(FakeHec(url, token, gzip_enabled, verify_tls, ack)) or sinks[-1],
+        rawreplay_engine_factory=rr_factory)
+    holder["agent"] = agent
+    rc = agent.run()
+    assert rc == 0
+    assert seen.get("paused_at_start") is False, \
+        "gated rawreplay engine was started pre-T0 into a paused bucket (warm-up wedge)"

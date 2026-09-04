@@ -246,13 +246,21 @@ class Agent(object):
                     self._engine = self._engine_factory(conf_path,
                                                         cfg.output_socket,
                                                         pack.pack_dir)
-                if gated and not is_metrics:
-                    # warm the engine; the paused bucket holds output back. NOT
-                    # for metrics: that engine either self-paces on a wall-clock
-                    # grid or (backfill) emits its whole window hot and exits, so
-                    # warming it pre-T0 pushes output into a paused pipeline (the
-                    # reader stops, the socket stalls and the backfill sweep is cut
-                    # short). Metrics always starts at T0, into an active bucket.
+                if gated and not is_metrics and not is_rawreplay:
+                    # Warm the engine; the paused bucket holds output back. This
+                    # is ONLY safe for eventgen, which templates events on demand
+                    # and simply blocks in its output plugin when the paused
+                    # socket fills, resuming cleanly at T0. Hot-emitting engines
+                    # must NOT be warmed pre-T0:
+                    #   * metrics self-paces on a wall-clock grid or (backfill)
+                    #     emits its whole window hot and exits;
+                    #   * rawreplay (PISTON) streams the dataset as fast as the
+                    #     socket accepts, relying entirely on socket backpressure.
+                    # Warming either into a paused pipeline pushes output at a
+                    # reader that has stopped; the socket stalls and the engine
+                    # wedges producing 0 events even after T0 (and the zero-output
+                    # watchdog is eventgen-only, so nothing recovers it). Both
+                    # start at T0 instead (below), into an ACTIVE bucket.
                     self._engine.start()
                     self._engine_started = True
 
