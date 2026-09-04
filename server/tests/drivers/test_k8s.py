@@ -286,6 +286,77 @@ def test_from_fleet_config_node_selector_reaches_driver(settings):
     )._node_selector is None
 
 
+_TOLERATION = {"key": "splunk.crc.dwp/role", "operator": "Equal",
+               "value": "stoker", "effect": "NoSchedule"}
+
+
+def test_k8s_create_fleet_default_tolerations_reach_pod_spec():
+    """A fleet-level toleration (K8S_TOLERATIONS seed) lets every run's workers
+    land on the reserved, NoSchedule-tainted node group."""
+    batch, core = _mock_apis()
+    driver = K8sDriver(namespace="stoker", batch_api=batch, core_api=core,
+                       tolerations=[_TOLERATION])
+
+    driver.create(_snapshot(driver_opts={}), 2)
+
+    pod_spec = _created_job_body(batch)["spec"]["template"]["spec"]
+    assert pod_spec["tolerations"] == [_TOLERATION]
+
+
+def test_k8s_create_spec_tolerations_override_fleet_default():
+    """The spec's tolerations win outright — no merging with the fleet default."""
+    batch, core = _mock_apis()
+    driver = K8sDriver(namespace="stoker", batch_api=batch, core_api=core,
+                       tolerations=[_TOLERATION])
+    spec_tol = {"key": "pool", "operator": "Exists"}
+
+    driver.create(_snapshot(driver_opts={"tolerations": [spec_tol]}), 2)
+
+    pod_spec = _created_job_body(batch)["spec"]["template"]["spec"]
+    assert pod_spec["tolerations"] == [spec_tol]
+
+
+def test_k8s_create_no_tolerations_anywhere_leaves_pod_spec_clean():
+    batch, core = _mock_apis()
+    driver = _driver(batch, core)
+
+    driver.create(_snapshot(driver_opts={}), 2)
+
+    pod_spec = _created_job_body(batch)["spec"]["template"]["spec"]
+    assert "tolerations" not in pod_spec
+
+
+def test_k8s_create_tolerations_reject_junk_fields():
+    """A hostile/malformed toleration cannot inject arbitrary pod-spec keys, and
+    a keyless entry survives only as the legitimate operator=Exists form."""
+    batch, core = _mock_apis()
+    driver = _driver(batch, core)
+
+    driver.create(_snapshot(driver_opts={"tolerations": [
+        {"key": "a", "operator": "Equal", "value": "b", "effect": "NoSchedule",
+         "command": "rm -rf /"},   # junk key dropped
+        {"operator": "Exists"},     # keyless Exists kept
+        {"value": "orphan"},        # no key, not Exists -> dropped
+        "not-a-dict",               # dropped
+    ]}), 1)
+
+    pod_spec = _created_job_body(batch)["spec"]["template"]["spec"]
+    assert pod_spec["tolerations"] == [
+        {"key": "a", "operator": "Equal", "value": "b", "effect": "NoSchedule"},
+        {"operator": "Exists"},
+    ]
+
+
+def test_from_fleet_config_tolerations_reach_driver(settings):
+    driver = K8sDriver.from_fleet_config(
+        {"namespace": "ns", "tolerations": [_TOLERATION]})
+    assert driver._tolerations == [_TOLERATION]
+    # A malformed (non-list) value is ignored rather than crashing the build.
+    assert K8sDriver.from_fleet_config(
+        {"namespace": "ns", "tolerations": "nope"}
+    )._tolerations == []
+
+
 def test_k8s_create_passes_completion_index_as_hint_slot():
     """JOB_COMPLETION_INDEX is surfaced to the worker as STOKER_HINT_SLOT."""
     batch, core = _mock_apis()

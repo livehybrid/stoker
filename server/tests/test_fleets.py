@@ -89,6 +89,54 @@ def test_parse_node_selector_env():
         _parse_node_selector({"K8S_NODE_SELECTOR": "=stoker"})
 
 
+def test_parse_tolerations_env():
+    from server.config import ConfigError, _parse_tolerations
+
+    assert _parse_tolerations({}) == ()
+    # key=value:effect -> Equal with an effect
+    assert _parse_tolerations(
+        {"K8S_TOLERATIONS": "splunk.crc.dwp/role=stoker:NoSchedule"}
+    ) == (("splunk.crc.dwp/role", "Equal", "stoker", "NoSchedule"),)
+    # key only -> Exists, no value/effect
+    assert _parse_tolerations(
+        {"K8S_TOLERATIONS": "workload"}) == (("workload", "Exists", "", ""),)
+    # key:effect -> Exists with an effect
+    assert _parse_tolerations(
+        {"K8S_TOLERATIONS": "dedicated:NoExecute"}
+    ) == (("dedicated", "Exists", "", "NoExecute"),)
+    # multiple, whitespace tolerant, effect optional
+    assert _parse_tolerations(
+        {"K8S_TOLERATIONS": " a=b , c=d:PreferNoSchedule "}
+    ) == (("a", "Equal", "b", ""), ("c", "Equal", "d", "PreferNoSchedule"))
+    # a missing key is a hard boot error, both with and without an effect
+    with pytest.raises(ConfigError):
+        _parse_tolerations({"K8S_TOLERATIONS": "=stoker"})
+    with pytest.raises(ConfigError):
+        _parse_tolerations({"K8S_TOLERATIONS": ":NoSchedule"})
+
+
+def test_seed_fleets_tolerations_follows_settings(db_session, settings):
+    custom = dataclasses.replace(settings, k8s_tolerations=(
+        ("splunk.crc.dwp/role", "Equal", "stoker", "NoSchedule"),
+        ("workload", "Exists", "", ""),
+    ))
+    lifecycle.seed_fleets(db_session, settings=custom)
+    k8s = db_session.execute(
+        select(Fleet).where(Fleet.name == "k8s-local")).scalars().first()
+    assert (k8s.config_json or {}).get("tolerations") == [
+        {"key": "splunk.crc.dwp/role", "operator": "Equal",
+         "value": "stoker", "effect": "NoSchedule"},
+        {"key": "workload", "operator": "Exists"},
+    ]
+
+
+def test_seed_fleets_no_tolerations_key_when_unset(db_session, settings):
+    lifecycle.seed_fleets(db_session, settings=settings)
+    k8s = db_session.execute(
+        select(Fleet).where(Fleet.name == "k8s-local")).scalars().first()
+    assert "tolerations" not in (k8s.config_json or {})
+
+
 def test_list_fleets_shows_node_selector(client, db_session):
     # node_selector is addressing, not a credential: it must survive the
     # config redaction allowlist so operators can see fleet placement.

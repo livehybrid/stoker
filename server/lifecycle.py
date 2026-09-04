@@ -2508,14 +2508,29 @@ def seed_fleets(db, settings=None):
         # rebuilt deployment needs no per-spec step.
         if settings.k8s_node_selector:
             k8s_config["node_selector"] = dict(settings.k8s_node_selector)
+        # Fleet-level default tolerations (env K8S_TOLERATIONS): let worker Jobs
+        # pinned to the selected (reserved) node group tolerate its NoSchedule
+        # taint, so the taint can stay NoSchedule instead of being weakened to
+        # PreferNoSchedule. Rebuild k8s toleration objects from the stored quads,
+        # dropping empty value/effect. A spec's driver_opts.tolerations overrides.
+        if settings.k8s_tolerations:
+            k8s_config["tolerations"] = [
+                dict(
+                    [("key", key), ("operator", operator)]
+                    + ([("value", value)] if value else [])
+                    + ([("effect", effect)] if effect else [])
+                )
+                for (key, operator, value, effect) in settings.k8s_tolerations
+            ]
         db.add(Fleet(
             name="k8s-local",
             driver="k8s",
             config_json=k8s_config,
         ))
-        log.info("seeded fleet k8s-local (namespace %s, node_selector %s)",
+        log.info("seeded fleet k8s-local (namespace %s, node_selector %s, tolerations %s)",
                  settings.k8s_namespace,
-                 k8s_config.get("node_selector") or "none")
+                 k8s_config.get("node_selector") or "none",
+                 k8s_config.get("tolerations") or "none")
     # The in-process fleet (workers as subprocesses of the control plane) is
     # opt-in: seeded only under STOKER_INPROCESS_FLEET so the picker stays
     # clean for deployments that never use it. If the flag is later removed,

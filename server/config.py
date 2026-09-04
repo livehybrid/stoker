@@ -205,6 +205,15 @@ class Settings:
     # boot so a fresh deployment lands worker Jobs on dedicated node groups
     # declaratively; a spec's ``driver_opts.node_selector`` overrides per run.
     k8s_node_selector: Tuple[Tuple[str, str], ...] = ()
+    # Default pod tolerations for the seeded ``k8s-local`` fleet (env
+    # K8S_TOLERATIONS, ``key[=value][:effect][,...]``), stored as
+    # (key, operator, value, effect) quads ("" = absent) for the frozen
+    # dataclass. Seeded into the fleet's config_json at first boot so worker
+    # Jobs pinned to a dedicated node group can tolerate its NoSchedule taint
+    # WITHOUT weakening the taint to PreferNoSchedule; a spec's
+    # ``driver_opts.tolerations`` overrides per run. nodeSelector chooses the
+    # node; the toleration is what lets a tainted (reserved) node accept the pod.
+    k8s_tolerations: Tuple[Tuple[str, str, str, str], ...] = ()
 
     # --- In-process fleet (workers inside the control-plane container) ------- #
     # Opt-in (env STOKER_INPROCESS_FLEET): seeds the ``inprocess-local`` fleet,
@@ -332,6 +341,48 @@ def _parse_node_selector(env):
                 "K8S_NODE_SELECTOR entries must be key=value, got %r" % part)
         pairs.append((key.strip(), value.strip()))
     return tuple(pairs)
+
+
+def _parse_tolerations(env):
+    # type: (Mapping[str, str]) -> Tuple[Tuple[str, str, str, str], ...]
+    """Parse ``K8S_TOLERATIONS`` into (key, operator, value, effect) quads.
+
+    Each comma-separated entry is ``key[=value][:effect]`` (the same shape a
+    taint is written in), e.g. ``splunk.crc.dwp/role=stoker:NoSchedule``:
+
+    * ``key=value`` -> operator ``Equal`` with that value;
+    * ``key`` (no ``=``) -> operator ``Exists`` (tolerates any value);
+    * a trailing ``:effect`` limits the toleration to one effect
+      (``NoSchedule`` / ``PreferNoSchedule`` / ``NoExecute``); omit it to
+      tolerate the taint under every effect.
+
+    Stored as quads with ``""`` for an absent value/effect so the frozen
+    dataclass stays hashable; :func:`seed_fleets` rebuilds k8s toleration
+    objects from them. A malformed entry is a hard :class:`ConfigError` at boot,
+    matching the other structured settings; blank/unset means no toleration.
+    """
+    raw = _get(env, "K8S_TOLERATIONS")
+    if not raw:
+        return ()
+    quads = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        body, sep, effect = part.rpartition(":")
+        if not sep:  # no ':' -> the whole thing is key[=value], effect unset
+            body, effect = part, ""
+        body = body.strip()
+        effect = effect.strip()
+        key, eq, value = body.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            raise ConfigError(
+                "K8S_TOLERATIONS entries must be key[=value][:effect], got %r" % part)
+        operator = "Equal" if eq else "Exists"
+        quads.append((key, operator, value, effect))
+    return tuple(quads)
 
 
 def _parse_engine_ceilings(env):
@@ -511,6 +562,7 @@ def load_settings(env=None):
         k8s_namespace=_get(env, "K8S_NAMESPACE", DEFAULT_K8S_NAMESPACE)
         or DEFAULT_K8S_NAMESPACE,
         k8s_node_selector=_parse_node_selector(env),
+        k8s_tolerations=_parse_tolerations(env),
         inprocess_fleet_enabled=_get_bool(env, "STOKER_INPROCESS_FLEET", False),
         inprocess_max_workers=max(1, _get_int(
             env, "STOKER_INPROCESS_MAX_WORKERS", DEFAULT_INPROCESS_MAX_WORKERS)),

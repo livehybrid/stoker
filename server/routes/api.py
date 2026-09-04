@@ -721,6 +721,7 @@ def preview_run_pack(
 # even ciphertext stays server-side, so this is an allowlist, not a denylist.
 _FLEET_CONFIG_PUBLIC_KEYS = (
     "namespace", "kube_context", "context", "in_cluster", "node_selector",
+    "tolerations",  # placement, not a credential: operators should see it
     "portainer_endpoint", "portainer_host", "verify_tls",
     # Per-fleet ceiling overrides: plain numbers, never credentials, and the
     # wizard benefits from seeing that a fleet carries its own bounds.

@@ -80,12 +80,38 @@ def secret_name(run_id):
     return "stoker-run-%s-hec" % run_id
 
 
+_TOLERATION_KEYS = ("key", "operator", "value", "effect", "tolerationSeconds")
+
+
+def _clean_tolerations(tolerations):
+    # type: (Any) -> List[Dict[str, Any]]
+    """Normalise a list of k8s toleration objects for the pod spec.
+
+    Keeps only real dict entries with a recognised shape (a ``key``, or
+    ``operator: Exists`` which legitimately omits the key to tolerate everything)
+    and only the whitelisted toleration fields, so a malformed or hostile
+    ``driver_opts.tolerations`` cannot inject arbitrary pod-spec keys. Returns
+    ``[]`` for anything that is not a non-empty list.
+    """
+    if not isinstance(tolerations, list):
+        return []
+    cleaned = []  # type: List[Dict[str, Any]]
+    for entry in tolerations:
+        if not isinstance(entry, dict):
+            continue
+        tol = {k: entry[k] for k in _TOLERATION_KEYS if entry.get(k) not in (None, "")}
+        if "key" in tol or tol.get("operator") == "Exists":
+            cleaned.append(tol)
+    return cleaned
+
+
 class K8sDriver(object):
     """Kubernetes-backed execution driver (one Indexed ``batch/v1`` Job per run)."""
 
     def __init__(self, namespace="stoker", batch_api=None, core_api=None,
-                 context=None, in_cluster=None, node_selector=None):
-        # type: (str, Optional[Any], Optional[Any], Optional[str], Optional[bool], Optional[Dict[str, str]]) -> None
+                 context=None, in_cluster=None, node_selector=None,
+                 tolerations=None):
+        # type: (str, Optional[Any], Optional[Any], Optional[str], Optional[bool], Optional[Dict[str, str]], Optional[List[Dict[str, str]]]) -> None
         """
         Args:
             namespace: the namespace all Jobs/Secrets/pods live in.
@@ -100,11 +126,17 @@ class K8sDriver(object):
             node_selector: fleet-level default nodeSelector for worker pods
                 (from the fleet config, seeded via K8S_NODE_SELECTOR). A run's
                 ``driver_opts.node_selector`` overrides it.
+            tolerations: fleet-level default pod tolerations (list of k8s
+                toleration objects, from the fleet config, seeded via
+                K8S_TOLERATIONS) so a worker pinned to a reserved node group can
+                land on its NoSchedule-tainted nodes. A run's
+                ``driver_opts.tolerations`` overrides it.
         """
         self._namespace = namespace or "stoker"
         self._context = context
         self._in_cluster = in_cluster
         self._node_selector = dict(node_selector) if node_selector else None
+        self._tolerations = _clean_tolerations(tolerations)
         # Injectable for unit tests (mocks); built lazily from kubeconfig when
         # absent so a long-lived driver picks up the configured context.
         self._batch = batch_api
@@ -132,8 +164,11 @@ class K8sDriver(object):
         node_selector = config.get("node_selector")
         if not isinstance(node_selector, dict):
             node_selector = None
+        tolerations = config.get("tolerations")
+        if not isinstance(tolerations, list):
+            tolerations = None
         return cls(namespace=namespace, context=context, in_cluster=in_cluster,
-                   node_selector=node_selector)
+                   node_selector=node_selector, tolerations=tolerations)
 
     # -- lazy client construction (never hit in unit tests) --------------- #
 
@@ -451,6 +486,16 @@ class K8sDriver(object):
             node_selector = self._node_selector
         if isinstance(node_selector, dict) and node_selector:
             pod_spec["nodeSelector"] = dict(node_selector)
+
+        # Tolerations: nodeSelector alone cannot place a pod on a tainted
+        # (reserved) node; a matching toleration is what the scheduler needs.
+        # Same precedence as nodeSelector — a spec's driver_opts.tolerations wins
+        # outright; the fleet-level default fills in when the spec says nothing.
+        tolerations = _clean_tolerations(opts.get("tolerations"))
+        if not tolerations:
+            tolerations = self._tolerations
+        if tolerations:
+            pod_spec["tolerations"] = [dict(t) for t in tolerations]
 
         job_spec = {
             "completionMode": "Indexed",
