@@ -722,6 +722,7 @@ def preview_run_pack(
 _FLEET_CONFIG_PUBLIC_KEYS = (
     "namespace", "kube_context", "context", "in_cluster", "node_selector",
     "tolerations",  # placement, not a credential: operators should see it
+    "resources",    # worker pod sizing: plain quantities, never credentials
     "portainer_endpoint", "portainer_host", "verify_tls",
     # Per-fleet ceiling overrides: plain numbers, never credentials, and the
     # wizard benefits from seeing that a fleet carries its own bounds.
@@ -1432,6 +1433,11 @@ def scale_run_endpoint(run_id: int, body: ScaleRequest, request: Request, db: Se
                 "workers": body.workers,
             },
         )
+    # Same per-worker ceiling the submit guard applies: scaling DOWN spreads the
+    # same rate over fewer slots, which can exceed a ceiling the run cleared.
+    snap = run.spec_snapshot_json or {}
+    _guard_run_ceiling(db, run, snap.get("rate_mode") or "eps",
+                       snap.get("rate_value"), body.workers)
     driver = _run_driver(db, run)
     try:
         run = lifecycle.scale_run(db, run, driver, body.workers, actor=_actor(request))
@@ -1450,6 +1456,11 @@ def rescale_run_endpoint(run_id: int, body: RescaleRequest, request: Request, db
     run = _load_active_run(db, run_id)
     if body.rate_value <= 0:
         raise HTTPException(status_code=422, detail="rate_value must be > 0")
+    # Same per-worker ceiling the submit guard applies: a rescale raises the rate
+    # at the SAME worker count, so it can push the slice past the ceiling.
+    snap = run.spec_snapshot_json or {}
+    _guard_run_ceiling(db, run, snap.get("rate_mode") or "eps", body.rate_value,
+                       int(snap.get("workers") or 1))
     driver = _run_driver(db, run)
     try:
         run = lifecycle.rescale_run(db, run, driver, body.rate_value, actor=_actor(request))
@@ -1636,6 +1647,48 @@ def _validate_rate(rate_mode, rate_value):
                 status_code=422,
                 detail="%s mode requires rate_value > 0" % rate_mode,
             )
+
+
+def _guard_run_ceiling(db, run, rate_mode, rate_value, workers):
+    # type: (Session, Any, str, Optional[float], int) -> None
+    """Re-check the per-worker ceiling for a live scale/rescale.
+
+    Without this, scale and rescale are a straight bypass of the submit guard: a
+    run admitted inside the ceiling can be scaled DOWN in workers (same rate over
+    fewer slots) or rescaled UP in rate (same slots, bigger share) into a
+    per-worker share that :func:`run_spec` would have refused with 422. Resolve
+    the ceiling exactly as submit does (built-in table + env + the run's fleet
+    config) so the two can never disagree, and raise the same error shape.
+    """
+    per_worker = _per_worker_share(rate_mode, rate_value, workers)
+    if per_worker is None:
+        return  # count_interval (or no rate): no rate ceiling applies
+    snap = run.spec_snapshot_json or {}
+    spec = db.get(Spec, run.spec_id)
+    engine = snap.get("engine") or (spec.engine if spec is not None else "eventgen")
+    fleet_name = snap.get("fleet") or (spec.fleet if spec is not None else None)
+    fleet_row = None
+    if fleet_name:
+        fleet_row = db.execute(
+            select(Fleet).where(Fleet.name == fleet_name)).scalars().first()
+    bytes_per_event = None
+    if spec is not None:
+        bytes_per_event = _spec_bytes_per_event(db, spec, db.get(Pack, spec.pack_id))
+    check = ceilings.check_slice(
+        rate_mode, per_worker, bytes_per_event=bytes_per_event, engine=engine,
+        ceilings=ceilings.resolve_ceilings(
+            engine, settings=get_settings(),
+            fleet_config=fleet_row.config_json if fleet_row is not None else None))
+    if not check.ok:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "slice_exceeds_ceiling",
+                "suggested_workers": check.suggested_workers,
+                "limiting_factor": check.limiting_factor,
+                "detail": check.detail,
+            },
+        )
 
 
 def _per_worker_share(rate_mode, rate_value, workers):

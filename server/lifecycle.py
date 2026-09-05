@@ -2522,15 +2522,26 @@ def seed_fleets(db, settings=None):
                 )
                 for (key, operator, value, effect) in settings.k8s_tolerations
             ]
+        # Fleet-level default worker-pod resources (env K8S_WORKER_CPU_REQUEST
+        # etc.): without one, worker Jobs carry no resources block at all, so the
+        # scheduler has no signal and a large fleet packs unpredictably. A spec's
+        # driver_opts.resources still overrides it per run.
+        from .config import resources_block
+
+        worker_resources = resources_block(settings.k8s_worker_resources)
+        if worker_resources:
+            k8s_config["resources"] = worker_resources
         db.add(Fleet(
             name="k8s-local",
             driver="k8s",
             config_json=k8s_config,
         ))
-        log.info("seeded fleet k8s-local (namespace %s, node_selector %s, tolerations %s)",
+        log.info("seeded fleet k8s-local (namespace %s, node_selector %s, "
+                 "tolerations %s, resources %s)",
                  settings.k8s_namespace,
                  k8s_config.get("node_selector") or "none",
-                 k8s_config.get("tolerations") or "none")
+                 k8s_config.get("tolerations") or "none",
+                 k8s_config.get("resources") or "none")
     # The in-process fleet (workers as subprocesses of the control plane) is
     # opt-in: seeded only under STOKER_INPROCESS_FLEET so the picker stays
     # clean for deployments that never use it. If the flag is later removed,

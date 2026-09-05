@@ -124,3 +124,79 @@ def test_progress_never_triggers_the_watchdog(monkeypatch):
     _run(agent, control)
 
     engine.restart.assert_not_called()
+
+
+# --------------------------------------------------------------------------- #
+# Watchdog SCOPE: gated (agent-paced) runs of any non-metrics engine.
+# --------------------------------------------------------------------------- #
+
+def _slice_for(engine, share):
+    return SpecSlice.from_claim({
+        "run_id": 1, "slot": 0, "total_workers": 3, "lease_id": "le",
+        "engine": engine,
+        "bundle": {"url": "/tmp/pack"}, "share": share,
+        "hec": {"url": "http://h:8088", "index": "loadtest"},
+        "telemetry": {"interval_s": 0.01}, "released": True,
+    })
+
+
+def _run_slice(agent, control, sl):
+    cpu = mock.Mock()
+    cpu.sample.return_value = 0.0
+    agent._run_loop(control, sl, None, cpu, mock.Mock(), "/tmp/x.conf", mock.Mock())
+
+
+def _silent(monkeypatch, stop_after=None):
+    """A wired agent whose socket never progresses. ``stop_after`` ends the loop
+    from the heartbeat after N ticks (for cases where NO restart is expected)."""
+    agent = _agent()
+    engine = mock.Mock()
+    engine.is_alive.return_value = True
+    engine.restart.side_effect = lambda: agent._drain_event.set()
+    control = mock.Mock()
+    control.deadman_expired.return_value = False
+    if stop_after is None:
+        control.heartbeat.return_value = None
+    else:
+        ticks = {"n": 0}
+
+        def _hb(_payload):
+            ticks["n"] += 1
+            if ticks["n"] >= stop_after:
+                agent._drain_event.set()
+            return None
+
+        control.heartbeat.side_effect = _hb
+    _wire(agent, engine, control)
+    _fast_monotonic(monkeypatch)
+    return agent, engine, control
+
+
+def test_gated_rawreplay_stall_restarts_the_engine(monkeypatch):
+    """Regression: rawreplay in rate mode (gated) is watched too.
+
+    The scope used to be ``engine == "eventgen"``, so a wedged rawreplay engine
+    sat silently at 0 events forever with nothing to recover it -- which is what
+    made the pre-T0 warm-up wedge invisible.
+    """
+    agent, engine, control = _silent(monkeypatch)
+    _run_slice(agent, control, _slice_for("rawreplay", {"eps": 100}))
+    engine.restart.assert_called_once()
+
+
+def test_ungated_count_interval_run_is_not_watched(monkeypatch):
+    """An engine-paced (count_interval) run may legitimately idle longer than the
+    zero-output window between emissions; restarting it would kill a healthy
+    engine. Silence there is not a stall."""
+    agent, engine, control = _silent(monkeypatch, stop_after=3)
+    _run_slice(agent, control, _slice_for("eventgen", {"count": 10}))
+    engine.restart.assert_not_called()
+
+
+def test_metrics_run_is_never_watched(monkeypatch):
+    """Metrics self-paces on a wall-clock grid (a resolution above the window is
+    normal) and a backfill sweep legitimately finishes and exits, so it is
+    excluded even when the run is gated."""
+    agent, engine, control = _silent(monkeypatch, stop_after=3)
+    _run_slice(agent, control, _slice_for("metrics", {"eps": 5000}))
+    engine.restart.assert_not_called()

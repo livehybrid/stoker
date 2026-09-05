@@ -1182,3 +1182,51 @@ def test_from_fleet_config_namespace_defaults_from_settings(settings):
     # An explicit per-fleet namespace still wins over the process setting.
     assert K8sDriver.from_fleet_config(
         {"namespace": "explicit"})._namespace == "explicit"
+
+
+_RESOURCES = {"requests": {"cpu": "500m", "memory": "256Mi"}}
+
+
+def test_k8s_create_fleet_default_resources_reach_pod_spec():
+    """A fleet-level resources default (seeded from K8S_WORKER_* env) sizes every
+    run's worker pods, so a large fleet does not schedule with no CPU signal."""
+    batch, core = _mock_apis()
+    driver = K8sDriver(namespace="stoker", batch_api=batch, core_api=core,
+                       resources=_RESOURCES)
+
+    driver.create(_snapshot(driver_opts={}), 2)
+
+    container = _created_job_body(batch)["spec"]["template"]["spec"]["containers"][0]
+    assert container["resources"] == _RESOURCES
+
+
+def test_k8s_create_spec_resources_override_fleet_default():
+    """The spec's driver_opts.resources wins outright -- no merging."""
+    batch, core = _mock_apis()
+    driver = K8sDriver(namespace="stoker", batch_api=batch, core_api=core,
+                       resources=_RESOURCES)
+    spec_res = {"requests": {"cpu": "2"}, "limits": {"cpu": "4"}}
+
+    driver.create(_snapshot(driver_opts={"resources": spec_res}), 2)
+
+    container = _created_job_body(batch)["spec"]["template"]["spec"]["containers"][0]
+    assert container["resources"] == spec_res
+
+
+def test_k8s_create_no_resources_anywhere_leaves_container_clean():
+    """Unset everywhere keeps the pre-existing behaviour: no resources block."""
+    batch, core = _mock_apis()
+    driver = _driver(batch, core)
+
+    driver.create(_snapshot(driver_opts={}), 2)
+
+    container = _created_job_body(batch)["spec"]["template"]["spec"]["containers"][0]
+    assert "resources" not in container
+
+
+def test_from_fleet_config_resources_reach_driver(settings):
+    driver = K8sDriver.from_fleet_config({"namespace": "ns", "resources": _RESOURCES})
+    assert driver._resources == _RESOURCES
+    # A malformed (non-dict) value is ignored rather than crashing the build.
+    assert K8sDriver.from_fleet_config(
+        {"namespace": "ns", "resources": "500m"})._resources is None

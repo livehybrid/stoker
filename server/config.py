@@ -214,6 +214,17 @@ class Settings:
     # ``driver_opts.tolerations`` overrides per run. nodeSelector chooses the
     # node; the toleration is what lets a tainted (reserved) node accept the pod.
     k8s_tolerations: Tuple[Tuple[str, str, str, str], ...] = ()
+    # Default worker-pod resources for the seeded ``k8s-local`` fleet, as
+    # (cpu_request, memory_request, cpu_limit, memory_limit); "" = omit that one.
+    # From K8S_WORKER_CPU_REQUEST / K8S_WORKER_MEMORY_REQUEST /
+    # K8S_WORKER_CPU_LIMIT / K8S_WORKER_MEMORY_LIMIT. Unset (the default) keeps
+    # the pre-existing behaviour: worker Jobs carry NO resources block at all, so
+    # the scheduler has no signal and a big fleet packs unpredictably (throughput
+    # per worker then varies with whoever else lands on the node). Setting a CPU
+    # REQUEST is the useful knob: eventgen is one GIL-bound core, so a request
+    # reserves that share without capping throughput the way a limit would. A
+    # spec's ``driver_opts.resources`` still overrides the whole block per run.
+    k8s_worker_resources: Tuple[str, str, str, str] = ("", "", "", "")
 
     # --- In-process fleet (workers inside the control-plane container) ------- #
     # Opt-in (env STOKER_INPROCESS_FLEET): seeds the ``inprocess-local`` fleet,
@@ -383,6 +394,49 @@ def _parse_tolerations(env):
         operator = "Equal" if eq else "Exists"
         quads.append((key, operator, value, effect))
     return tuple(quads)
+
+
+def _parse_worker_resources(env):
+    # type: (Mapping[str, str]) -> Tuple[str, str, str, str]
+    """Read the worker-pod resource defaults as (cpu_req, mem_req, cpu_lim, mem_lim).
+
+    Values are Kubernetes quantity strings passed through verbatim (``500m``,
+    ``2``, ``256Mi``, ``1Gi``); "" means "omit that entry". Kept as a flat quad so
+    the frozen dataclass stays hashable; :func:`resources_block` renders the
+    nested requests/limits dict the pod spec wants.
+    """
+    return (
+        (_get(env, "K8S_WORKER_CPU_REQUEST") or "").strip(),
+        (_get(env, "K8S_WORKER_MEMORY_REQUEST") or "").strip(),
+        (_get(env, "K8S_WORKER_CPU_LIMIT") or "").strip(),
+        (_get(env, "K8S_WORKER_MEMORY_LIMIT") or "").strip(),
+    )
+
+
+def resources_block(quad):
+    # type: (Tuple[str, str, str, str]) -> Dict[str, Dict[str, str]]
+    """Render a (cpu_req, mem_req, cpu_lim, mem_lim) quad as a k8s resources dict.
+
+    Empty entries are omitted; an all-empty quad yields ``{}`` so the caller can
+    leave the pod spec's ``resources`` absent entirely (the prior behaviour).
+    """
+    cpu_req, mem_req, cpu_lim, mem_lim = quad
+    block = {}  # type: Dict[str, Dict[str, str]]
+    requests = {}  # type: Dict[str, str]
+    limits = {}  # type: Dict[str, str]
+    if cpu_req:
+        requests["cpu"] = cpu_req
+    if mem_req:
+        requests["memory"] = mem_req
+    if cpu_lim:
+        limits["cpu"] = cpu_lim
+    if mem_lim:
+        limits["memory"] = mem_lim
+    if requests:
+        block["requests"] = requests
+    if limits:
+        block["limits"] = limits
+    return block
 
 
 def _parse_engine_ceilings(env):
@@ -563,6 +617,7 @@ def load_settings(env=None):
         or DEFAULT_K8S_NAMESPACE,
         k8s_node_selector=_parse_node_selector(env),
         k8s_tolerations=_parse_tolerations(env),
+        k8s_worker_resources=_parse_worker_resources(env),
         inprocess_fleet_enabled=_get_bool(env, "STOKER_INPROCESS_FLEET", False),
         inprocess_max_workers=max(1, _get_int(
             env, "STOKER_INPROCESS_MAX_WORKERS", DEFAULT_INPROCESS_MAX_WORKERS)),

@@ -218,3 +218,64 @@ def test_fleets_report_effective_ceilings(client, db_session, settings, fake_dri
     # The override key itself is on the public config allowlist (plain number,
     # never a credential), so the operator can see WHY the fleet differs.
     assert fleets["fake-local"]["config"]["max_gb_day_per_worker"] == 200
+
+
+# --------------------------------------------------------------------------- #
+# scale / rescale must re-check the SAME ceiling the submit guard applies.
+# Without this they are a straight bypass: a run admitted inside the ceiling can
+# be scaled down (same rate, fewer slots) or rescaled up (bigger share, same
+# slots) into a per-worker share POST /specs/{id}/run would have refused.
+# --------------------------------------------------------------------------- #
+
+def _provisioned_run(db_session, settings, fake_driver, make_pack, workers=4,
+                     rate_value=8000.0):
+    """A run comfortably inside the ceiling: 8000 eps over 4 workers = 2000 each
+    (the 120 B/event pack puts the gb_day bound at ~2400 eps/worker)."""
+    ctx = _helpers.full_run(db_session, make_pack(), settings,
+                            driver=fake_driver, workers=workers,
+                            rate_mode="eps", rate_value=rate_value)
+    return ctx["run"]
+
+
+def test_scale_down_past_the_ceiling_is_rejected(client, db_session, settings,
+                                                 fake_driver, make_pack):
+    """Scaling 4 -> 1 puts the whole 8000 eps on one worker: over the ceiling."""
+    run = _provisioned_run(db_session, settings, fake_driver, make_pack)
+
+    resp = client.post("/api/runs/%d/scale" % run.id, json={"workers": 1})
+
+    assert resp.status_code == 422, resp.text
+    body = resp.json()["detail"]
+    assert body["error"] == "slice_exceeds_ceiling"
+    assert body["limiting_factor"] in ("eps", "gb_day")
+
+
+def test_scale_within_the_ceiling_still_allowed(client, db_session, settings,
+                                                fake_driver, make_pack):
+    """The guard only rejects what the submit guard would: 4 -> 8 is fine."""
+    run = _provisioned_run(db_session, settings, fake_driver, make_pack)
+
+    resp = client.post("/api/runs/%d/scale" % run.id, json={"workers": 8})
+
+    assert resp.status_code == 200, resp.text
+
+
+def test_rescale_past_the_ceiling_is_rejected(client, db_session, settings,
+                                              fake_driver, make_pack):
+    """Raising the rate at the same worker count can exceed the ceiling too."""
+    run = _provisioned_run(db_session, settings, fake_driver, make_pack)
+
+    resp = client.post("/api/runs/%d/rescale" % run.id,
+                       json={"rate_value": 40000.0})
+
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["detail"]["error"] == "slice_exceeds_ceiling"
+
+
+def test_rescale_within_the_ceiling_still_allowed(client, db_session, settings,
+                                                  fake_driver, make_pack):
+    run = _provisioned_run(db_session, settings, fake_driver, make_pack)
+
+    resp = client.post("/api/runs/%d/rescale" % run.id, json={"rate_value": 4000.0})
+
+    assert resp.status_code == 200, resp.text

@@ -110,7 +110,7 @@ class K8sDriver(object):
 
     def __init__(self, namespace="stoker", batch_api=None, core_api=None,
                  context=None, in_cluster=None, node_selector=None,
-                 tolerations=None):
+                 tolerations=None, resources=None):
         # type: (str, Optional[Any], Optional[Any], Optional[str], Optional[bool], Optional[Dict[str, str]], Optional[List[Dict[str, str]]]) -> None
         """
         Args:
@@ -137,6 +137,9 @@ class K8sDriver(object):
         self._in_cluster = in_cluster
         self._node_selector = dict(node_selector) if node_selector else None
         self._tolerations = _clean_tolerations(tolerations)
+        # Fleet-level default worker-pod resources (seeded from
+        # K8S_WORKER_CPU_REQUEST etc.); a run's driver_opts.resources overrides.
+        self._resources = dict(resources) if resources else None
         # Injectable for unit tests (mocks); built lazily from kubeconfig when
         # absent so a long-lived driver picks up the configured context.
         self._batch = batch_api
@@ -167,8 +170,12 @@ class K8sDriver(object):
         tolerations = config.get("tolerations")
         if not isinstance(tolerations, list):
             tolerations = None
+        resources = config.get("resources")
+        if not isinstance(resources, dict):
+            resources = None
         return cls(namespace=namespace, context=context, in_cluster=in_cluster,
-                   node_selector=node_selector, tolerations=tolerations)
+                   node_selector=node_selector, tolerations=tolerations,
+                   resources=resources)
 
     # -- lazy client construction (never hit in unit tests) --------------- #
 
@@ -465,9 +472,15 @@ class K8sDriver(object):
             "imagePullPolicy": "Always",
             "env": env,
         }  # type: Dict[str, Any]
+        # Resources: the spec's driver_opts.resources wins outright; the
+        # fleet-level default (config_json.resources, seeded from the
+        # K8S_WORKER_* env) fills in when the spec says nothing. Same precedence
+        # as nodeSelector/tolerations -- no merging.
         resources = opts.get("resources")
+        if not (isinstance(resources, dict) and resources):
+            resources = self._resources
         if isinstance(resources, dict) and resources:
-            container["resources"] = resources
+            container["resources"] = dict(resources)
 
         pod_spec = {
             "restartPolicy": "OnFailure",

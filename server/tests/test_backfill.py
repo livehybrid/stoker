@@ -158,3 +158,31 @@ def test_normal_run_carries_no_backfill(client, db_session, settings, make_pack,
     lease = db_session.execute(
         select(WorkerLease).where(WorkerLease.run_id == r.id)).scalars().first()
     assert "backfill" not in lifecycle.build_slice(r, lease, settings=settings)
+
+
+def test_every_build_slice_key_is_declared_on_the_claim_response_model(
+        db_session, settings, make_pack, fake_driver):
+    """Generic guard: a FastAPI ``response_model`` is an ALLOWLIST.
+
+    ``build_slice`` hands the claim route a plain dict; any key not declared on
+    :class:`SpecSliceOut` is silently dropped from the wire, and the worker then
+    behaves as if the control plane never sent it. That is exactly how the
+    ``backfill`` window was lost (runs looked fine and delivered a live grid).
+    Rather than remember to add a field to two places, assert the invariant: the
+    keys build_slice emits must ALL be declared on the response model. Adding a
+    slice field without declaring it fails here instead of silently in prod.
+    """
+    from server.schemas import SpecSliceOut
+
+    ctx = _helpers.full_run(db_session, make_pack(), settings, driver=fake_driver,
+                            workers=2, rate_mode="eps", rate_value=100.0)
+    run = ctx["run"]
+    lease = _helpers.leases_by_slot(db_session, run)[0]
+    slice_doc = lifecycle.build_slice(run, lease, settings=settings)
+
+    declared = set(SpecSliceOut.model_fields)
+    undeclared = set(slice_doc) - declared
+    assert not undeclared, (
+        "build_slice emits %s, which SpecSliceOut does not declare; the claim "
+        "response_model will silently DROP these keys from every claim. Add "
+        "them to SpecSliceOut." % sorted(undeclared))

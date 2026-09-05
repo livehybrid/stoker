@@ -502,12 +502,28 @@ class Agent(object):
         # type: (Any, SpecSlice, Optional[float], CpuTracker, Metrics, str, Any) -> None
         interval = sl.telemetry_interval_s
         next_hb = time.monotonic() + interval
-        # Zero-output watchdog (eventgen only): a fresh fork can leave the engine
-        # alive but producing nothing (a non-deterministic multiprocessing hang),
-        # giving 0 eps with no error. Track socket progress and restart the engine
-        # in place if it stalls; the process-group stop() clears the hung tree.
+        # Zero-output watchdog: an engine can be alive but producing nothing (an
+        # eventgen multiprocessing fork hang, a rawreplay engine wedged on a
+        # stalled socket), giving 0 eps with no error and no recovery. Track
+        # socket progress and restart the engine in place if it stalls; the
+        # process-group stop() clears the hung tree.
+        #
+        # Scope is "the run is GATED (agent-paced) and the engine is not metrics",
+        # not "engine == eventgen":
+        #   * a gated run paces delivery itself, so the engine is expected to feed
+        #     the socket CONTINUOUSLY -- silence really is a stall. This now also
+        #     covers rawreplay in rate mode, which previously had no watchdog at
+        #     all and so could sit silently at 0 forever;
+        #   * an UNGATED run (count_interval eventgen, rawreplay cadence) is
+        #     engine-paced and may legitimately idle longer than the window
+        #     between emissions, so watching it would false-positive and restart a
+        #     healthy engine;
+        #   * metrics is excluded outright: it self-paces on a wall-clock grid
+        #     (a resolution above the window is normal) and a backfill sweep
+        #     legitimately finishes and exits.
         zero_out_s = self._cfg.zero_output_s if self._cfg else 0.0
-        watchdog_on = (zero_out_s > 0 and sl.engine == "eventgen"
+        gated_run = sl.rate_mode != "count_interval"
+        watchdog_on = (zero_out_s > 0 and gated_run and sl.engine != "metrics"
                        and self._sock is not None and self._engine is not None)
         last_received = self._sock.received if self._sock else 0
         last_progress = time.monotonic()
