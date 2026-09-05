@@ -63,6 +63,19 @@ DEFAULT_DOGFOOD_METRICS_INTERVAL_S = 30.0
 # and how long that must hold before the supervisor drains the run.
 DEFAULT_BACKPRESSURE_MIN_FAILED_FRACTION = 0.5
 DEFAULT_BACKPRESSURE_SUSTAINED_S = 60.0
+# What the supervisor DOES when the target is sustained-failing.
+#   step_down (default) — multiply the run rate by BACKPRESSURE_STEP_FACTOR and
+#     keep generating, so the run settles at a rate the target can actually take
+#     instead of stopping the campaign outright. Repeats while the target keeps
+#     failing, until the floor.
+#   drain — the original behaviour: stop the run gracefully.
+# At/below the floor (BACKPRESSURE_MIN_RATE_FRACTION of the rate the operator
+# originally asked for) a still-failing run DRAINS: if the target cannot take
+# even a tenth of the requested load, quietly trickling is not useful.
+BACKPRESSURE_ACTIONS = ("step_down", "drain")
+DEFAULT_BACKPRESSURE_ACTION = "step_down"
+DEFAULT_BACKPRESSURE_STEP_FACTOR = 0.5
+DEFAULT_BACKPRESSURE_MIN_RATE_FRACTION = 0.1
 
 # rawreplay (Piston) dataset fetch: a pack.yaml `dataset_url` (e.g. an
 # attack_data capture) is downloaded at bundle-build time. https only, capped so
@@ -257,6 +270,13 @@ class Settings:
     backpressure_drain_enabled: bool = False
     backpressure_min_failed_fraction: float = DEFAULT_BACKPRESSURE_MIN_FAILED_FRACTION
     backpressure_sustained_s: float = DEFAULT_BACKPRESSURE_SUSTAINED_S
+    # Response to a sustained-failing target: step_down (default) | drain.
+    backpressure_action: str = DEFAULT_BACKPRESSURE_ACTION
+    # Multiplier applied to the run rate on each step (0 < f < 1).
+    backpressure_step_factor: float = DEFAULT_BACKPRESSURE_STEP_FACTOR
+    # Floor, as a fraction of the ORIGINALLY requested rate; still failing at or
+    # below it escalates to a drain.
+    backpressure_min_rate_fraction: float = DEFAULT_BACKPRESSURE_MIN_RATE_FRACTION
 
     # --- Builtin packs ------------------------------------------------------- #
     # A directory of pack roots registered (and re-linted) at every boot, so the
@@ -460,6 +480,18 @@ def _parse_engine_ceilings(env):
     return tuple(sorted(entries))
 
 
+def _backpressure_action(env):
+    # type: (Mapping[str, str]) -> str
+    """Parse STOKER_BACKPRESSURE_ACTION; a bad value is a hard boot error."""
+    raw = (_get(env, "STOKER_BACKPRESSURE_ACTION")
+           or DEFAULT_BACKPRESSURE_ACTION).strip().lower()
+    if raw not in BACKPRESSURE_ACTIONS:
+        raise ConfigError(
+            "STOKER_BACKPRESSURE_ACTION must be one of %s, got %r"
+            % (", ".join(BACKPRESSURE_ACTIONS), raw))
+    return raw
+
+
 def _get_bool(env, key, default=False):
     # type: (Mapping[str, str], str, bool) -> bool
     """Parse a boolean env var (1/true/yes/on are true; unset -> default)."""
@@ -632,6 +664,13 @@ def load_settings(env=None):
         backpressure_sustained_s=_get_float(
             env, "STOKER_BACKPRESSURE_SUSTAINED_S",
             DEFAULT_BACKPRESSURE_SUSTAINED_S),
+        backpressure_action=_backpressure_action(env),
+        backpressure_step_factor=_get_float(
+            env, "STOKER_BACKPRESSURE_STEP_FACTOR",
+            DEFAULT_BACKPRESSURE_STEP_FACTOR),
+        backpressure_min_rate_fraction=_get_float(
+            env, "STOKER_BACKPRESSURE_MIN_RATE_FRACTION",
+            DEFAULT_BACKPRESSURE_MIN_RATE_FRACTION),
     )
 
 

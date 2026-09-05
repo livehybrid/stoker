@@ -1,8 +1,11 @@
 """Target-health backpressure: ``lifecycle._check_backpressure`` (opt-in).
 
 When STOKER_BACKPRESSURE_DRAIN is on, a run whose HEC target is failing to
-accept data (recent 5xx / timeouts across the fleet, sustained) is DRAINED and
-its target flagged red. Off by default: no run changes behaviour unless enabled.
+accept data (recent 5xx / timeouts across the fleet, sustained) is acted on.
+STOKER_BACKPRESSURE_ACTION picks the response: ``step_down`` (default) halves the
+run rate so the campaign settles at a rate the target can take, escalating to a
+drain at the floor; ``drain`` stops the run and flags the target red. Off by
+default: no run changes behaviour unless enabled.
 """
 
 from __future__ import annotations
@@ -61,8 +64,10 @@ def test_disabled_by_default_never_drains(db_session, make_pack, settings):
 
 
 def test_sustained_failure_drains_and_flags_target(db_session, make_pack, settings):
+    """The explicit ``drain`` action still stops the run (step_down is default)."""
     db = db_session
-    st = _bp_settings(settings, backpressure_sustained_s=60.0)
+    st = _bp_settings(settings, backpressure_sustained_s=60.0,
+                      backpressure_action="drain")
     run = _running_run(db, make_pack, st)
     leases = lifecycle.get_run_leases(db, run)
     # A failing delta: +5 success, +95 fail => 95% failed, over the 50% bar.
@@ -146,3 +151,106 @@ def test_single_sample_slot_contributes_nothing(db_session, make_pack, settings)
     lifecycle._check_backpressure(db, run, lifecycle.get_run_leases(db, run),
                                   utcnow() + datetime.timedelta(seconds=120), settings=st)
     assert run.state == lifecycle.STATE_RUNNING
+
+
+# --------------------------------------------------------------------------- #
+# step_down (the default action): keep the campaign alive at a rate the target
+# can actually take, and only drain once that stops being possible.
+# --------------------------------------------------------------------------- #
+
+def _failing(db, run, slot=0):
+    _two_samples(db, run, slot,
+                 prev=dict(hec_2xx=100, hec_5xx=0, hec_timeouts=0),
+                 latest=dict(hec_2xx=105, hec_5xx=90, hec_timeouts=5))
+
+
+def _events(db, run, kind):
+    return [e for e in lifecycle.run_events(db, run)] if hasattr(lifecycle, "run_events") \
+        else [e for e in run.events if e.kind == kind]
+
+
+def test_sustained_failure_steps_the_rate_down_instead_of_draining(
+        db_session, make_pack, settings):
+    """The default action halves the rate and keeps generating."""
+    db = db_session
+    st = _bp_settings(settings, backpressure_sustained_s=60.0)  # step_down default
+    run = _running_run(db, make_pack, st)
+    leases = lifecycle.get_run_leases(db, run)
+    _failing(db, run)
+
+    lifecycle._check_backpressure(db, run, leases, utcnow(), settings=st)  # clock
+    later = utcnow() + datetime.timedelta(seconds=61)
+    lifecycle._check_backpressure(db, run, leases, later, settings=st)
+
+    assert run.state == lifecycle.STATE_RUNNING, "step_down must not stop the run"
+    assert run.spec_snapshot_json["rate_value"] == 500.0   # 1000 * 0.5
+    assert run.spec_snapshot_json["backpressure_original_rate"] == 1000.0
+    assert run.degraded is True
+    # The new share was pushed to the live worker (retarget), not just recorded.
+    assert any(lifecycle.RETARGET_MARKER in (l.share_json or {})
+               for l in lifecycle.get_run_leases(db, run))
+
+
+def test_step_down_happens_once_per_sustained_window(db_session, make_pack, settings):
+    """A step resets the streak clock, so the rate cannot collapse to the floor
+    on consecutive supervisor ticks."""
+    db = db_session
+    st = _bp_settings(settings, backpressure_sustained_s=60.0)
+    run = _running_run(db, make_pack, st)
+    leases = lifecycle.get_run_leases(db, run)
+    _failing(db, run)
+
+    lifecycle._check_backpressure(db, run, leases, utcnow(), settings=st)
+    later = utcnow() + datetime.timedelta(seconds=61)
+    lifecycle._check_backpressure(db, run, leases, later, settings=st)
+    assert run.spec_snapshot_json["rate_value"] == 500.0
+
+    # Immediately again: still failing, but the window has restarted -> no step.
+    lifecycle._check_backpressure(db, run, leases, later, settings=st)
+    assert run.spec_snapshot_json["rate_value"] == 500.0
+
+
+def test_still_failing_at_the_floor_escalates_to_a_drain(db_session, make_pack, settings):
+    """Trickling on is not useful: at the floor, a failing target drains."""
+    db = db_session
+    st = _bp_settings(settings, backpressure_sustained_s=60.0)
+    run = _running_run(db, make_pack, st)
+    # Already stepped down to the floor (1000 * 0.1 = 100); the next halving
+    # would be 62.5, below it.
+    snap = dict(run.spec_snapshot_json)
+    snap["rate_value"] = 125.0
+    snap["backpressure_original_rate"] = 1000.0
+    run.spec_snapshot_json = snap
+    db.flush()
+    leases = lifecycle.get_run_leases(db, run)
+    _failing(db, run)
+
+    lifecycle._check_backpressure(db, run, leases, utcnow(), settings=st)
+    later = utcnow() + datetime.timedelta(seconds=61)
+    lifecycle._check_backpressure(db, run, leases, later, settings=st)
+
+    assert run.state == lifecycle.STATE_DRAINING
+    assert run.end_reason == "backpressure-drain"
+
+
+def test_conf_paced_run_has_no_rate_to_step_so_it_drains(db_session, make_pack, settings):
+    """count_interval is paced by the pack's conf, not a run rate: nothing to
+    step, so the response falls back to draining."""
+    db = db_session
+    st = _bp_settings(settings, backpressure_sustained_s=60.0)
+    ctx = H.full_run(db, make_pack(), settings, workers=1,
+                     rate_mode="count_interval", rate_value=None,
+                     state=lifecycle.STATE_RUNNING)
+    run = ctx["run"]
+    run.t0 = utcnow() - datetime.timedelta(seconds=30)
+    for lease in lifecycle.get_run_leases(db, run):
+        lease.state = lifecycle.LEASE_RUNNING
+    db.flush()
+    leases = lifecycle.get_run_leases(db, run)
+    _failing(db, run)
+
+    lifecycle._check_backpressure(db, run, leases, utcnow(), settings=st)
+    later = utcnow() + datetime.timedelta(seconds=61)
+    lifecycle._check_backpressure(db, run, leases, later, settings=st)
+
+    assert run.state == lifecycle.STATE_DRAINING

@@ -791,19 +791,27 @@ def _check_auto_abort(db, run, leases, now, drivers=None):
 
 def _check_backpressure(db, run, leases, now, settings=None):
     # type: (Session, Run, Sequence[WorkerLease], datetime.datetime, Optional[Settings]) -> None
-    """Drain a run whose HEC target is failing to accept data (opt-in).
+    """Respond to a HEC target that is failing to accept data (opt-in).
 
     Off unless ``STOKER_BACKPRESSURE_DRAIN``. When on: if the share of the
     fleet's *recent* delivery attempts that FAILED (5xx + timeouts, measured as
     the delta between each live slot's last two samples) meets
     ``backpressure_min_failed_fraction`` and that has held for
-    ``backpressure_sustained_s``, the run is DRAINED (a graceful stop — data
-    already sent stays valid), its target flagged red, and the decision recorded
-    on the audit trail. A single failing tick only starts the clock (a
-    ``backpressure_detected`` event); a subsequent healthy tick clears it, so a
-    transient blip never drains. Draining, not failing: the operator asked for
-    load, the target could not take it, and stopping cleanly is the safe
-    response — never a silent continue.
+    ``backpressure_sustained_s``, the supervisor acts. A single failing tick only
+    starts the clock (a ``backpressure_detected`` event); a subsequent healthy
+    tick clears it, so a transient blip never triggers anything.
+
+    The action is ``STOKER_BACKPRESSURE_ACTION``:
+
+    * ``step_down`` (default) — multiply the run rate by
+      ``backpressure_step_factor`` and keep generating, so the campaign settles
+      at a rate the target can actually take rather than stopping outright. One
+      step per sustained window (the step resets the streak clock). Escalates to
+      a drain once the run is at the floor and still failing, or when the run is
+      conf-paced (``count_interval``) and so has no rate to step.
+    * ``drain`` — stop the run gracefully, flag the target red.
+
+    Either way the decision is on the audit trail; never a silent continue.
     """
     if settings is None:
         settings = get_settings()
@@ -837,6 +845,13 @@ def _check_backpressure(db, run, leases, now, settings=None):
                      {"ok": ok, "failed": fail, "failed_fraction": frac})
         return
     if _seconds_between(since, now) >= settings.backpressure_sustained_s:
+        # Preferred response: keep the campaign alive at a rate the target can
+        # actually take. Falls through to the drain below when stepping does not
+        # apply (a conf-paced count_interval run has no rate to step) or the run
+        # is already at the floor and STILL failing.
+        if settings.backpressure_action == "step_down" and _step_down_for_backpressure(
+                db, run, ok, fail, frac, settings):
+            return
         transition_run(db, run, STATE_DRAINING,
                        {"reason": "target backpressure", "ok": ok, "failed": fail,
                         "failed_fraction": frac,
@@ -883,26 +898,78 @@ def _recent_delivery_deltas(db, run, live_slots):
 
 def _open_backpressure_since(db, run):
     # type: (Session, Run) -> Optional[datetime.datetime]
-    """Start instant of the current un-cleared backpressure streak, or None.
+    """Start instant of the current un-answered backpressure streak, or None.
 
     The earliest ``backpressure_detected`` after the most recent
-    ``backpressure_cleared`` (or ever, if never cleared). Events are the state,
-    so the sustained-duration test needs no extra columns.
+    ``backpressure_cleared`` **or ``backpressure_step_down``** (or ever, if
+    neither). Events are the state, so the sustained-duration test needs no extra
+    columns. A step-down resets the streak like a recovery does -- not because the
+    target is healthy, but because we have just ACTED: the next window must be
+    measured against the new, lower rate. Without that reset the streak would stay
+    open and the run would step again on every supervisor tick, collapsing to the
+    floor in seconds instead of one step per sustained window.
     """
     db.flush()  # autoflush is off; see _last_state_ts
+    resets = ("backpressure_cleared", "backpressure_step_down")
     rows = db.execute(
         select(RunEvent)
         .where(RunEvent.run_id == run.id,
-               RunEvent.kind.in_(("backpressure_detected", "backpressure_cleared")))
+               RunEvent.kind.in_(("backpressure_detected",) + resets))
         .order_by(RunEvent.ts.asc())
     ).scalars().all()
     since = None  # type: Optional[datetime.datetime]
     for event in rows:
-        if event.kind == "backpressure_cleared":
+        if event.kind in resets:
             since = None
         elif since is None:  # first detected of a fresh streak
             since = event.ts
     return since
+
+
+def _step_down_for_backpressure(db, run, ok, fail, frac, settings):
+    # type: (Session, Run, int, int, float, Settings) -> bool
+    """Halve (``backpressure_step_factor``) a struggling run's rate in place.
+
+    Returns True when the rate was stepped (the caller then leaves the run
+    RUNNING), False when stepping cannot help and the caller should drain:
+
+    * ``count_interval`` runs are conf-paced -- there is no run rate to step;
+    * the run is already at/below the floor (``backpressure_min_rate_fraction``
+      of the rate originally requested) and the target is STILL failing, so
+      trickling on is not useful.
+
+    The floor is measured against the ORIGINAL request, recorded on the snapshot
+    at the first step, so repeated steps cannot creep below it by halving a
+    halved rate. Re-apportionment and the ``retarget`` push to live workers reuse
+    :func:`rescale_run` (its ``driver`` argument is unused), so a supervisor step
+    and an operator rescale travel exactly the same path.
+    """
+    snap = dict(run.spec_snapshot_json or {})
+    rate_mode = snap.get("rate_mode") or "eps"
+    current = snap.get("rate_value")
+    if rate_mode == "count_interval" or not current or current <= 0:
+        return False
+    original = snap.get("backpressure_original_rate") or current
+    floor = float(original) * settings.backpressure_min_rate_fraction
+    new_rate = float(current) * settings.backpressure_step_factor
+    if new_rate < floor:
+        return False
+    # Record the original BEFORE rescale_run rewrites rate_value on the snapshot.
+    snap["backpressure_original_rate"] = float(original)
+    run.spec_snapshot_json = snap
+    rescale_run(db, run, None, new_rate, actor="supervisor")
+    # Not delivering what was asked for: say so on the run, not just in the log.
+    run.degraded = True
+    append_event(db, run, "backpressure_step_down",
+                 {"from_rate": float(current), "to_rate": new_rate,
+                  "original_rate": float(original), "floor_rate": floor,
+                  "rate_mode": rate_mode, "ok": ok, "failed": fail,
+                  "failed_fraction": frac,
+                  "sustained_s": settings.backpressure_sustained_s})
+    log.warning("run %s stepped down %s %.4g -> %.4g (target backpressure: "
+                "%d/%d recent attempts failed; floor %.4g)",
+                run.id, rate_mode, float(current), new_rate, fail, ok + fail, floor)
+    return True
 
 
 def _reap_draining(db, run, drivers, now):
