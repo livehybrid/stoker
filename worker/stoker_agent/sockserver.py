@@ -1,11 +1,17 @@
 """Unix socket listener: the agent side of the plugin protocol.
 
-Accepts one connection at a time (engine restarts reconnect), reads NDJSON
-envelopes, fills null metadata from the slice, gates each event on the
-token bucket (skipped in count_interval mode) and hands it to hec.put().
-Backpressure is structural: while the bucket is paused or hec.put blocks,
-the reader stops recv()ing, the kernel buffer fills and the plugin's
-blocking write stalls the engine.
+Accepts CONCURRENT connections (an engine restart reconnects; a multi-process
+engine opens one per generator process), each served by its own reader thread.
+Every reader does the same thing: read NDJSON envelopes, fill null metadata from
+the slice, gate each event on the shared token bucket (skipped in count_interval
+mode) and hand it to hec.put().
+
+Backpressure is structural and unchanged by the concurrency: while the bucket is
+paused or hec.put blocks, that reader stops recv()ing, its kernel buffer fills
+and the plugin's blocking write stalls the producer behind it. The bucket is the
+single thing that paces, so N producers still deliver exactly the run's rate --
+the extra connections buy parallel GENERATION (eventgen is GIL-bound, so one
+generator process is one core), not extra throughput past the bucket.
 """
 
 from __future__ import annotations
@@ -25,6 +31,10 @@ log = logging.getLogger("stoker.sock")
 
 _META_FIELDS = ("index", "sourcetype", "source", "host")
 _MAX_BUFFER = 4 * 1024 * 1024  # discard pathological unterminated lines
+# Listener backlog. Must exceed 1: a multi-process engine opens one connection
+# per generator process and they arrive together, so a backlog of 1 would refuse
+# (or stall) every producer after the first.
+_ACCEPT_BACKLOG = 64
 
 
 def make_filler(spec):
@@ -61,8 +71,17 @@ class SocketServer(object):
         self._gated = gated
         self._stop = threading.Event()
         self._listener = None  # type: Optional[socket.socket]
-        self._conn = None      # type: Optional[socket.socket]
+        # Every live connection and its reader thread. CONCURRENT by design: the
+        # engine may be several processes (eventgen `threading = process` forks a
+        # generator process per worker, and each opens its OWN connection because
+        # the output plugin's socket lives at module level). Serving one
+        # connection at a time would accept exactly one generator and leave the
+        # rest blocked on a socket nobody reads -- i.e. silently capped at one
+        # producer. Each reader is independent; they share the token bucket (which
+        # is the thing that actually paces) and the HEC queue.
+        self._conns = []       # type: list
         self._conn_lock = threading.Lock()
+        self._counter_lock = threading.Lock()
         self._thread = threading.Thread(target=self._run, name="stoker-sock",
                                         daemon=True)
         self.received = 0
@@ -74,7 +93,8 @@ class SocketServer(object):
             os.unlink(self._path)
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         listener.bind(self._path)
-        listener.listen(1)
+        # Backlog for several concurrent engine processes, not 1.
+        listener.listen(_ACCEPT_BACKLOG)
         listener.settimeout(0.5)
         self._listener = listener
         self._thread.start()
@@ -85,11 +105,13 @@ class SocketServer(object):
         dropped on drain (only the HEC queue is flushed, per contract).
 
         join_timeout_s bounds the reader join so the caller's drain deadline is
-        honoured (the agent clamps it against the remaining drain budget)."""
+        honoured (the agent clamps it against the remaining drain budget). Every
+        connection is shut down and every reader joined within that one budget."""
         self._stop.set()
         with self._conn_lock:
-            conn = self._conn
-        if conn is not None:
+            conns = [c for c, _t in self._conns]
+            threads = [t for _c, t in self._conns]
+        for conn in conns:
             try:
                 conn.shutdown(socket.SHUT_RDWR)
             except OSError:
@@ -99,8 +121,12 @@ class SocketServer(object):
                 self._listener.close()
             except OSError:
                 pass
+        deadline = time.monotonic() + max(0.0, join_timeout_s)
         if self._thread.is_alive():
-            self._thread.join(join_timeout_s)
+            self._thread.join(max(0.0, deadline - time.monotonic()))
+        for thread in threads:
+            if thread.is_alive():
+                thread.join(max(0.0, deadline - time.monotonic()))
         if os.path.exists(self._path):
             try:
                 os.unlink(self._path)
@@ -110,9 +136,17 @@ class SocketServer(object):
     def is_alive(self):
         return self._thread.is_alive()
 
+    @property
+    def connections(self):
+        # type: () -> int
+        """Live engine connections (>1 when the engine runs multi-process)."""
+        with self._conn_lock:
+            return len(self._conns)
+
     # -- internals -------------------------------------------------------
 
     def _run(self):
+        """Accept loop: one reader thread per connection."""
         try:
             while not self._stop.is_set():
                 try:
@@ -121,20 +155,38 @@ class SocketServer(object):
                     continue
                 except OSError:
                     return  # listener closed by stop()
+                thread = threading.Thread(
+                    target=self._serve, args=(conn,),
+                    name="stoker-sock-conn", daemon=True)
                 with self._conn_lock:
-                    self._conn = conn
-                try:
-                    self._read_stream(conn)
-                finally:
-                    with self._conn_lock:
-                        self._conn = None
-                    try:
-                        conn.close()
-                    except OSError:
-                        pass
+                    self._conns.append((conn, thread))
+                thread.start()
         finally:
             try:
                 self._listener.close()
+            except OSError:
+                pass
+
+    def _inc_received(self, n=1):
+        # type: (int) -> None
+        with self._counter_lock:
+            self.received += n
+
+    def _inc_malformed(self, n=1):
+        # type: (int) -> None
+        with self._counter_lock:
+            self.malformed += n
+
+    def _serve(self, conn):
+        # type: (socket.socket) -> None
+        """Read one connection to EOF (or drain), then retire it."""
+        try:
+            self._read_stream(conn)
+        finally:
+            with self._conn_lock:
+                self._conns = [(c, t) for (c, t) in self._conns if c is not conn]
+            try:
+                conn.close()
             except OSError:
                 pass
 
@@ -165,7 +217,7 @@ class SocketServer(object):
                     return  # bucket closed: draining
             if len(buf) > _MAX_BUFFER:
                 log.warning("discarding %d bytes of unterminated data", len(buf))
-                self.malformed += 1
+                self._inc_malformed()
                 buf = b""
 
     def _handle_line(self, line):
@@ -177,10 +229,10 @@ class SocketServer(object):
         try:
             envelope = json.loads(line.decode("utf-8"))
         except (ValueError, UnicodeDecodeError):
-            self.malformed += 1
+            self._inc_malformed()
             return True
         if not isinstance(envelope, dict) or envelope.get("event") is None:
-            self.malformed += 1
+            self._inc_malformed()
             return True
         envelope = self._fill(envelope)
         if self._gated:
@@ -192,5 +244,5 @@ class SocketServer(object):
             self._hec.put(envelope)
         except RuntimeError:
             return False  # hec stopped during drain
-        self.received += 1
+        self._inc_received()
         return True

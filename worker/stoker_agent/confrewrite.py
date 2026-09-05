@@ -219,6 +219,7 @@ def rewrite(parser, rate_mode, share_value, overdrive, sample_dir,
             # historical time across [now-window, now] for every event.
             parser.set(section, "earliest", "-%ds" % int(backfill_window_s))
             parser.set(section, "latest", "now")
+
     return parser
 
 

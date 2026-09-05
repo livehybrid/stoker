@@ -230,3 +230,52 @@ class TestSocketServer:
         assert os.path.exists(sock_path)
         server.stop()
         assert not os.path.exists(sock_path)
+
+
+def test_serves_several_concurrent_producers(tmp_path):
+    """Regression: the listener serves CONCURRENT connections.
+
+    It used to accept one at a time, so a multi-process engine (eventgen
+    `threading = process` forks a generator process per worker, each opening its
+    OWN connection because the plugin's socket is module-level) had exactly one
+    producer read and the rest blocked on a socket nobody was draining -- a
+    silent cap at one core's worth of generation. All producers must be read, and
+    every event must reach HEC exactly once.
+    """
+    path = str(tmp_path / "multi.sock")
+    hec, bucket = FakeHec(), open_bucket()
+    server = SocketServer(path, hec, bucket, make_filler(make_slice()))
+    server.start()
+    try:
+        producers, per_producer = 4, 25
+        conns = [socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                 for _ in range(producers)]
+        for c in conns:
+            c.connect(path)
+        assert wait_for(lambda: server.connections == producers), \
+            "expected %d concurrent connections, saw %d" % (producers, server.connections)
+
+        def send(idx, conn):
+            for n in range(per_producer):
+                line = json.dumps({"event": "p%d-%d" % (idx, n)}) + "\n"
+                conn.sendall(line.encode("utf-8"))
+
+        threads = [threading.Thread(target=send, args=(i, c))
+                   for i, c in enumerate(conns)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(10)
+
+        total = producers * per_producer
+        assert wait_for(lambda: len(hec) >= total), \
+            "read %d of %d events from %d producers" % (len(hec), total, producers)
+        # Every event exactly once, from every producer (counter is lock-guarded
+        # now that several reader threads increment it).
+        bodies = {e["event"] for e in hec.events}
+        assert len(bodies) == total
+        assert server.received == total
+        for c in conns:
+            c.close()
+    finally:
+        server.stop(join_timeout_s=5.0)

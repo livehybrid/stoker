@@ -70,3 +70,43 @@ The engine installs NO signal handlers (`signal` is only used to SIGKILL child p
 - a partial final NDJSON line on the socket is possible; the reader must tolerate a truncated last line
 - there is no engine-side drain: the agent drains its own queues after the engine is dead
 - SIGTERM then a short wait then SIGKILL is a safe stop sequence; expect no exit-code discipline from the engine on signals (0 only on natural completion)
+
+## `threading = process` (multiprocess generation) is NON-FUNCTIONAL
+
+**Do not reach for `threading = process` / `generatorWorkers > 1` to raise
+per-worker throughput.** It produces **zero events** in this vendored tree.
+
+Why it looks attractive: eventgen's defaults are `generatorWorkers = 1`,
+`threading = thread`, so every token substitution runs on one GIL-bound thread —
+one CPU core per worker no matter how large the pod. `threading = process` forks
+a generator process per worker and would use N cores.
+
+Two real blockers were removed and it *still* delivers nothing:
+
+1. The agent's output socket used to accept **one connection at a time**, so only
+   one generator process could ever be read. `sockserver` now accepts concurrent
+   connections (one reader thread each), which is correct in its own right (an
+   engine restart reconnects) and is covered by
+   `test_serves_several_concurrent_producers`.
+2. The output plugin's socket lived at module level, so a forked child inherited
+   the parent's connected socket and two processes interleaved writes into one
+   NDJSON stream. `_Connection` is now per-PID and reconnects after a fork.
+
+With both fixed, a controlled A/B (same harness, single worker, 8000 eps target,
+only `generatorWorkers` changed) still measured:
+
+| generatorWorkers | delivered |
+|---|---|
+| 1 (default, thread) | ~2300-5000 eps |
+| 4 (process)         | **0 eps** |
+
+So the defect is deeper in the vendored multiprocess path itself — the same
+class of rot as the dead native `backfill` rater. The knob was therefore NOT
+shipped: a config surface that silently kills a run is worse than no knob.
+
+**To actually raise per-worker throughput**, in order of leverage: give the pod
+more CPU (`K8S_WORKER_CPU_REQUEST`) and check it is not being throttled; simplify
+the sample (token substitution is the cost); use the `rawreplay` engine for pure
+volume (byte-for-byte replay skips templating entirely); or scale horizontally,
+which is what the rate apportionment is designed for. Reviving multiprocess
+generation means fixing the vendored engine, not the agent.

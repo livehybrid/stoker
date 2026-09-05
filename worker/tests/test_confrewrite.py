@@ -2,6 +2,8 @@ import textwrap
 
 import pytest
 
+from stoker_agent import confrewrite
+
 from stoker_agent.confrewrite import (ConfRewriteError, largest_remainder,
                                       load_conf, make_parser, rewrite,
                                       rewrite_file, sample_sections,
@@ -319,3 +321,4 @@ class TestRateMaps:
             """)
         conf = rewritten(tmp_path, "eps", 100, text=text)
         assert conf.get("r.csv", "hourOfDayRate") == '{"0": 0.3}'
+

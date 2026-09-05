@@ -28,18 +28,35 @@ class StokerSocketError(BaseException):
 
 
 class _Connection(object):
-    """Shared engine-wide socket. `dead` is sticky: once the stream fails
+    """Per-PROCESS engine socket. `dead` is sticky: once the stream fails
     the plugin never reconnects or resumes (the agent restarts the whole
-    engine), so no batch can ever be dropped quietly."""
+    engine), so no batch can ever be dropped quietly.
+
+    Per-process, not merely engine-wide, because eventgen's
+    ``threading = process`` mode FORKS a generator process per worker. A fork
+    copies this module's state, so a child would inherit the parent's already
+    connected socket object and two processes would interleave writes into one
+    stream (corrupting NDJSON), or inherit a sticky ``dead`` and refuse to run.
+    ``ensure`` therefore records the owning pid and reconnects from scratch when
+    it finds itself in a different process -- giving every generator process its
+    own connection, which the agent's listener accepts concurrently.
+    """
 
     def __init__(self):
         self.lock = threading.Lock()
         self.sock = None
         self.dead = False
+        self.pid = None
 
     def ensure(self):
         """Return the connected socket, connecting on first use.
         Caller must hold self.lock."""
+        if self.pid is not None and self.pid != os.getpid():
+            # Inherited across a fork: drop the parent's socket (do NOT close
+            # it -- the parent is still using that fd) and start our own.
+            self.sock = None
+            self.dead = False
+            self.pid = None
         if self.dead:
             raise StokerSocketError(
                 "stoker output socket previously failed; refusing to run"
@@ -61,6 +78,7 @@ class _Connection(object):
                     "cannot connect to agent socket {0}: {1}".format(path, exc)
                 )
             self.sock = sock
+            self.pid = os.getpid()
         return self.sock
 
     def fail(self, exc):
@@ -87,6 +105,7 @@ class _Connection(object):
                     pass
             self.sock = None
             self.dead = False
+            self.pid = None
 
 
 _CONNECTION = _Connection()
