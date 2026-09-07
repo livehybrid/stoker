@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import random
 import sys
 import threading
@@ -56,7 +57,7 @@ class ControlClient(object):
         session=None,     # type: Optional[requests.Session]
         clock=time.monotonic,   # type: Callable[[], float]
         sleep=time.sleep,       # type: Callable[[float], None]
-        request_timeout_s=10.0,  # type: float
+        request_timeout_s=None,  # type: Optional[float]
     ):
         self._base = control_url.rstrip("/") + "/api/agent/runs/%s" % run_id
         self._jwt = jwt
@@ -64,7 +65,17 @@ class ControlClient(object):
         self._session = session or requests.Session()
         self._clock = clock
         self._sleep = sleep
-        self._timeout = request_timeout_s
+        # A slow control plane during provisioning would otherwise blow the
+        # fixed 10 s read timeout, miss the ready ack, trip the 30 s fence, and
+        # leave the engine wedged for the rest of the run with no events and no
+        # failure reported. Tunable so an operator can ride that out.
+        if request_timeout_s is None:
+            try:
+                request_timeout_s = float(
+                    os.environ.get("STOKER_CONTROL_TIMEOUT_S", "30") or 30)
+            except (TypeError, ValueError):
+                request_timeout_s = 30.0
+        self._timeout = float(request_timeout_s)
         self._lock = threading.Lock()
         # Grace window starts at construction so a worker that never reaches
         # the control plane still hits the dead-man.
