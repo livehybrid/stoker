@@ -90,8 +90,36 @@ def test_releasing_run_completes_when_worker_reports_final(
     # The engine ran and exited before any post-T0 heartbeat promoted the run.
     lifecycle.record_final(db, run, lease.slot, {"reason": "engine-exit"}, [],
                            lease_id=lease.lease_id)
-    assert run.state == lifecycle.STATE_COMPLETED, \
+    assert run.state in lifecycle.TERMINAL_STATES, \
         "a releasing run whose worker finalises must not wedge in releasing"
+    # It exited having delivered nothing, which is a crash-at-start rather than
+    # a completion. Reporting that as `completed` is the failure mode this
+    # reclassification exists to stop: a green run with no data in it.
+    assert run.state == lifecycle.STATE_FAILED
+    assert run.end_reason == "no-events"
+
+
+def test_a_releasing_run_that_delivered_events_still_completes(
+        db_session, settings, fake_driver, make_pack):
+    """The guard against over-reaching: delivery is what separates the two.
+
+    Same shape as the crash-at-start above, with events in the final summary.
+    This must still be a completion, or the reclassification has swallowed the
+    good case with the bad one.
+    """
+    db = db_session
+    ctx = H.full_run(db, make_pack(), settings, driver=fake_driver, workers=1,
+                     state=lifecycle.STATE_RELEASING)
+    run = ctx["run"]
+    run.t0 = utcnow() + datetime.timedelta(seconds=2)
+    lease = H.leases_by_slot(db, run)[0]
+    lease.state = lifecycle.LEASE_READY
+    db.flush()
+    lifecycle.record_final(db, run, lease.slot,
+                           {"reason": "duration", "events_total": 12345}, [],
+                           lease_id=lease.lease_id)
+    assert run.state == lifecycle.STATE_COMPLETED
+    assert run.end_reason == "completed"
 
 
 # --- #6: a lost-only running run defers instead of failing instantly -------- #
@@ -112,9 +140,14 @@ def test_running_run_with_only_lost_lease_defers(
     assert lifecycle.maybe_complete_run(db, run) is False
     assert run.state == lifecycle.STATE_RUNNING
 
-    # Once a worker actually finishes (done), completion proceeds.
+    # Once a worker actually finishes (done), completion proceeds. The totals
+    # are set here because this test flips the lease state directly: in
+    # production a lease only reaches DONE through record_final, which folds
+    # the worker's summary, and a run that delivered nothing is a failure
+    # rather than a completion.
     lease = H.leases_by_slot(db, run)[0]
     lease.state = lifecycle.LEASE_DONE
+    run.totals_json = {"events_total": 5000}
     db.flush()
     assert lifecycle.maybe_complete_run(db, run) is True
     assert run.state == lifecycle.STATE_COMPLETED

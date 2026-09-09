@@ -1886,11 +1886,36 @@ def maybe_complete_run(db, run):
 
     reason = run.end_reason
     terminal = _terminal_state_for(run, reason, leases)
-    transition_run(db, run, terminal,
-                   {"leases": {"done": sum(1 for l in leases if l.state == LEASE_DONE),
-                               "lost": sum(1 for l in leases if l.state == LEASE_LOST)}},
-                   end_reason=reason or _default_end_reason(terminal, leases))
+    end_reason = reason or _default_end_reason(terminal, leases, run)
+    detail = {"leases": {"done": sum(1 for l in leases if l.state == LEASE_DONE),
+                         "lost": sum(1 for l in leases if l.state == LEASE_LOST)}}
+    if end_reason == "no-events":
+        # Say it in the run's own event log, where somebody looking at the run
+        # will actually read it, rather than only in the state field.
+        detail["events_total"] = 0
+        append_event(
+            db, run, "no_events",
+            {"message": "the workers finished cleanly but delivered no events; "
+                        "check the target's HEC URL, token and reachability from "
+                        "the workers"},
+        )
+    transition_run(db, run, terminal, detail, end_reason=end_reason)
     return True
+
+
+def delivered_events(run):
+    # type: (Run) -> int
+    """Events this run actually put into Splunk, from the folded totals.
+
+    ``events_total`` is incremented by the agent's HEC client on every accepted
+    send, so it is engine-independent: eventgen, rawreplay and the metrics
+    engines all deliver through the same client.
+    """
+    totals = run.totals_json or {}
+    try:
+        return int(totals.get("events_total") or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _terminal_state_for(run, reason, leases):
@@ -1900,7 +1925,8 @@ def _terminal_state_for(run, reason, leases):
     An operator stop ends ``stopped``; an auto-abort / provision failure ends
     ``failed``; anything else (natural duration end, drain-complete, all workers
     reported final) ends ``completed``. A run where *every* lease is lost (no
-    worker ever finalised) is a failure, not a completion.
+    worker ever finalised) is a failure, not a completion, and neither is a run
+    that finished cleanly having delivered nothing.
     """
     if reason in _FAILED_REASONS:
         return STATE_FAILED
@@ -1912,11 +1938,22 @@ def _terminal_state_for(run, reason, leases):
     lost = [l for l in leases if l.state == LEASE_LOST]
     if lost and not done:
         return STATE_FAILED
+    # Workers ran, exited cleanly, and put nothing into Splunk. That is a
+    # failure at the one thing a load generator exists to do, and reporting it
+    # as "completed" is worse than useless: it is a green run that produced no
+    # data, which is indistinguishable from a good run until somebody goes
+    # looking for the events. A misconfigured HEC endpoint, a token the
+    # indexers reject, an unreachable target: all of them land here.
+    #
+    # Only for a run that would otherwise be `completed`. A stopped run had no
+    # chance to deliver, and a failed run already says so.
+    if delivered_events(run) == 0:
+        return STATE_FAILED
     return STATE_COMPLETED
 
 
-def _default_end_reason(terminal, leases):
-    # type: (str, Sequence[WorkerLease]) -> str
+def _default_end_reason(terminal, leases, run=None):
+    # type: (str, Sequence[WorkerLease], Optional[Run]) -> str
     if terminal == STATE_COMPLETED:
         return "completed"
     if terminal == STATE_STOPPED:
@@ -1925,6 +1962,10 @@ def _default_end_reason(terminal, leases):
     lost = [l for l in leases if l.state == LEASE_LOST]
     if lost and not done:
         return "all-workers-lost"
+    # Named so the run page and any pipeline reading end_reason can tell this
+    # apart from a crash: the workers were fine, the delivery was not.
+    if run is not None and done and delivered_events(run) == 0:
+        return "no-events"
     return "failed"
 
 
@@ -1932,7 +1973,7 @@ def _default_end_reason(terminal, leases):
 _STOPPED_REASONS = frozenset(("operator-stop",))
 _FAILED_REASONS = frozenset((
     "provision-failed", "strict-release-timeout", "auto-abort-lost",
-    "auto-abort-auth", "all-workers-lost", "orphaned",
+    "auto-abort-auth", "all-workers-lost", "orphaned", "no-events",
 ))
 
 
@@ -2821,7 +2862,7 @@ __all__ = [
     # states
     "STATE_PENDING", "STATE_PREPARING", "STATE_PROVISIONING", "STATE_RELEASING",
     "STATE_RUNNING", "STATE_DRAINING", "STATE_COMPLETED", "STATE_STOPPED",
-    "STATE_FAILED", "TERMINAL_STATES",
+    "STATE_FAILED", "TERMINAL_STATES", "delivered_events",
     "LEASE_FREE", "LEASE_CLAIMED", "LEASE_READY", "LEASE_RUNNING", "LEASE_LOST",
     "LEASE_DONE",
     # windows

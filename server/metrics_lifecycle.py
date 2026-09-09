@@ -36,6 +36,8 @@ from __future__ import annotations
 import datetime
 import gzip
 import json
+import threading
+import time
 import logging
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -237,13 +239,122 @@ def _prune(db, prune_before, chunk):
 # Dogfood telemetry: HEC emitter + event builders.
 # --------------------------------------------------------------------------- #
 
-def emit_run_transition_event(run, from_state, to_state, settings=None, extra=None):
-    # type: (Run, Optional[str], str, Optional[Settings], Optional[Mapping[str, Any]]) -> None
+# --------------------------------------------------------------------------- #
+# Emitting off the caller's thread.
+#
+# A run transition must never wait on telemetry. It used to: the emit was
+# failure-isolated but not TIME-isolated, so when the dogfood HEC URL was not
+# reachable every transition paid the full HTTP timeout before continuing. With
+# a run making a dozen transitions through provisioning that is a control plane
+# that looks wedged, and the cause is invisible because nothing failed. It was
+# exactly that, pointed at an external ALB that the cluster's own egress could
+# not reach, which made a Stoker run sit there producing no events at all.
+#
+# So the POST happens on a single background thread. One thread, not a pool:
+# the events are ordered and there is no benefit to racing them. The backlog is
+# bounded because a wedged HEC must cost memory that is capped rather than
+# memory that grows, and a full backlog drops the event and says so once rather
+# than once per drop.
+# --------------------------------------------------------------------------- #
+
+_EMIT_MAX_PENDING = 64
+
+_emit_lock = threading.Lock()
+_emit_executor = None      # type: Optional[Any]
+_emit_pending = 0
+_emit_dropped = 0
+_emit_drop_logged = False
+
+
+def _emit_executor_locked():
+    # type: () -> Any
+    """The single emit thread, created on first use. Caller holds _emit_lock."""
+    global _emit_executor
+    if _emit_executor is None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        # Daemon threads: a pending telemetry POST must not hold up shutdown.
+        _emit_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="stoker-dogfood"
+        )
+    return _emit_executor
+
+
+def _emit_in_background(events, settings):
+    # type: (Any, Any) -> bool
+    """Queue ``events`` for the emit thread. False when the backlog is full."""
+    global _emit_pending, _emit_dropped, _emit_drop_logged
+
+    with _emit_lock:
+        if _emit_pending >= _EMIT_MAX_PENDING:
+            _emit_dropped += 1
+            if not _emit_drop_logged:
+                _emit_drop_logged = True
+                log.warning(
+                    "dogfood telemetry backlog full (%d pending); dropping events until "
+                    "it drains. The HEC endpoint is unreachable or too slow; this does "
+                    "not affect runs.", _EMIT_MAX_PENDING,
+                )
+            return False
+        executor = _emit_executor_locked()
+        _emit_pending += 1
+
+    def _work():
+        global _emit_pending, _emit_dropped, _emit_drop_logged
+        try:
+            emit_hec_events(events, settings=settings)
+        except Exception:  # pragma: no cover - emit_hec_events swallows its own
+            pass
+        finally:
+            with _emit_lock:
+                _emit_pending -= 1
+                if _emit_pending == 0 and _emit_dropped:
+                    log.warning(
+                        "dogfood telemetry backlog drained; %d event(s) were dropped",
+                        _emit_dropped,
+                    )
+                    _emit_dropped = 0
+                    _emit_drop_logged = False
+
+    try:
+        executor.submit(_work)
+    except RuntimeError:
+        # The interpreter is shutting down; a dropped telemetry event is the
+        # correct outcome.
+        with _emit_lock:
+            _emit_pending -= 1
+        return False
+    return True
+
+
+def flush_emits(timeout=5.0):
+    # type: (float) -> bool
+    """Wait for queued emits to finish. For tests and for a clean shutdown.
+
+    Returns False if the backlog was still draining when ``timeout`` expired.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with _emit_lock:
+            if _emit_pending == 0:
+                return True
+        time.sleep(0.01)
+    with _emit_lock:
+        return _emit_pending == 0
+
+
+def emit_run_transition_event(run, from_state, to_state, settings=None, extra=None,
+                              background=True):
+    # type: (Run, Optional[str], str, Optional[Settings], Optional[Mapping[str, Any]], bool) -> None
     """Emit a ``stoker:job`` event for a run state transition (dogfood only).
 
     A no-op unless ``settings.dogfood_enabled``. Best-effort: a HEC failure is
     swallowed. Never raises into the caller (``lifecycle.transition_run``) and
     never logs the token.
+
+    The POST happens on a background thread, so a slow or unreachable HEC costs
+    the transition nothing. Pass ``background=False`` to emit inline, which is
+    what the tests do so they can assert on the result.
     """
     if settings is None:
         settings = get_settings()
@@ -261,7 +372,10 @@ def emit_run_transition_event(run, from_state, to_state, settings=None, extra=No
     if extra:
         body.update(dict(extra))
     event = _hec_envelope("stoker:job", body, run=run, settings=settings)
-    emit_hec_events([event], settings=settings)
+    if background:
+        _emit_in_background([event], settings)
+    else:
+        emit_hec_events([event], settings=settings)
 
 
 def emit_run_metrics(db, run, settings=None, now=None):
