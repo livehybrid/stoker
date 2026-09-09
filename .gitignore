@@ -9,6 +9,8 @@ dist/
 build/
 node_modules/
 ui/dist/
+# The single-file build smoke.mjs renders in jsdom; generated, never tracked.
+ui/dist-smoke/
 site/
 .env
 *.sock

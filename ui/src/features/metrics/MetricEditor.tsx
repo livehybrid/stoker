@@ -14,6 +14,18 @@ import {
   defaultPattern,
   patternSpec,
 } from "./config";
+import { Between, Grid, Inline, Muted, Stack } from "../../components/text";
+import styled from "styled-components";
+import { variables } from "@splunk/themes";
+
+const Editing = styled.div<{ $active?: boolean }>`
+  border: 1px solid
+    ${(props) => (props.$active ? variables.contentColorAccent : variables.borderColor)};
+  border-radius: ${variables.borderRadius};
+  background-color: ${variables.backgroundColorSection};
+  padding: ${variables.spacingLarge};
+  box-shadow: ${(props) => (props.$active ? variables.focusShadow : "none")};
+`;
 
 // One metric editor card: identity + value model (min/p95/max) + kind + pattern
 // (with its params rendered from the catalog) + an optional per-dimension scale.
@@ -70,98 +82,87 @@ export function MetricEditor({
   }
 
   return (
-    <div
-      className={
-        "rounded-lg border bg-surface-soft p-4 " +
-        (active ? "border-sky-600/70 ring-1 ring-sky-600/40" : "border-surface-muted")
-      }
-    >
-      <div className="grid gap-3 sm:grid-cols-2">
+    <Editing $active={active}>
+      <Grid $min="180px">
         <Field label="Metric name">
           <TextInput
             placeholder="store.requests"
             value={metric.name}
-            onChange={(e) => patch({ name: e.target.value })}
+            onChange={(_e, { value }) => patch({ name: value })}
             autoComplete="off"
           />
         </Field>
-        <div className="grid grid-cols-2 gap-2">
+        <Grid $min="180px">
           <Field label="Unit">
             <TextInput
               placeholder="requests"
               value={metric.unit ?? ""}
-              onChange={(e) => patch({ unit: e.target.value })}
+              onChange={(_e, { value }) => patch({ unit: value })}
               autoComplete="off"
             />
           </Field>
           <Field label="Kind">
             <Select
               value={metric.kind}
-              onChange={(e) => patch({ kind: e.target.value as MetricKind })}
+              onChange={(_e, { value }) => patch({ kind: value as MetricKind })}
             >
               {METRIC_KINDS.map((k) => (
-                <option key={k.value} value={k.value}>
-                  {k.label}
-                </option>
+                <Select.Option key={k.value} value={k.value} label={k.label} />
               ))}
             </Select>
           </Field>
-        </div>
-      </div>
+        </Grid>
+      </Grid>
 
-      <div className="mt-3 grid grid-cols-4 gap-2">
+      <Grid $min="140px">
         <Field label="min" hint="quiet floor">
           <TextInput
             type="number"
             value={String(metric.min)}
-            onChange={(e) => patch({ min: num(e.target.value, metric.min) })}
+            onChange={(_e, { value }) => patch({ min: num(value, metric.min) })}
           />
         </Field>
         <Field label="p95" hint="busy level">
           <TextInput
             type="number"
             value={String(metric.p95)}
-            onChange={(e) => patch({ p95: num(e.target.value, metric.p95) })}
+            onChange={(_e, { value }) => patch({ p95: num(value, metric.p95) })}
           />
         </Field>
         <Field label="max" hint="ceiling">
           <TextInput
             type="number"
             value={String(metric.max)}
-            onChange={(e) => patch({ max: num(e.target.value, metric.max) })}
+            onChange={(_e, { value }) => patch({ max: num(value, metric.max) })}
           />
         </Field>
         <Field label="noise">
           <TextInput
             type="number"
-            step="0.05"
             value={String(metric.noise ?? 0.1)}
-            onChange={(e) => patch({ noise: num(e.target.value, metric.noise ?? 0.1) })}
+            onChange={(_e, { value }) => patch({ noise: num(value, metric.noise ?? 0.1) })}
           />
         </Field>
-      </div>
+      </Grid>
 
-      <div className="mt-3">
+      <div>
         <Field label="Pattern" hint={spec.hint}>
           <Select
             value={metric.pattern.type}
-            onChange={(e) => setPatternType(e.target.value as PatternType)}
+            onChange={(_e, { value }) => setPatternType(value as PatternType)}
           >
             {PATTERNS.map((p) => (
-              <option key={p.type} value={p.type}>
-                {p.label}
-              </option>
+              <Select.Option key={p.type} value={p.type} label={p.label} />
             ))}
           </Select>
         </Field>
-        <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
+        <Grid $min="160px">
           {spec.params.map((p) => (
             <Field key={p.key} label={p.label}>
               <TextInput
                 type="number"
-                step={p.step ?? 1}
                 value={String((metric.pattern[p.key] as number) ?? p.default)}
-                onChange={(e) => setPatternParam(p.key, num(e.target.value, p.default))}
+                onChange={(_e, { value }) => setPatternParam(p.key, num(value, p.default))}
               />
             </Field>
           ))}
@@ -178,50 +179,48 @@ export function MetricEditor({
               />
             </Field>
           )}
-        </div>
+        </Grid>
       </div>
 
       {dimensions.length > 0 && (
-        <div className="mt-3">
+        <div>
           <button
             type="button"
-            className="text-xs font-medium text-sky-400 hover:text-sky-300"
             onClick={() => setShowScale((s) => !s)}
           >
             {showScale ? "− Hide" : "+ Per-dimension scale"} (magnitude per value)
           </button>
           {showScale && (
-            <div className="mt-2 space-y-2">
+            <Stack>
               {dimensions.map((dim) => (
-                <div key={dim.key} className="flex flex-wrap items-center gap-2">
-                  <span className="w-24 shrink-0 text-xs text-slate-400">{dim.key}</span>
+                <Inline key={dim.key}>
+                  <Muted $small>{dim.key}</Muted>
                   {dim.values.map((val) => (
-                    <label key={val} className="flex items-center gap-1 text-xs text-slate-400">
+                    <Inline key={val}>
                       {val}
-                      <input
+                      <TextInput
                         type="number"
-                        step="0.1"
-                        className="w-16 rounded border border-surface-muted bg-surface px-2 py-1 text-xs text-slate-100"
+                        inline
                         value={String(metric.scale?.[dim.key]?.[val] ?? 1)}
-                        onChange={(e) => setScale(dim.key, val, num(e.target.value, 1))}
+                        onChange={(_e, { value }) => setScale(dim.key, val, num(value, 1))}
                       />
-                    </label>
+                    </Inline>
                   ))}
-                </div>
+                </Inline>
               ))}
-            </div>
+            </Stack>
           )}
         </div>
       )}
 
-      <div className="mt-3 flex items-center justify-between">
+      <Between>
         <Button variant="ghost" onClick={onRemove}>
           Remove metric
         </Button>
         <Button variant={active ? "primary" : "secondary"} onClick={onPreview}>
           {active ? "Previewing" : "Preview this"}
         </Button>
-      </div>
-    </div>
+      </Between>
+    </Editing>
   );
 }

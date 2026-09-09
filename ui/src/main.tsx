@@ -3,6 +3,11 @@ import { createRoot } from "react-dom/client";
 import { RouterProvider, createRouter } from "@tanstack/react-router";
 import { QueryClientProvider } from "@tanstack/react-query";
 
+// First, and before anything that can reach the Splunk chart library: the
+// charting bundle reads Splunk Web's page globals while it is being evaluated.
+import "./splunk-web-globals";
+
+import { ThemeProvider } from "./theme";
 import { routeTree } from "./routeTree.gen";
 import { queryClient } from "./lib/queryClient";
 import { ToastProvider } from "./components/Toast";
@@ -42,10 +47,12 @@ if (!rootEl) {
 
 createRoot(rootEl).render(
   <StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <ToastProvider>
-        <RouterProvider router={router} />
-      </ToastProvider>
-    </QueryClientProvider>
+    <ThemeProvider>
+      <QueryClientProvider client={queryClient}>
+        <ToastProvider>
+          <RouterProvider router={router} />
+        </ToastProvider>
+      </QueryClientProvider>
+    </ThemeProvider>
   </StrictMode>,
 );

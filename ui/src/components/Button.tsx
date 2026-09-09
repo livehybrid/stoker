@@ -1,40 +1,47 @@
-import type { ButtonHTMLAttributes, ReactNode } from "react";
-import { cn } from "./cn";
+import type { ReactNode } from "react";
+import SplunkButton from "@splunk/react-ui/Button";
+import type { ButtonClickHandler } from "@splunk/react-ui/Button";
 
+/*
+ * Splunk's Button, behind the variant names this app already uses.
+ *
+ * The mapping is deliberate rather than mechanical: "danger" is Splunk's
+ * `destructive`, which is the appearance its design system reserves for an
+ * action that cannot be undone, and this app uses it for abort and delete.
+ *
+ * The prop surface is written out rather than derived from Splunk's. Splunk
+ * types Button as a union of its button and anchor forms, and spreading one
+ * set of props across that union does not narrow: TypeScript ends up demanding
+ * anchor event handlers on a <button>. This app never renders a Button as a
+ * link, so these are the props it actually passes. Adding one is a line.
+ */
 type Variant = "primary" | "secondary" | "danger" | "ghost";
 
-interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+const APPEARANCE = {
+  primary: "primary",
+  secondary: "secondary",
+  danger: "destructive",
+  ghost: "subtle",
+} as const;
+
+export interface ButtonProps {
   variant?: Variant;
   children?: ReactNode;
+  type?: "button" | "submit" | "reset";
+  disabled?: boolean;
+  onClick?: ButtonClickHandler;
+  title?: string;
+  className?: string;
+  /** A @splunk/react-icons element. */
+  icon?: ReactNode;
+  /** Set false to stretch the button to the width of its container. */
+  inline?: boolean;
 }
 
-const VARIANTS: Record<Variant, string> = {
-  primary: "bg-sky-600 hover:bg-sky-500 text-white border-sky-600",
-  secondary:
-    "bg-surface-muted hover:bg-slate-600 text-slate-100 border-surface-muted",
-  danger: "bg-red-600 hover:bg-red-500 text-white border-red-600",
-  ghost:
-    "bg-transparent hover:bg-surface-muted text-slate-200 border-transparent",
-};
-
-export function Button({
-  variant = "secondary",
-  className,
-  children,
-  ...rest
-}: ButtonProps) {
+export function Button({ variant = "secondary", children, ...rest }: ButtonProps) {
   return (
-    <button
-      className={cn(
-        "inline-flex items-center justify-center gap-1.5 rounded-md border px-3 py-1.5 text-sm font-medium transition-colors",
-        "focus:outline-none focus:ring-2 focus:ring-sky-500/60",
-        "disabled:cursor-not-allowed disabled:opacity-50",
-        VARIANTS[variant],
-        className,
-      )}
-      {...rest}
-    >
+    <SplunkButton appearance={APPEARANCE[variant]} {...rest}>
       {children}
-    </button>
+    </SplunkButton>
   );
 }

@@ -7,6 +7,7 @@ import { Modal } from "../ui/Modal";
 import { Field, TextInput } from "../../components/Field";
 import { Button } from "../../components/Button";
 import { useToast } from "../../components/Toast";
+import { Negative, Stack } from "../../components/text";
 
 // Reset a user's password (admin action). The new password is write-only: it is
 // PATCHed and never read back. Setting a password also flips a proxy/SSO account
@@ -67,12 +68,12 @@ export function ResetPasswordModal({
         </>
       }
     >
-      <div className="space-y-4">
+      <Stack $gap="medium">
         <Field label="New password" hint="At least 8 characters. Write-only.">
           <TextInput
             type="password"
             value={password}
-            onChange={(e) => setPassword(e.target.value)}
+            onChange={(_e, { value }) => setPassword(value)}
             autoComplete="new-password"
             autoFocus
           />
@@ -81,12 +82,12 @@ export function ResetPasswordModal({
           <TextInput
             type="password"
             value={confirm}
-            onChange={(e) => setConfirm(e.target.value)}
+            onChange={(_e, { value }) => setConfirm(value)}
             autoComplete="new-password"
           />
         </Field>
-        {error && <p className="text-sm text-red-400">{error}</p>}
-      </div>
+        {error && <Negative>{error}</Negative>}
+      </Stack>
     </Modal>
   );
 }

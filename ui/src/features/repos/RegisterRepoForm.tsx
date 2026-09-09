@@ -5,6 +5,8 @@ import { api, ApiError } from "../../lib/api";
 import type { RepoAuthKind, RepoCreate, RepoCreated } from "../../lib/types";
 import { Button } from "../../components/Button";
 import { Field, Select, TextInput } from "../../components/Field";
+import { Callout, Form, Grid, Inline, Muted, Panel, Strong } from "../../components/text";
+import Switch from "@splunk/react-ui/Switch";
 
 // The "Register repo" form body (rendered inside a Modal by the Repos page).
 // Fields mirror RepoCreate exactly: url, auth_kind, secret (write-only, only
@@ -78,34 +80,32 @@ export function RegisterRepoForm({ onCreated, onCancel }: Props) {
         : null;
 
   return (
-    <form onSubmit={submit} className="space-y-4">
+    <Form onSubmit={submit}>
       <Field
         label="Repository URL"
         hint="https://, ssh://, git://, file:// or scp-style user@host:path"
       >
         <TextInput
           value={url}
-          onChange={(e) => setUrl(e.target.value)}
+          onChange={(_e, { value }) => setUrl(value)}
           placeholder="https://github.com/org/eventgen-packs.git"
           autoFocus
           spellCheck={false}
         />
       </Field>
 
-      <div className="grid grid-cols-2 gap-3">
+      <Grid $min="180px">
         <Field label="Auth kind">
           <Select
             value={authKind}
-            onChange={(e) => {
-              const next = e.target.value as RepoAuthKind;
+            onChange={(_e, { value }) => {
+              const next = value as RepoAuthKind;
               setAuthKind(next);
               if (next === "none") setSecret("");
             }}
           >
             {AUTH_KINDS.map((a) => (
-              <option key={a.value} value={a.value}>
-                {a.label}
-              </option>
+              <Select.Option key={a.value} value={a.value} label={a.label} />
             ))}
           </Select>
         </Field>
@@ -113,12 +113,12 @@ export function RegisterRepoForm({ onCreated, onCancel }: Props) {
         <Field label="Default ref" hint="Branch, tag or SHA (defaults to main)">
           <TextInput
             value={defaultRef}
-            onChange={(e) => setDefaultRef(e.target.value)}
+            onChange={(_e, { value }) => setDefaultRef(value)}
             placeholder="main"
             spellCheck={false}
           />
         </Field>
-      </div>
+      </Grid>
 
       {needsSecret && (
         <Field
@@ -128,7 +128,7 @@ export function RegisterRepoForm({ onCreated, onCancel }: Props) {
           <TextInput
             type="password"
             value={secret}
-            onChange={(e) => setSecret(e.target.value)}
+            onChange={(_e, { value }) => setSecret(value)}
             placeholder={authKind === "pat" ? "ghp_…" : "-----BEGIN OPENSSH PRIVATE KEY-----"}
             autoComplete="new-password"
             spellCheck={false}
@@ -136,36 +136,35 @@ export function RegisterRepoForm({ onCreated, onCancel }: Props) {
         </Field>
       )}
 
-      <label className="flex items-start gap-2 rounded-md border border-surface-muted bg-surface px-3 py-2">
-        <input
-          type="checkbox"
-          checked={trustedCode}
-          onChange={(e) => setTrustedCode(e.target.checked)}
-          className="mt-0.5"
-        />
-        <span className="text-xs text-slate-300">
-          <span className="font-medium text-slate-200">Trusted code</span>
-          <span className="block text-slate-500">
-            Allow packs from this repo to run code (e.g. custom eventgen plugins).
-            Leave off for untrusted sources.
-          </span>
-        </span>
-      </label>
+      <Panel>
+        <Switch
+          appearance="checkbox"
+          selected={trustedCode}
+          onClick={() => setTrustedCode(!trustedCode)}
+        >
+          <Strong>Trusted code</Strong>
+          <Muted $small>
+            {" "}
+            — allow packs from this repo to run code (e.g. custom eventgen
+            plugins). Leave off for untrusted sources.
+          </Muted>
+        </Switch>
+      </Panel>
 
       {(fieldError || apiMessage) && (
-        <p className="rounded-md border border-red-800/60 bg-red-950/40 px-3 py-2 text-xs text-red-300">
+        <Callout $tone="error">
           {fieldError || apiMessage}
-        </p>
+        </Callout>
       )}
 
-      <div className="flex items-center justify-end gap-2 pt-1">
+      <Inline>
         <Button type="button" variant="ghost" onClick={onCancel} disabled={mutation.isPending}>
           Cancel
         </Button>
         <Button type="submit" variant="primary" disabled={mutation.isPending}>
           {mutation.isPending ? "Registering…" : "Register repo"}
         </Button>
-      </div>
-    </form>
+      </Inline>
+    </Form>
   );
 }

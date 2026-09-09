@@ -1,5 +1,8 @@
 import type { ReactNode } from "react";
+import Message from "@splunk/react-ui/Message";
+
 import type { LeaseOut, RunDetail } from "../../lib/types";
+import { Stack } from "../../components/text";
 import { leaseAssignedWork, leaseAssignedReason } from "./LeaseTable";
 
 // Warning banners (section 10.3): degraded start, lag > 300 s, lost workers
@@ -18,15 +21,14 @@ function Banner({
   title: string;
   children?: ReactNode;
 }) {
-  const styles =
-    tone === "red"
-      ? "border-red-800/70 bg-red-950/50 text-red-200"
-      : "border-amber-800/70 bg-amber-950/50 text-amber-200";
+  // Splunk's filled Message, which brings the icon and the colour that its
+  // design system attaches to each severity. The tone names stay because they
+  // say what the banner MEANS at each call site.
   return (
-    <div className={`rounded-md border px-4 py-2.5 text-sm ${styles}`}>
-      <span className="font-semibold">{title}</span>
-      {children ? <span> — {children}</span> : null}
-    </div>
+    <Message appearance="fill" type={tone === "red" ? "error" : "warning"}>
+      <Message.Title>{title}</Message.Title>
+      {children}
+    </Message>
   );
 }
 
@@ -95,5 +97,5 @@ export function WarningBanners({
   }
 
   if (banners.length === 0) return null;
-  return <div className="space-y-2">{banners}</div>;
+  return <Stack>{banners}</Stack>;
 }

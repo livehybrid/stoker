@@ -11,6 +11,7 @@ import { Modal } from "../features/ui/Modal";
 import { RegisterRepoForm } from "../features/repos/RegisterRepoForm";
 import { WebhookSecretReveal } from "../features/repos/WebhookSecretReveal";
 import { RepoCard } from "../features/repos/RepoCard";
+import { Stack } from "../components/text";
 
 // Repos page: register git repos of sample packs, sync them, and drill into the
 // packs they index. Cards show sync state, head SHA and the trusted-code flag
@@ -23,7 +24,7 @@ function Repos() {
   const q = useQuery({ queryKey: ["repos"], queryFn: () => api.repos.list() });
 
   return (
-    <div className="space-y-5">
+    <Stack $gap="large">
       <PageHeader
         title="Repos"
         subtitle="Git repositories of eventgen sample packs."
@@ -49,11 +50,11 @@ function Repos() {
           }
         />
       ) : (
-        <div className="space-y-3">
+        <Stack>
           {q.data.map((repo) => (
             <RepoCard key={repo.id} repo={repo} onDeleted={() => q.refetch()} />
           ))}
-        </div>
+        </Stack>
       )}
 
       <Modal
@@ -91,7 +92,7 @@ function Repos() {
           />
         )}
       </Modal>
-    </div>
+    </Stack>
   );
 }
 

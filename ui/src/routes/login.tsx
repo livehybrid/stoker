@@ -9,6 +9,7 @@ import { Card } from "../components/Card";
 import { Field, TextInput } from "../components/Field";
 import { Button } from "../components/Button";
 import { LoadingState } from "../components/States";
+import { BigNumber, Centre, Form, Muted, Narrow, Negative } from "../components/text";
 
 // Login page. It drives three states off `GET /api/auth/status`:
 //   - already authenticated  -> redirect straight to the dashboard;
@@ -106,15 +107,15 @@ function LoginScreen() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-surface px-4">
-      <div className="w-full max-w-sm space-y-6">
-        <div className="text-center">
-          <h1 className="text-2xl font-semibold tracking-tight text-slate-100">
+    <Centre>
+      <Narrow>
+        <div>
+          <BigNumber>
             Stoker
-          </h1>
-          <p className="mt-1 text-sm text-slate-500">
+          </BigNumber>
+          <Muted>
             load-generation control plane
-          </p>
+          </Muted>
         </div>
 
         {isPending ? (
@@ -123,13 +124,12 @@ function LoginScreen() {
           </Card>
         ) : isError ? (
           <Card title="Cannot reach the control plane">
-            <p className="text-sm text-slate-400">
+            <Muted>
               The sign-in service did not respond. Check the control plane is
               running, then try again.
-            </p>
+            </Muted>
             <Button
               variant="secondary"
-              className="mt-4"
               onClick={() => refetch()}
             >
               Retry
@@ -137,15 +137,15 @@ function LoginScreen() {
           </Card>
         ) : setupNeeded ? (
           <Card title="Create the first administrator">
-            <p className="mb-4 text-sm text-slate-400">
+            <Muted>
               No users exist yet. Set up the initial admin account to secure this
               instance. You will be signed in straight away.
-            </p>
-            <form onSubmit={submitSetup} className="space-y-4">
+            </Muted>
+            <Form onSubmit={submitSetup}>
               <Field label="Admin username">
                 <TextInput
                   value={username}
-                  onChange={(e) => setUsername(e.target.value)}
+                  onChange={(_e, { value }) => setUsername(value)}
                   placeholder="admin"
                   autoComplete="username"
                   autoFocus
@@ -155,7 +155,7 @@ function LoginScreen() {
                 <TextInput
                   type="password"
                   value={password}
-                  onChange={(e) => setPassword(e.target.value)}
+                  onChange={(_e, { value }) => setPassword(value)}
                   autoComplete="new-password"
                 />
               </Field>
@@ -163,28 +163,28 @@ function LoginScreen() {
                 <TextInput
                   type="password"
                   value={confirm}
-                  onChange={(e) => setConfirm(e.target.value)}
+                  onChange={(_e, { value }) => setConfirm(value)}
                   autoComplete="new-password"
                 />
               </Field>
-              {formError && <p className="text-sm text-red-400">{formError}</p>}
+              {formError && <Negative>{formError}</Negative>}
               <Button
                 type="submit"
                 variant="primary"
-                className="w-full"
+                inline={false}
                 disabled={busy}
               >
                 {setup.isPending ? "Creating…" : "Create admin and sign in"}
               </Button>
-            </form>
+            </Form>
           </Card>
         ) : (
           <Card title="Sign in">
-            <form onSubmit={submitLogin} className="space-y-4">
+            <Form onSubmit={submitLogin}>
               <Field label="Username">
                 <TextInput
                   value={username}
-                  onChange={(e) => setUsername(e.target.value)}
+                  onChange={(_e, { value }) => setUsername(value)}
                   placeholder="you"
                   autoComplete="username"
                   autoFocus
@@ -194,30 +194,30 @@ function LoginScreen() {
                 <TextInput
                   type="password"
                   value={password}
-                  onChange={(e) => setPassword(e.target.value)}
+                  onChange={(_e, { value }) => setPassword(value)}
                   autoComplete="current-password"
                 />
               </Field>
-              {formError && <p className="text-sm text-red-400">{formError}</p>}
+              {formError && <Negative>{formError}</Negative>}
               <Button
                 type="submit"
                 variant="primary"
-                className="w-full"
+                inline={false}
                 disabled={busy}
               >
                 {login.isPending ? "Signing in…" : "Sign in"}
               </Button>
-            </form>
+            </Form>
             {ssoEnabled && (
-              <p className="mt-4 border-t border-surface-muted pt-4 text-xs text-slate-500">
+              <Muted $small>
                 Single sign-on is enabled. If your organisation uses an identity
                 provider, you may already be signed in automatically through it.
-              </p>
+              </Muted>
             )}
           </Card>
         )}
-      </div>
-    </div>
+      </Narrow>
+    </Centre>
   );
 }
 

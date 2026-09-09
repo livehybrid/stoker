@@ -6,6 +6,8 @@ import { Table, type Column } from "../../components/Table";
 import { ErrorState, LoadingState } from "../../components/States";
 import type { RunEventOut } from "../../lib/types";
 import { fmtDateTime } from "./format";
+import { EmptyState } from "../../components/States";
+import { Mono, Strong } from "../../components/text";
 
 // "Run event log" tab (section 10.3): the append-only audit trail from
 // GET /runs/{id}/events — every state transition and operator action. Polls at
@@ -30,14 +32,14 @@ const columns: Column<RunEventOut & { _i: number }>[] = [
   {
     key: "ts",
     header: "Time",
-    className: "whitespace-nowrap text-slate-400",
+    
     cell: (e) => fmtDateTime(e.ts),
   },
   { key: "actor", header: "Actor", cell: (e) => e.actor },
   {
     key: "kind",
     header: "Event",
-    cell: (e) => <span className="font-medium text-slate-200">{e.kind}</span>,
+    cell: (e) => <Strong>{e.kind}</Strong>,
   },
   {
     key: "detail",
@@ -45,7 +47,7 @@ const columns: Column<RunEventOut & { _i: number }>[] = [
     cell: (e) => {
       const t = detailText(e.detail_json);
       return t ? (
-        <span className="break-all font-mono text-xs text-slate-400">{t}</span>
+        <Mono $break>{t}</Mono>
       ) : (
         "—"
       );
@@ -79,7 +81,7 @@ export function EventLogPanel({
       columns={columns}
       rows={rows}
       rowKey={(e) => `${e.ts}-${e._i}`}
-      empty={<p className="px-1 py-6 text-sm text-slate-500">No events recorded.</p>}
+      empty={<EmptyState title="No events recorded." />}
     />
   );
 }

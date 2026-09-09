@@ -109,12 +109,28 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
 
-      - name: Install and build the web UI
+      # npm ci, not npm install: the lockfile is the input, so a dependency
+      # cannot drift under CI without someone committing the change.
+      - name: Install
         working-directory: ui
-        run: |
-          npm ci
-          npm run build
+        run: npm ci --no-audit --no-fund
+
+      # `build` runs tsc first, so a type error fails here rather than in the
+      # image build.
+      - name: Build the web UI
+        working-directory: ui
+        run: npm run build
+
+      # Renders every route of a build of the console in jsdom against a
+      # stubbed API, including that the Splunk charts actually draw. It is the
+      # check that stops a console which compiles but throws on render from
+      # reaching an image.
+      - name: Render every page
+        working-directory: ui
+        run: npm run smoke
 
   # Control-plane image: FastAPI + the built UI, multi-arch, signed.
   cp-build:

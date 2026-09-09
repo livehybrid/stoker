@@ -1,13 +1,23 @@
-import type { ReactNode } from "react";
-import { cn } from "./cn";
+import type { ReactElement, ReactNode } from "react";
+import SplunkTable from "@splunk/react-ui/Table";
 
-// A minimal, generic table. Columns declare a header and a cell renderer; the
-// page owns the row data and keying so it stays flexible for the page-builders.
+/*
+ * A generic table, on Splunk's Table.
+ *
+ * The column-descriptor API is kept because every page in this app is built
+ * from it: columns declare a header and a cell renderer, and the page owns the
+ * row data and keying. What changed underneath is that the markup, the header
+ * treatment, the hover and click affordances, the horizontal overflow and the
+ * row actions are now Splunk's rather than a hand-rolled approximation.
+ */
 export interface Column<Row> {
   key: string;
   header: ReactNode;
   cell: (row: Row) => ReactNode;
-  className?: string;
+  /** Right-align a numeric column, as Splunk's own tables do. */
+  align?: "left" | "center" | "right";
+  /** A tooltip on the header, for a column whose name needs explaining. */
+  tooltip?: ReactNode;
 }
 
 interface TableProps<Row> {
@@ -16,6 +26,8 @@ interface TableProps<Row> {
   rowKey: (row: Row) => string | number;
   onRowClick?: (row: Row) => void;
   empty?: ReactNode;
+  /** Per-row actions menu. Must be a Splunk `Menu`. */
+  rowActions?: (row: Row) => ReactElement | undefined;
 }
 
 export function Table<Row>({
@@ -24,41 +36,35 @@ export function Table<Row>({
   rowKey,
   onRowClick,
   empty,
+  rowActions,
 }: TableProps<Row>) {
   if (rows.length === 0 && empty) {
     return <>{empty}</>;
   }
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full border-collapse text-sm">
-        <thead>
-          <tr className="border-b border-surface-muted text-left text-xs uppercase tracking-wide text-slate-400">
+    <SplunkTable horizontalOverflow="scroll">
+      <SplunkTable.Head>
+        {columns.map((col) => (
+          <SplunkTable.HeadCell key={col.key} align={col.align} tooltip={col.tooltip}>
+            {col.header}
+          </SplunkTable.HeadCell>
+        ))}
+      </SplunkTable.Head>
+      <SplunkTable.Body>
+        {rows.map((row) => (
+          <SplunkTable.Row
+            key={rowKey(row)}
+            onClick={onRowClick ? () => onRowClick(row) : undefined}
+            actionsSecondary={rowActions ? rowActions(row) : undefined}
+          >
             {columns.map((col) => (
-              <th key={col.key} className={cn("px-3 py-2 font-medium", col.className)}>
-                {col.header}
-              </th>
+              <SplunkTable.Cell key={col.key} align={col.align}>
+                {col.cell(row)}
+              </SplunkTable.Cell>
             ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => (
-            <tr
-              key={rowKey(row)}
-              onClick={onRowClick ? () => onRowClick(row) : undefined}
-              className={cn(
-                "border-b border-surface-muted/50",
-                onRowClick && "cursor-pointer hover:bg-surface-muted/40",
-              )}
-            >
-              {columns.map((col) => (
-                <td key={col.key} className={cn("px-3 py-2 align-top", col.className)}>
-                  {col.cell(row)}
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+          </SplunkTable.Row>
+        ))}
+      </SplunkTable.Body>
+    </SplunkTable>
   );
 }

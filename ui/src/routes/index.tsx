@@ -18,6 +18,7 @@ import {
   recentFailures,
 } from "../features/dashboard/metrics";
 import { FleetThroughputChart } from "../features/dashboard/FleetThroughputChart";
+import { Between, BigNumber, Grid, Label, Muted, Panel, Stack, Strong } from "../components/text";
 
 // Dashboard: fleet health and live runs at a glance. Active-run cards (live EPS,
 // target, workers), an aggregate strip, a target-health strip and the most
@@ -101,7 +102,7 @@ function Dashboard() {
       key: "reason",
       header: "End reason",
       cell: (r) => (
-        <span className="text-slate-300">{r.end_reason ?? "—"}</span>
+        <span>{r.end_reason ?? "—"}</span>
       ),
     },
     {
@@ -113,14 +114,14 @@ function Dashboard() {
   ];
 
   return (
-    <div className="space-y-5">
+    <Stack $gap="large">
       <PageHeader
         title="Dashboard"
         subtitle="Fleet health and live runs at a glance."
       />
 
       {/* Aggregate strip */}
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+      <Grid $min="160px">
         <StatTile
           label="Active runs"
           value={runsQ.isPending ? "…" : String(active.length)}
@@ -137,7 +138,7 @@ function Dashboard() {
           label="Targets"
           value={targetsQ.isPending ? "…" : String((targetsQ.data ?? []).length)}
         />
-      </div>
+      </Grid>
 
       {/* Fleet throughput over time (delivered eps + MB/s across all runs) */}
       <Card title="Fleet throughput">
@@ -150,7 +151,6 @@ function Dashboard() {
         actions={
           <Link
             to="/runs"
-            className="text-xs font-medium text-sky-400 hover:text-sky-300"
           >
             All runs →
           </Link>
@@ -166,7 +166,7 @@ function Dashboard() {
             message="Launch a spec to start streaming data to a target."
           />
         ) : (
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <Grid $min="260px">
             {perRun.map((r) => (
               <ActiveRunCard
                 key={r.run.id}
@@ -178,7 +178,7 @@ function Dashboard() {
                 metricsPending={r.metricsPending}
               />
             ))}
-          </div>
+          </Grid>
         )}
       </Card>
 
@@ -188,7 +188,6 @@ function Dashboard() {
         actions={
           <Link
             to="/targets"
-            className="text-xs font-medium text-sky-400 hover:text-sky-300"
           >
             Manage →
           </Link>
@@ -202,28 +201,27 @@ function Dashboard() {
             onRetry={() => targetsQ.refetch()}
           />
         ) : (targetsQ.data ?? []).length === 0 ? (
-          <p className="text-sm text-slate-500">No targets registered.</p>
+          <Muted>No targets registered.</Muted>
         ) : (
-          <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+          <Grid $min="260px">
             {(targetsQ.data ?? []).map((t) => (
               <li
                 key={t.id}
-                className="rounded-md border border-surface-muted px-3 py-2"
               >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="truncate text-sm text-slate-200">
+                <Between>
+                  <Strong>
                     {t.name}
-                  </span>
+                  </Strong>
                   <StatusBadge state={t.health_state} />
-                </div>
+                </Between>
                 {t.health_detail && (
-                  <p className="mt-1 truncate text-xs text-slate-500">
+                  <Muted $small>
                     {t.health_detail}
-                  </p>
+                  </Muted>
                 )}
               </li>
             ))}
-          </ul>
+          </Grid>
         )}
       </Card>
 
@@ -242,20 +240,20 @@ function Dashboard() {
           />
         )}
       </Card>
-    </div>
+    </Stack>
   );
 }
 
 function StatTile({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-lg border border-surface-muted bg-surface-soft p-4">
-      <p className="text-[11px] uppercase tracking-wide text-slate-500">
+    <Panel>
+      <Label>
         {label}
-      </p>
-      <p className="mt-1 text-2xl font-semibold tabular-nums text-slate-100">
+      </Label>
+      <BigNumber>
         {value}
-      </p>
-    </div>
+      </BigNumber>
+    </Panel>
   );
 }
 

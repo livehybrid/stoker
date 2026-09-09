@@ -21,6 +21,7 @@ import {
   isTerminal,
   toDateKey,
 } from "../features/runs/format";
+import { Grid, Inline, Muted, Stack, Strong } from "../components/text";
 
 // Runs history (section 10.7): a filterable list of every run (newest first)
 // with per-run totals, end reasons and the degraded flag, a Re-run action and
@@ -116,7 +117,7 @@ function Runs() {
   });
 
   const columns: Column<RunOut>[] = [
-    { key: "id", header: "Run", cell: (r) => <span className="font-medium text-slate-200">#{r.id}</span> },
+    { key: "id", header: "Run", cell: (r) => <Strong>#{r.id}</Strong> },
     {
       key: "spec",
       header: "Spec",
@@ -134,22 +135,22 @@ function Runs() {
       key: "state",
       header: "State",
       cell: (r) => (
-        <span className="flex items-center gap-1.5">
+        <Inline>
           <StatusBadge state={r.state} />
           {r.degraded && <Badge tone="amber">degraded</Badge>}
-        </span>
+        </Inline>
       ),
     },
     {
       key: "events",
       header: "Events",
-      className: "text-right tabular-nums",
+      align: "right",
       cell: (r) => fmtInt(totalEvents(r)),
     },
     {
       key: "bytes",
       header: "Volume",
-      className: "text-right tabular-nums",
+      align: "right",
       cell: (r) => fmtBytes(totalBytes(r)),
     },
     {
@@ -160,13 +161,13 @@ function Runs() {
     {
       key: "created",
       header: "Started",
-      className: "whitespace-nowrap text-slate-400",
+      
       cell: (r) => fmtDateTime(r.t0 ?? r.created_at),
     },
     {
       key: "actions",
       header: "",
-      className: "text-right",
+      align: "right",
       cell: (r) => (
         <Button
           variant="ghost"
@@ -190,14 +191,14 @@ function Runs() {
     dateFilter !== "";
 
   return (
-    <div className="space-y-5">
+    <Stack $gap="large">
       <PageHeader
         title="Runs"
         subtitle="Live and historical runs."
         actions={
-          <span className="text-sm text-slate-500">
+          <Muted>
             {activeCount} active · {(runsQ.data ?? []).length} total
-          </span>
+          </Muted>
         }
       />
 
@@ -219,34 +220,28 @@ function Runs() {
           ) : undefined
         }
       >
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <Grid $min="220px">
           <Field label="State">
-            <Select value={stateFilter} onChange={(e) => setStateFilter(e.target.value)}>
-              <option value={ALL}>All states</option>
+            <Select value={stateFilter} onChange={(_e, { value }) => setStateFilter(String(value))}>
+              <Select.Option value={ALL} label="All states" />
               {stateOptions.map((s) => (
-                <option key={s} value={s}>
-                  {s}
-                </option>
+                <Select.Option key={s} value={s} label={s} />
               ))}
             </Select>
           </Field>
           <Field label="Spec">
-            <Select value={specFilter} onChange={(e) => setSpecFilter(e.target.value)}>
-              <option value={ALL}>All specs</option>
+            <Select value={specFilter} onChange={(_e, { value }) => setSpecFilter(String(value))}>
+              <Select.Option value={ALL} label="All specs" />
               {(specsQ.data ?? []).map((s) => (
-                <option key={s.id} value={String(s.id)}>
-                  {s.name}
-                </option>
+                <Select.Option key={s.id} value={String(s.id)} label={s.name} />
               ))}
             </Select>
           </Field>
           <Field label="Target">
-            <Select value={targetFilter} onChange={(e) => setTargetFilter(e.target.value)}>
-              <option value={ALL}>All targets</option>
+            <Select value={targetFilter} onChange={(_e, { value }) => setTargetFilter(String(value))}>
+              <Select.Option value={ALL} label="All targets" />
               {(targetsQ.data ?? []).map((t) => (
-                <option key={t.id} value={String(t.id)}>
-                  {t.name}
-                </option>
+                <Select.Option key={t.id} value={String(t.id)} label={t.name} />
               ))}
             </Select>
           </Field>
@@ -254,10 +249,10 @@ function Runs() {
             <TextInput
               type="date"
               value={dateFilter}
-              onChange={(e) => setDateFilter(e.target.value)}
+              onChange={(_e, { value }) => setDateFilter(String(value))}
             />
           </Field>
-        </div>
+        </Grid>
       </Card>
 
       <Card>
@@ -286,7 +281,7 @@ function Runs() {
           />
         )}
       </Card>
-    </div>
+    </Stack>
   );
 }
 

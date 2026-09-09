@@ -9,7 +9,9 @@
 FROM --platform=$BUILDPLATFORM node:20-slim AS ui-build
 WORKDIR /ui
 # Install deps against the committed lockfile first (cached across source edits).
-COPY ui/package.json ui/package-lock.json ./
+# .npmrc too: it carries legacy-peer-deps, which Splunk's front-end packages
+# need because they are published against yarn's looser peer resolution.
+COPY ui/package.json ui/package-lock.json ui/.npmrc ./
 RUN npm ci
 COPY ui/ ./
 RUN npm run build      # -> /ui/dist

@@ -4,6 +4,8 @@ import type { LeaseOut } from "../../lib/types";
 import type { SlotLatest } from "./metrics";
 import { leaseTargetShare } from "./metrics";
 import { fmtElapsed, fmtInt, fmtNum } from "./format";
+import { EmptyState } from "../../components/States";
+import { Mono, Negative } from "../../components/text";
 
 // Lease roster (section 10.3): slot, holder, node, assigned work, EPS, lag s,
 // queue depth, RSS, restarts, state. Live gauge columns (EPS/lag/queue/RSS)
@@ -46,38 +48,37 @@ export function LeaseTable({
   latest: Map<number, SlotLatest>;
 }) {
   const columns: Column<LeaseOut>[] = [
-    { key: "slot", header: "Slot", className: "tabular-nums", cell: (l) => l.slot },
+    { key: "slot", header: "Slot",  cell: (l) => l.slot },
     {
       key: "holder",
       header: "Holder",
       cell: (l) => (
-        <span className="font-mono text-xs text-slate-300">{l.holder ?? "—"}</span>
+        <Mono>{l.holder ?? "—"}</Mono>
       ),
     },
     { key: "node", header: "Node", cell: (l) => l.node ?? "—" },
     {
       key: "assigned",
       header: "Assigned work",
-      className: "text-right tabular-nums",
+      align: "right",
       cell: (l) => {
         const assigned = leaseAssignedWork(l);
         if (assigned == null) return "—";
         if (assigned > 0) return fmtInt(assigned);
         const reason = leaseAssignedReason(l);
         return (
-          <span
-            className="font-medium text-red-400"
+          <Negative
             title={reason ?? "this worker holds no work and will generate nothing"}
           >
             none
-          </span>
+          </Negative>
         );
       },
     },
     {
       key: "target",
       header: "Target",
-      className: "text-right tabular-nums",
+      align: "right",
       cell: (l) => {
         const v = leaseTargetShare(l);
         return v != null ? fmtNum(v, 1) : "—";
@@ -86,46 +87,47 @@ export function LeaseTable({
     {
       key: "eps",
       header: "EPS",
-      className: "text-right tabular-nums",
+      align: "right",
       cell: (l) => fmtNum(latest.get(l.slot)?.eps ?? null, 1),
     },
     {
       key: "lag",
       header: "Lag s",
-      className: "text-right tabular-nums",
+      align: "right",
       cell: (l) => {
         const lag = latest.get(l.slot)?.lag_s ?? null;
         if (lag == null) return "—";
         const warn = lag > LAG_WARN_S;
-        return <span className={warn ? "text-red-400" : undefined}>{fmtNum(lag, 0)}</span>;
+        return warn ? <Negative>{fmtNum(lag, 0)}</Negative> : <span>{fmtNum(lag, 0)}</span>;
       },
     },
     {
       key: "queue",
       header: "Queue",
-      className: "text-right tabular-nums",
+      align: "right",
       cell: (l) => fmtInt(latest.get(l.slot)?.queue_depth ?? null),
     },
     {
       key: "rss",
       header: "RSS MB",
-      className: "text-right tabular-nums",
+      align: "right",
       cell: (l) => fmtNum(latest.get(l.slot)?.rss_mb ?? null, 0),
     },
     {
       key: "restarts",
       header: "Restarts",
-      className: "text-right tabular-nums",
-      cell: (l) => (
-        <span className={l.restarts > 0 ? "text-amber-400" : undefined}>
-          {l.restarts}
-        </span>
-      ),
+      align: "right",
+      cell: (l) =>
+        l.restarts > 0 ? (
+          <Negative>{l.restarts}</Negative>
+        ) : (
+          <span>{l.restarts}</span>
+        ),
     },
     {
       key: "heartbeat",
       header: "Heartbeat",
-      className: "whitespace-nowrap text-slate-400",
+      
       cell: (l) =>
         l.last_heartbeat_at ? `${fmtElapsed(l.last_heartbeat_at)} ago` : "—",
     },
@@ -141,7 +143,7 @@ export function LeaseTable({
       columns={columns}
       rows={leases}
       rowKey={(l) => l.slot}
-      empty={<p className="px-1 py-6 text-sm text-slate-500">No leases on this run.</p>}
+      empty={<EmptyState title="No leases on this run." />}
     />
   );
 }

@@ -7,6 +7,7 @@ import { Button } from "../../components/Button";
 import { Select } from "../../components/Field";
 import { ErrorState, LoadingState } from "../../components/States";
 import type { LeaseOut } from "../../lib/types";
+import { Inline, Panel, Pre, Stack } from "../../components/text";
 
 // "Log tail" tab (section 10.3): recent worker log lines from
 // GET /runs/{id}/logs — live from the driver while provisioned, falling back to
@@ -37,56 +38,50 @@ export function LogTailPanel({
   });
 
   return (
-    <div className="space-y-3">
-      <div className="flex flex-wrap items-center gap-3">
-        <label className="flex items-center gap-2 text-xs text-slate-400">
+    <Stack>
+      <Inline>
+        <Inline>
           Slot
           <Select
             value={slotSel}
-            onChange={(e) => setSlotSel(e.target.value)}
-            className="w-auto"
+            onChange={(_e, { value }) => setSlotSel(String(value))}
           >
-            <option value={ALL_SLOTS}>All slots</option>
+            <Select.Option value={ALL_SLOTS} label="All slots" />
             {leases.map((l) => (
-              <option key={l.slot} value={String(l.slot)}>
-                slot {l.slot}
-                {l.holder ? ` · ${l.holder}` : ""}
-              </option>
+              <Select.Option key={l.slot} value={String(l.slot)} label={`slot ${l.slot}
+                ${l.holder ? ` · $${l.holder}` : ""}`} />
             ))}
           </Select>
-        </label>
-        <label className="flex items-center gap-2 text-xs text-slate-400">
+        </Inline>
+        <Inline>
           Tail
           <Select
             value={String(tail)}
-            onChange={(e) => setTail(Number(e.target.value))}
-            className="w-auto"
+            onChange={(_e, { value }) => setTail(Number(value))}
           >
             {TAIL_OPTIONS.map((n) => (
-              <option key={n} value={String(n)}>
-                {n} lines
-              </option>
+              <Select.Option key={n} value={String(n)} label={`${n} lines`} />
             ))}
           </Select>
-        </label>
+        </Inline>
         <Button variant="ghost" onClick={() => q.refetch()} disabled={q.isFetching}>
           {q.isFetching ? "Refreshing…" : "Refresh"}
         </Button>
-      </div>
+      </Inline>
 
       {q.isPending ? (
         <LoadingState />
       ) : q.isError ? (
         <ErrorState error={q.error} onRetry={() => q.refetch()} />
       ) : q.data.lines.length === 0 ? (
-        <p className="rounded-md border border-surface-muted bg-surface px-3 py-6 text-center text-sm text-slate-500">
+        <Panel>
           No log lines available for this scope.
-        </p>
+        </Panel>
       ) : (
-        <pre className="max-h-[28rem] overflow-auto rounded-md border border-surface-muted bg-slate-950 p-3 font-mono text-xs leading-relaxed text-slate-300">
+        <Pre>
           {q.data.lines.join("\n")}
-        </pre>
+        </Pre>
       )}
-    </div>
+    </Stack>
   );
 }

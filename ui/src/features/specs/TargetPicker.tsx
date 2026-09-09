@@ -9,24 +9,37 @@ import { api } from "../../lib/api";
 import type { TargetOut, TargetTestResult } from "../../lib/types";
 import { Badge, StatusBadge } from "../../components/Badge";
 import { Button } from "../../components/Button";
-import { cn } from "../../components/cn";
+import { Between, Callout, Inline, Mono, Muted, Negative, Stack, Strong } from "../../components/text";
+import styled from "styled-components";
+import { variables } from "@splunk/themes";
+
+const Selectable = styled.div<{ $selected?: boolean; $disabled?: boolean }>`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: ${variables.spacingMedium};
+  border: 1px solid
+    ${(props) => (props.$selected ? variables.contentColorAccent : variables.borderColor)};
+  border-radius: ${variables.borderRadius};
+  background-color: ${(props) =>
+    props.$selected ? variables.interactiveColorOverlaySelected : "transparent"};
+  opacity: ${(props) => (props.$disabled ? 0.5 : 1)};
+
+  &:hover {
+    border-color: ${(props) =>
+      props.$disabled ? variables.borderColor : variables.interactiveColorBorderHover};
+  }
+`;
 
 function TestResultLine({ result }: { result: TargetTestResult }) {
   return (
-    <div
-      className={cn(
-        "mt-2 rounded-md border px-3 py-2 text-xs",
-        result.ok
-          ? "border-emerald-800/60 bg-emerald-950/40 text-emerald-200"
-          : "border-red-800/60 bg-red-950/40 text-red-200",
-      )}
-    >
-      <span className="font-medium">{result.ok ? "Reachable" : "Problem"}</span>
+    <Callout $tone={result.ok ? "info" : "error"}>
+      <Strong>{result.ok ? "Reachable" : "Problem"}</Strong>
       {" · "}
       health {result.health ?? "?"} · auth {result.auth ?? "?"}
       {result.latency_ms != null ? ` · ${result.latency_ms} ms` : ""}
-      {result.detail ? <div className="mt-1 text-red-300/90">{result.detail}</div> : null}
-    </div>
+      {result.detail ? <Negative>{result.detail}</Negative> : null}
+    </Callout>
   );
 }
 
@@ -54,46 +67,37 @@ export function TargetPicker({
 
   if (targets.length === 0) {
     return (
-      <p className="text-sm text-slate-500">
+      <Muted>
         No targets defined. Add a target first, then create the spec.
-      </p>
+      </Muted>
     );
   }
 
   return (
-    <div className="space-y-1">
+    <Stack>
       {targets.map((t) => {
         const active = t.id === selectedId;
         const testing = test.isPending && test.variables === t.id;
         const result = results[t.id];
         return (
-          <div
-            key={t.id}
-            className={cn(
-              "rounded-md border px-3 py-2 transition-colors",
-              active
-                ? "border-sky-600 bg-sky-950/40"
-                : "border-surface-muted bg-surface",
-            )}
-          >
-            <div className="flex items-center justify-between gap-3">
+          <Selectable key={t.id} $selected={active}>
+            <Between>
               <button
                 type="button"
                 onClick={() => onSelect(t)}
-                className="min-w-0 flex-1 text-left"
               >
-                <div className="flex items-center gap-2">
-                  <span className="truncate text-sm font-medium text-slate-100">
+                <Inline>
+                  <Strong>
                     {t.name}
-                  </span>
+                  </Strong>
                   <StatusBadge state={t.health_state} />
                   <Badge tone={t.env_tag === "prod" ? "amber" : "slate"}>
                     {t.env_tag}
                   </Badge>
-                </div>
-                <p className="mt-0.5 truncate font-mono text-xs text-slate-500">
+                </Inline>
+                <Mono>
                   {t.hec_url}
-                </p>
+                </Mono>
               </button>
               <Button
                 type="button"
@@ -103,17 +107,17 @@ export function TargetPicker({
               >
                 {testing ? "Testing…" : "Test"}
               </Button>
-            </div>
+            </Between>
             {result && <TestResultLine result={result} />}
             {active && t.health_state === "red" && !result && (
-              <p className="mt-2 text-xs text-red-300">
+              <Negative>
                 This target last probed unhealthy; the control plane will reject a
                 launch. Test it first.
-              </p>
+              </Negative>
             )}
-          </div>
+          </Selectable>
         );
       })}
-    </div>
+    </Stack>
   );
 }

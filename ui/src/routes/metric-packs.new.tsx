@@ -23,6 +23,7 @@ import {
 import { DimensionEditor } from "../features/metrics/DimensionEditor";
 import { MetricEditor } from "../features/metrics/MetricEditor";
 import { PreviewChart } from "../features/metrics/PreviewChart";
+import { Bullets, Grid, Muted, Stack, StickyBar, Strong, Tags } from "../components/text";
 
 interface BuilderSearch {
   edit?: number;
@@ -126,7 +127,7 @@ function MetricBuilder() {
   const canSave = name.trim().length > 0 && errors.length === 0 && !save.isPending;
 
   return (
-    <div className="space-y-5">
+    <Stack $gap="large">
       <PageHeader
         title={editing ? "Edit metric pack" : "New metric pack"}
         subtitle="Build a matrix of Splunk metrics with day-shaped values. Preview updates live."
@@ -138,12 +139,12 @@ function MetricBuilder() {
       />
 
       <Card title="Pack">
-        <div className="grid gap-3 sm:grid-cols-2">
+        <Grid $min="180px">
           <Field label="Name">
             <TextInput
               placeholder="store-kpis"
               value={name}
-              onChange={(e) => setName(e.target.value)}
+              onChange={(_e, { value }) => setName(value)}
               autoComplete="off"
             />
           </Field>
@@ -151,27 +152,25 @@ function MetricBuilder() {
             <TextInput
               placeholder="Buttercup Games store KPIs"
               value={description}
-              onChange={(e) => setDescription(e.target.value)}
+              onChange={(_e, { value }) => setDescription(value)}
               autoComplete="off"
             />
           </Field>
           <Field label="Metrics sourcetype">
             <TextInput
               value={config.sourcetype ?? "stoker:metric"}
-              onChange={(e) => patchConfig({ sourcetype: e.target.value })}
+              onChange={(_e, { value }) => patchConfig({ sourcetype: value })}
               autoComplete="off"
             />
           </Field>
-          <div className="grid grid-cols-2 gap-2">
+          <Grid $min="180px">
             <Field label="Resolution" hint="grid period">
               <Select
                 value={String(config.resolution_s)}
-                onChange={(e) => patchConfig({ resolution_s: Number(e.target.value) })}
+                onChange={(_e, { value }) => patchConfig({ resolution_s: Number(value) })}
               >
                 {RESOLUTIONS.map((r) => (
-                  <option key={r} value={String(r)}>
-                    {r}s
-                  </option>
+                  <Select.Option key={r} value={String(r)} label={`${r}s`} />
                 ))}
               </Select>
             </Field>
@@ -179,15 +178,15 @@ function MetricBuilder() {
               <TextInput
                 type="number"
                 value={String(config.tz_offset_hours ?? 0)}
-                onChange={(e) => patchConfig({ tz_offset_hours: Number(e.target.value) || 0 })}
+                onChange={(_e, { value }) => patchConfig({ tz_offset_hours: Number(value) || 0 })}
               />
             </Field>
-          </div>
-        </div>
-        <p className="mt-2 text-xs text-slate-500">
+          </Grid>
+        </Grid>
+        <Muted $small>
           Metric packs run on the metrics engine (engine-paced on the resolution
           grid); a metrics index must exist in Splunk.
-        </p>
+        </Muted>
       </Card>
 
       <Card title="Dimensions (the matrix)">
@@ -198,8 +197,8 @@ function MetricBuilder() {
         />
       </Card>
 
-      <div className="grid gap-5 lg:grid-cols-2">
-        <div className="space-y-3">
+      <Grid $min="320px">
+        <Stack>
           {metrics.map((metric, i) => (
             <MetricEditor
               key={i}
@@ -225,70 +224,65 @@ function MetricBuilder() {
           >
             + Add metric
           </Button>
-        </div>
+        </Stack>
 
-        <div className="lg:sticky lg:top-4 lg:self-start">
+        <div>
           <Card title="Live preview (24 h)">
-            <div className="mb-3 grid grid-cols-2 gap-2">
+            <Grid $min="160px">
               <Field label="Metric">
                 <Select
                   value={String(activeMetric)}
-                  onChange={(e) => setActiveMetric(Number(e.target.value))}
+                  onChange={(_e, { value }) => setActiveMetric(Number(value))}
                 >
                   {metrics.map((m, i) => (
-                    <option key={i} value={String(i)}>
-                      {m.name || `#${i + 1}`}
-                    </option>
+                    <Select.Option key={i} value={String(i)} label={m.name || `#${i + 1}`} />
                   ))}
                 </Select>
               </Field>
               {config.dimensions.length > 0 && (
                 <Field label="Cell">
-                  <div className="flex flex-wrap gap-1">
+                  <Tags>
                     {config.dimensions.map((d) => (
                       <Select
                         key={d.key}
                         value={cell[d.key] ?? ""}
-                        onChange={(e) => setCell((c) => ({ ...c, [d.key]: e.target.value }))}
-                        className="w-auto"
+                        onChange={(_e, { value }) => setCell((c) => ({ ...c, [d.key]: String(value) }))}
                       >
                         {d.values.map((v) => (
-                          <option key={v} value={v}>
-                            {v}
-                          </option>
+                          <Select.Option key={v} value={v} label={v} />
                         ))}
                       </Select>
                     ))}
-                  </div>
+                  </Tags>
                 </Field>
               )}
-            </div>
+            </Grid>
             <PreviewChart data={preview} loading={previewing} />
           </Card>
         </div>
-      </div>
+      </Grid>
 
       {errors.length > 0 && (
         <Card>
-          <ul className="list-disc space-y-0.5 pl-5 text-xs text-amber-300">
+          <Bullets>
             {errors.map((e, i) => (
               <li key={i}>{e}</li>
             ))}
-          </ul>
+          </Bullets>
         </Card>
       )}
 
-      <div className="sticky bottom-0 flex items-center justify-between gap-3 rounded-lg border border-surface-muted bg-surface-soft/95 px-4 py-3 backdrop-blur">
-        <p className="text-xs text-slate-400">
-          <span className="font-medium text-slate-200">{volume.series}</span> series ·{" "}
-          <span className="font-medium text-slate-200">{volume.eventsPerSec.toFixed(2)}</span> events/s ·{" "}
-          <span className="font-medium text-slate-200">{volume.measurementsPerSec.toFixed(1)}</span> measurements/s
-        </p>
+      <StickyBar>
+        <Muted $small>
+          <Strong>{volume.series}</Strong> series ·{" "}
+          <Strong>{volume.eventsPerSec.toFixed(2)}</Strong> events/s ·{" "}
+          <Strong>{volume.measurementsPerSec.toFixed(1)}</Strong> measurements/s
+        </Muted>
         <Button variant="primary" onClick={() => save.mutate()} disabled={!canSave}>
           {save.isPending ? "Saving…" : editing ? "Save changes" : "Save metric pack"}
         </Button>
-      </div>
-    </div>
+      </StickyBar>
+    </Stack>
   );
 }
 

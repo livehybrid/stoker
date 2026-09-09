@@ -1,17 +1,27 @@
-import type { ReactNode } from "react";
-import { useEffect } from "react";
-import { cn } from "../../components/cn";
+import { useEffect, useRef, type ReactNode } from "react";
+import SplunkModal from "@splunk/react-ui/Modal";
 
-// A centred modal dialog (page-owned). Used by the Repos "Register repo" form
-// and the one-time webhook-secret reveal. Closes on backdrop click / Escape
-// unless `dismissible` is false (the secret reveal forces an explicit
-// acknowledge so the operator does not lose the value by clicking away).
+/*
+ * A centred modal dialog, on Splunk's Modal.
+ *
+ * Used by the Repos "Register repo" form and the one-time webhook-secret
+ * reveal. Escape and the close button come with the component now, as does
+ * focus trapping and restoring focus to whatever opened it, none of which the
+ * hand-rolled overlay did.
+ *
+ * `dismissible: false` is what the secret reveal uses: clicking away from a
+ * value you can never see again should not be how you lose it. Splunk's Modal
+ * already refuses click-away by default, so this only decides whether a close
+ * button is offered.
+ */
 interface ModalProps {
   open: boolean;
   onClose: () => void;
-  title?: ReactNode;
+  /** Splunk's Modal.Header takes a string, not arbitrary nodes. */
+  title?: string;
   children?: ReactNode;
   footer?: ReactNode;
+  /** A CSS width, e.g. "560px". */
   width?: string;
   dismissible?: boolean;
 }
@@ -22,58 +32,40 @@ export function Modal({
   title,
   children,
   footer,
-  width = "max-w-lg",
+  width = "560px",
   dismissible = true,
 }: ModalProps) {
+  // Splunk's Modal must return focus to whatever opened it. These are opened
+  // from a button the page owns rather than one this component can hold a ref
+  // to, so the element that had focus when the dialog opened is captured and
+  // focused again on close: the same outcome by a different route.
+  const opener = useRef<Element | null>(null);
   useEffect(() => {
-    if (!open || !dismissible) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, dismissible, onClose]);
+    if (open) {
+      opener.current = document.activeElement;
+    }
+  }, [open]);
 
-  if (!open) return null;
+  const returnFocus = () => {
+    const el = opener.current;
+    if (el instanceof HTMLElement && document.contains(el)) {
+      el.focus();
+    }
+  };
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 sm:py-16"
-      role="dialog"
-      aria-modal="true"
+    <SplunkModal
+      open={open}
+      onRequestClose={dismissible ? onClose : undefined}
+      returnFocus={returnFocus}
+      style={{ width: `min(${width}, 94vw)` }}
     >
-      <div
-        className="absolute inset-0 bg-black/60"
-        onClick={dismissible ? onClose : undefined}
-        aria-hidden="true"
-      />
-      <div
-        className={cn(
-          "relative w-full rounded-lg border border-surface-muted bg-surface-soft shadow-2xl",
-          width,
-        )}
-      >
-        {title && (
-          <header className="flex items-center justify-between border-b border-surface-muted px-5 py-3">
-            <h2 className="text-sm font-semibold text-slate-100">{title}</h2>
-            {dismissible && (
-              <button
-                onClick={onClose}
-                aria-label="Close"
-                className="rounded-md px-2 py-1 text-slate-400 hover:bg-surface-muted hover:text-slate-100"
-              >
-                ✕
-              </button>
-            )}
-          </header>
-        )}
-        <div className="px-5 py-4">{children}</div>
-        {footer && (
-          <footer className="flex items-center justify-end gap-2 border-t border-surface-muted px-5 py-3">
-            {footer}
-          </footer>
-        )}
-      </div>
-    </div>
+      {/* The close button belongs to Modal, not to its header: it is rendered
+          because Modal was given onRequestClose above, which only happens when
+          the dialog is dismissible. */}
+      {title && <SplunkModal.Header title={title} />}
+      <SplunkModal.Body>{children}</SplunkModal.Body>
+      {footer && <SplunkModal.Footer>{footer}</SplunkModal.Footer>}
+    </SplunkModal>
   );
 }

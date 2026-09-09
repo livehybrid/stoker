@@ -8,6 +8,7 @@ import { Button } from "../../components/Button";
 import { useToast } from "../../components/Toast";
 import { formatBytes, formatGbDay, shortSha } from "../format";
 import { packIsMetrics } from "../metrics/config";
+import { Between, Callout, Grid, Inline, Muted, Panel, Strong, Tags } from "../../components/text";
 
 // A pack card: lint + verified badges, sourcetypes, estimated bytes/event and
 // declared GB/day, with Preview and "New job from pack" (design section 10.4).
@@ -54,19 +55,19 @@ export function PackCard({ pack, onPreview }: Props) {
   }
 
   return (
-    <section className="flex flex-col rounded-lg border border-surface-muted bg-surface-soft p-4 shadow-sm">
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <h3 className="truncate text-sm font-semibold text-slate-100" title={pack.name}>
+    <Panel>
+      <Between>
+        <div>
+          <Strong title={pack.name}>
             {pack.name}
-          </h3>
+          </Strong>
           {pack.description && (
-            <p className="mt-0.5 line-clamp-2 text-xs text-slate-500">
+            <Muted $small>
               {pack.description}
-            </p>
+            </Muted>
           )}
         </div>
-        <div className="flex shrink-0 flex-col items-end gap-1">
+        <Tags>
           {/* Only surface lint state when it is a problem; a clean pack shows the
               "verified" badge, so an extra "ok" pill was just noise. */}
           {pack.lint_status !== "ok" && <StatusBadge state={pack.lint_status} />}
@@ -75,11 +76,11 @@ export function PackCard({ pack, onPreview }: Props) {
           ) : (
             <Badge tone="slate">unverified</Badge>
           )}
-        </div>
-      </div>
+        </Tags>
+      </Between>
 
       {(sourcetypes.length > 0 || engines.length > 0 || tags.length > 0) && (
-        <div className="mt-3 flex flex-wrap gap-1">
+        <Tags>
           {engines.map((e) => (
             <Badge key={`e-${e}`} tone="sky">
               {e}
@@ -95,44 +96,44 @@ export function PackCard({ pack, onPreview }: Props) {
               {t}
             </Badge>
           ))}
-        </div>
+        </Tags>
       )}
 
-      <dl className="mt-3 grid grid-cols-3 gap-x-3 gap-y-2 text-xs">
+      <Grid $min="140px">
         <div>
-          <dt className="text-slate-500">Stanzas</dt>
-          <dd className="mt-0.5 text-slate-200">{pack.stanza_count ?? "—"}</dd>
+          <Muted>Stanzas</Muted>
+          <Strong>{pack.stanza_count ?? "—"}</Strong>
         </div>
         <div>
-          <dt className="text-slate-500">Bytes/event</dt>
-          <dd className="mt-0.5 text-slate-200">
+          <Muted>Bytes/event</Muted>
+          <Strong>
             {formatBytes(pack.est_bytes_per_event)}
-          </dd>
+          </Strong>
         </div>
         <div>
-          <dt className="text-slate-500">Declared</dt>
-          <dd className="mt-0.5 text-slate-200">
+          <Muted>Declared</Muted>
+          <Strong>
             {formatGbDay(pack.declared_per_day_gb)}
-          </dd>
+          </Strong>
         </div>
-      </dl>
+      </Grid>
 
       {pack.lint_status !== "ok" &&
         Array.isArray(pack.lint_errors_json) &&
         pack.lint_errors_json.length > 0 && (
-          <p className="mt-3 rounded-md border border-red-800/60 bg-red-950/40 px-3 py-1.5 text-[11px] text-red-300">
+          <Callout $tone="error">
             {String(pack.lint_errors_json[0])}
             {pack.lint_errors_json.length > 1
               ? ` (+${pack.lint_errors_json.length - 1} more)`
               : ""}
-          </p>
+          </Callout>
         )}
 
-      <div className="mt-auto flex items-center justify-between gap-2 pt-3">
-        <span className="text-[11px] text-slate-600">
+      <Between>
+        <Muted $small>
           {pack.indexed_sha ? `indexed ${shortSha(pack.indexed_sha)}` : "local pack"}
-        </span>
-        <div className="flex items-center gap-2">
+        </Muted>
+        <Inline>
           {isLocal && (
             <Button
               variant="danger"
@@ -158,8 +159,8 @@ export function PackCard({ pack, onPreview }: Props) {
           <Link to="/specs/new" search={{ pack: pack.id }}>
             <Button variant="primary">New job</Button>
           </Link>
-        </div>
-      </div>
-    </section>
+        </Inline>
+      </Between>
+    </Panel>
   );
 }

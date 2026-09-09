@@ -7,6 +7,7 @@ import { Badge } from "../../components/Badge";
 import { Button } from "../../components/Button";
 import { useToast } from "../../components/Toast";
 import { absoluteTime, relativeTime, shortSha } from "../format";
+import { Between, Callout, Grid, Inline, Mono, Muted, Panel, Strong } from "../../components/text";
 
 // A repo card: URL, auth kind, head SHA, last-synced, trusted-code badge, and
 // any sync error, plus the per-repo Sync now + Delete actions and a link to its
@@ -65,26 +66,26 @@ export function RepoCard({ repo, onDeleted }: Props) {
   }
 
   return (
-    <section className="rounded-lg border border-surface-muted bg-surface-soft p-4 shadow-sm">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <h3 className="truncate font-mono text-sm text-slate-100" title={repo.url}>
+    <Panel>
+      <Between>
+        <div>
+          <Inline>
+            <Mono title={repo.url}>
               {repo.url}
-            </h3>
+            </Mono>
             {repo.trusted_code ? (
               <Badge tone="amber">trusted code</Badge>
             ) : (
               <Badge tone="slate">untrusted</Badge>
             )}
-          </div>
-          <p className="mt-1 text-xs text-slate-500">
-            ref <span className="text-slate-300">{repo.default_ref}</span>
-            {" · "}auth <span className="text-slate-300">{authLabel(repo.auth_kind)}</span>
+          </Inline>
+          <Muted $small>
+            ref <span>{repo.default_ref}</span>
+            {" · "}auth <span>{authLabel(repo.auth_kind)}</span>
             {repo.has_secret ? " (credential set)" : ""}
-          </p>
+          </Muted>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
+        <Inline>
           <Button
             variant="secondary"
             onClick={() => sync.mutate()}
@@ -95,39 +96,38 @@ export function RepoCard({ repo, onDeleted }: Props) {
           <Button variant="danger" onClick={confirmDelete} disabled={del.isPending}>
             Delete
           </Button>
-        </div>
-      </div>
+        </Inline>
+      </Between>
 
-      <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-xs sm:grid-cols-3">
+      <Grid $min="160px">
         <div>
-          <dt className="text-slate-500">Head SHA</dt>
-          <dd className="mt-0.5 font-mono text-slate-200">{shortSha(repo.head_sha)}</dd>
+          <Muted>Head SHA</Muted>
+          <Mono>{shortSha(repo.head_sha)}</Mono>
         </div>
         <div>
-          <dt className="text-slate-500">Last synced</dt>
-          <dd className="mt-0.5 text-slate-200" title={absoluteTime(repo.last_synced_at)}>
+          <Muted>Last synced</Muted>
+          <Strong title={absoluteTime(repo.last_synced_at)}>
             {relativeTime(repo.last_synced_at)}
-          </dd>
+          </Strong>
         </div>
         <div>
-          <dt className="text-slate-500">Packs</dt>
-          <dd className="mt-0.5">
+          <Muted>Packs</Muted>
+          <div>
             <Link
               to="/packs"
               search={{ repo: repo.id }}
-              className="text-sky-400 hover:text-sky-300"
             >
               View indexed packs →
             </Link>
-          </dd>
+          </div>
         </div>
-      </dl>
+      </Grid>
 
       {repo.sync_error && (
-        <p className="mt-3 rounded-md border border-red-800/60 bg-red-950/40 px-3 py-2 text-xs text-red-300">
-          <span className="font-medium">Last sync failed:</span> {repo.sync_error}
-        </p>
+        <Callout $tone="error">
+          <Strong>Last sync failed:</Strong> {repo.sync_error}
+        </Callout>
       )}
-    </section>
+    </Panel>
   );
 }

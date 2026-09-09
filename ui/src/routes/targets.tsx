@@ -13,6 +13,7 @@ import { EmptyState, ErrorState, LoadingState } from "../components/States";
 import { useToast } from "../components/Toast";
 import { formatCap, formatGb } from "../features/targets/format";
 import { NewTargetForm } from "../features/targets/NewTargetForm";
+import { Inline, Mono, Muted, Stack, Strong } from "../components/text";
 
 // Targets page: HEC destinations for load. Lists each target with health, cap
 // and lifetime volume; a Test Connection probe per row; a create form (with a
@@ -84,13 +85,13 @@ function Targets() {
     {
       key: "name",
       header: "Name",
-      cell: (t) => <span className="font-medium text-slate-100">{t.name}</span>,
+      cell: (t) => <Strong>{t.name}</Strong>,
     },
     {
       key: "hec_url",
       header: "HEC URL",
       cell: (t) => (
-        <span className="break-all text-slate-300">{t.hec_url}</span>
+        <Mono $break>{t.hec_url}</Mono>
       ),
     },
     {
@@ -105,12 +106,12 @@ function Targets() {
         const probe = testResults[t.id];
         const detail = probe?.detail ?? t.health_detail;
         return (
-          <div className="space-y-0.5">
+          <Stack>
             <StatusBadge state={t.health_state} />
             {detail && (
-              <p className="max-w-xs text-xs text-slate-500">{detail}</p>
+              <Muted $small>{detail}</Muted>
             )}
-          </div>
+          </Stack>
         );
       },
     },
@@ -118,28 +119,26 @@ function Targets() {
       key: "cap",
       header: "Concurrent cap",
       cell: (t) => (
-        <span className="text-slate-300">
-          {formatCap(t.max_concurrent_gb_day)}
-        </span>
+        <span>{formatCap(t.max_concurrent_gb_day)}</span>
       ),
     },
     {
       key: "lifetime",
       header: "Lifetime",
       cell: (t) => (
-        <span className="text-slate-300">{formatGb(t.lifetime_gb, "GB")}</span>
+        <span>{formatGb(t.lifetime_gb, "GB")}</span>
       ),
     },
     {
       key: "actions",
       header: "",
-      className: "text-right whitespace-nowrap",
+      align: "right",
       cell: (t) => {
         const testing = test.isPending && test.variables === t.id;
         const deleting = remove.isPending && remove.variables === t.id;
         const isConfirming = confirmDelete === t.id;
         return (
-          <div className="flex items-center justify-end gap-2">
+          <Inline>
             <Button
               variant="secondary"
               onClick={() => test.mutate(t.id)}
@@ -172,14 +171,14 @@ function Targets() {
                 Delete
               </Button>
             )}
-          </div>
+          </Inline>
         );
       },
     },
   ];
 
   return (
-    <div className="space-y-5">
+    <Stack $gap="large">
       <PageHeader
         title="Targets"
         subtitle="HEC destinations for load. Tokens are write-only and never shown."
@@ -218,7 +217,7 @@ function Targets() {
       <Card title="New target">
         <NewTargetForm />
       </Card>
-    </div>
+    </Stack>
   );
 }
 

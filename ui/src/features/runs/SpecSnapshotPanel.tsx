@@ -1,5 +1,7 @@
 import type { ReactNode } from "react";
 import { fmtDurationS } from "./format";
+import { Grid, Label, Mono, Muted, Stack, Strong } from "../../components/text";
+import Table from "@splunk/react-ui/Table";
 
 // "Spec snapshot" tab (section 10.3): the frozen spec_snapshot_json a run was
 // launched from (build_spec_snapshot in lifecycle.py). Non-secret by
@@ -34,10 +36,10 @@ interface Snapshot {
 
 function Row({ label, value }: { label: string; value: ReactNode }) {
   return (
-    <div className="flex flex-col gap-0.5">
-      <dt className="text-xs uppercase tracking-wide text-slate-500">{label}</dt>
-      <dd className="text-sm text-slate-200">{value ?? "—"}</dd>
-    </div>
+    <Stack>
+      <Label>{label}</Label>
+      <Strong>{value ?? "—"}</Strong>
+    </Stack>
   );
 }
 
@@ -52,15 +54,15 @@ function rate(snap: Snapshot): string {
 
 export function SpecSnapshotPanel({ snapshot }: { snapshot: unknown }) {
   if (!snapshot || typeof snapshot !== "object") {
-    return <p className="text-sm text-slate-500">No spec snapshot recorded.</p>;
+    return <Muted>No spec snapshot recorded.</Muted>;
   }
   const snap = snapshot as Snapshot;
   const overrides = Object.entries(snap.overrides ?? {});
   const target = snap.target ?? {};
 
   return (
-    <div className="space-y-6">
-      <dl className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+    <Stack $gap="large">
+      <Grid $min="180px">
         <Row label="Name" value={snap.name} />
         <Row label="Engine" value={snap.engine} />
         <Row label="Ref" value={snap.ref} />
@@ -81,19 +83,19 @@ export function SpecSnapshotPanel({ snapshot }: { snapshot: unknown }) {
           label="Telemetry"
           value={snap.telemetry_interval_s != null ? `${snap.telemetry_interval_s}s` : "—"}
         />
-      </dl>
+      </Grid>
 
       <div>
-        <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
+        <Label>
           Target
-        </h4>
-        <dl className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+        </Label>
+        <Grid $min="180px">
           <Row label="Name" value={target.name ?? (target.id != null ? `#${target.id}` : "—")} />
           <Row
             label="HEC URL"
             value={
               target.hec_url ? (
-                <span className="break-all font-mono text-xs">{target.hec_url}</span>
+                <Mono $break>{target.hec_url}</Mono>
               ) : (
                 "—"
               )
@@ -102,32 +104,34 @@ export function SpecSnapshotPanel({ snapshot }: { snapshot: unknown }) {
           <Row label="Default index" value={target.default_index} />
           <Row label="Env tag" value={target.env_tag} />
           <Row label="Verify TLS" value={target.verify_tls ? "yes" : "no"} />
-        </dl>
+        </Grid>
       </div>
 
       {overrides.length > 0 && (
         <div>
-          <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
+          <Label>
             Overrides
-          </h4>
-          <div className="overflow-hidden rounded-md border border-surface-muted">
-            <table className="w-full text-sm">
-              <tbody>
-                {overrides.map(([k, v]) => (
-                  <tr key={k} className="border-b border-surface-muted/50 last:border-0">
-                    <td className="w-1/3 px-3 py-1.5 font-mono text-xs text-slate-400">
-                      {k}
-                    </td>
-                    <td className="px-3 py-1.5 font-mono text-xs text-slate-200">
-                      {String(v)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          </Label>
+          <Table>
+            <Table.Head>
+              <Table.HeadCell>Key</Table.HeadCell>
+              <Table.HeadCell>Value</Table.HeadCell>
+            </Table.Head>
+            <Table.Body>
+              {overrides.map(([k, v]) => (
+                <Table.Row key={k}>
+                  <Table.Cell>
+                    <Mono>{k}</Mono>
+                  </Table.Cell>
+                  <Table.Cell>
+                    <Mono>{String(v)}</Mono>
+                  </Table.Cell>
+                </Table.Row>
+              ))}
+            </Table.Body>
+          </Table>
         </div>
       )}
-    </div>
+    </Stack>
   );
 }

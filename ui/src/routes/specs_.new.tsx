@@ -27,6 +27,9 @@ import { parseApiError } from "../features/specs/errors";
 import { packLooksReplay } from "../features/specs/replay";
 import { packIsMetrics } from "../features/metrics/config";
 import { RATE_MODE_LABEL } from "../features/specs/format";
+import { Between, Bullets, Callout, Grid, Inline, Muted, Negative, Panel, Stack, StickyBar, Strong, Tags, Warn } from "../components/text";
+import Switch from "@splunk/react-ui/Switch";
+import CollapsiblePanel from "@splunk/react-ui/CollapsiblePanel";
 
 // Search params: ?edit=<id> reopens a saved spec for editing; ?clone=<id>
 // prefills a new spec from an existing one; ?pack=<id> pre-selects a pack (the
@@ -504,12 +507,12 @@ function JobWizard() {
   // Loading / error shells for the reference data the wizard depends on.
   if (packsQ.isPending || targetsQ.isPending || (loadId != null && specQ.isPending)) {
     return (
-      <div className="space-y-5">
+      <Stack $gap="large">
         <PageHeader title={editing ? "Edit spec" : "New spec"} />
         <Card>
           <LoadingState />
         </Card>
-      </div>
+      </Stack>
     );
   }
   if (packsQ.isError) {
@@ -522,7 +525,7 @@ function JobWizard() {
   const title = editing ? "Edit spec" : clone != null ? "Clone spec" : "New spec";
 
   return (
-    <div className="space-y-5">
+    <Stack $gap="large">
       <PageHeader
         title={title}
         subtitle="Pick a pack and target, set the rate, then save or launch."
@@ -535,12 +538,12 @@ function JobWizard() {
 
       {/* Panel 1: name + pack */}
       <Card title="1 · Pack">
-        <div className="space-y-4">
+        <Stack $gap="medium">
           <Field label="Spec name">
             <TextInput
               placeholder="e.g. apigw-soak"
               value={form.name}
-              onChange={(e) => patch({ name: e.target.value })}
+              onChange={(_e, { value }) => patch({ name: value })}
             />
           </Field>
           <PackPicker
@@ -551,37 +554,37 @@ function JobWizard() {
             onToggleExtra={toggleExtraPack}
           />
           {mergedPacks.length > 0 && (
-            <div className="rounded-md border border-sky-800/60 bg-sky-950/30 px-3 py-2 text-xs text-sky-200">
+            <Callout $tone="info">
               Merging {mergedPacks.length + 1} packs into one run: their stanzas
               and samples are combined into a single bundle, namespaced by pack
               so same-named samples cannot collide. The run's rate is split
               across every stanza of the merged set, so each pack's share follows
               its own declared rate — not an even split per pack.
-              <div className="mt-1.5 flex flex-wrap gap-1">
+              <Tags>
                 {mergedPacks.map((p) => (
                   <Badge key={p.id} tone="sky">
                     {p.name}
                   </Badge>
                 ))}
-              </div>
-            </div>
+              </Tags>
+            </Callout>
           )}
           {isReplay && (
-            <div className="rounded-md border border-amber-800/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
+            <Callout $tone="warning">
               This pack looks like a replay pack: replay is engine-paced and runs
               on exactly 1 worker (the rate share cannot throttle it). Workers is
               locked to 1. The control plane enforces this at launch regardless.
-            </div>
+            </Callout>
           )}
           {isMetrics && (
-            <div className="rounded-md border border-sky-800/60 bg-sky-950/30 px-3 py-2 text-xs text-sky-200">
+            <Callout $tone="info">
               Metric pack: runs on the metrics engine, engine-paced on its
               resolution grid. Engine and rate mode are locked to count_interval;
               interval and count follow the pack (resolution and series count) and
               the series matrix is sharded across workers.
-            </div>
+            </Callout>
           )}
-        </div>
+        </Stack>
       </Card>
 
       {/* Panel 2: target */}
@@ -595,18 +598,16 @@ function JobWizard() {
 
       {/* Panel 3: rate + fleet + overrides, with live arithmetic */}
       <Card title="3 · Rate and fleet">
-        <div className="space-y-4">
-          <div className="grid gap-3 sm:grid-cols-3">
+        <Stack $gap="medium">
+          <Grid $min="200px">
             <Field label="Engine">
               <Select
                 value={form.engine}
                 disabled={isMetrics}
-                onChange={(e) => patch({ engine: e.target.value })}
+                onChange={(_e, { value }) => patch({ engine: String(value) })}
               >
                 {(isMetrics ? ["metrics"] : ENGINES).map((e) => (
-                  <option key={e} value={e}>
-                    {e}
-                  </option>
+                  <Select.Option key={e} value={e} label={e} />
                 ))}
               </Select>
             </Field>
@@ -614,12 +615,10 @@ function JobWizard() {
               <Select
                 value={form.rate_mode}
                 disabled={isMetrics}
-                onChange={(e) => patch({ rate_mode: e.target.value as RateMode })}
+                onChange={(_e, { value }) => patch({ rate_mode: value as RateMode })}
               >
                 {RATE_MODES.map((m) => (
-                  <option key={m} value={m}>
-                    {RATE_MODE_LABEL[m]}
-                  </option>
+                  <Select.Option key={m} value={m} label={RATE_MODE_LABEL[m]} />
                 ))}
               </Select>
             </Field>
@@ -637,24 +636,22 @@ function JobWizard() {
             >
               <TextInput
                 type="number"
-                min={0}
                 value={form.rate_value}
-                onChange={(e) => patch({ rate_value: e.target.value })}
+                onChange={(_e, { value }) => patch({ rate_value: value })}
               />
             </Field>
-          </div>
+          </Grid>
 
-          <div className="grid gap-3 sm:grid-cols-4">
+          <Grid $min="170px">
             <Field
               label="Workers"
               hint={isReplay ? "Locked to 1 for replay." : undefined}
             >
               <TextInput
                 type="number"
-                min={1}
                 value={form.workers}
                 disabled={isReplay}
-                onChange={(e) => patch({ workers: e.target.value })}
+                onChange={(_e, { value }) => patch({ workers: value })}
               />
             </Field>
             <Field
@@ -665,65 +662,58 @@ function JobWizard() {
             >
               <TextInput
                 type="number"
-                min={0}
                 value={form.interval_s}
-                onChange={(e) => patch({ interval_s: e.target.value })}
+                onChange={(_e, { value }) => patch({ interval_s: value })}
               />
             </Field>
             <Field label="Duration (s)" hint="Blank = unbounded.">
               <TextInput
                 type="number"
-                min={0}
                 value={form.duration_s}
-                onChange={(e) => patch({ duration_s: e.target.value })}
+                onChange={(_e, { value }) => patch({ duration_s: value })}
               />
             </Field>
             <Field label="Fleet">
               <Select
                 value={form.fleet}
-                onChange={(e) => patch({ fleet: e.target.value })}
+                onChange={(_e, { value }) => patch({ fleet: String(value) })}
               >
                 {fleetOptions.map((f) => (
-                  <option key={f} value={f}>
-                    {f}
-                  </option>
+                  <Select.Option key={f} value={f} label={f} />
                 ))}
               </Select>
             </Field>
-          </div>
+          </Grid>
 
           {bytesPerEvent == null && form.pack_id != null && (
-            <p className="text-xs text-slate-500">
+            <Muted $small>
               This pack has no bytes/event estimate, so the EPS/GB conversion is
               approximate; only the {form.rate_mode === "per_day_gb" ? "GB/day" : "EPS"}{" "}
               ceiling is enforced.
-            </p>
+            </Muted>
           )}
 
-          <div className="rounded-md border border-surface-muted bg-surface-soft p-3">
+          <Panel>
             <EstimatePanel
               estimate={estimate}
               workers={workersNum}
               source="preview"
             />
-          </div>
+          </Panel>
 
-          <label className="flex items-center gap-2 text-sm text-slate-300">
-            <input
-              type="checkbox"
-              checked={form.strict_release}
-              onChange={(e) => patch({ strict_release: e.target.checked })}
-              className="h-4 w-4 rounded border-surface-muted bg-surface"
-            />
-            Strict release (abort if not all workers are ready at T0, rather than
-            running a degraded subset)
-          </label>
+          <Inline>
+            <Switch
+              appearance="checkbox"
+              selected={form.strict_release}
+              onClick={() => patch({ strict_release: !form.strict_release })}
+            >
+              Strict release (abort if not all workers are ready at T0, rather
+              than running a degraded subset)
+            </Switch>
+          </Inline>
 
-          <details className="rounded-md border border-surface-muted bg-surface p-3">
-            <summary className="cursor-pointer text-sm text-slate-300">
-              Overrides (index / sourcetype / source / host)
-            </summary>
-            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          <CollapsiblePanel title="Overrides (index / sourcetype / source / host)">
+            <Grid $min="240px">
               {OVERRIDE_KEYS.map((k) => (
                 <Field key={k} label={k}>
                   <TextInput
@@ -731,93 +721,93 @@ function JobWizard() {
                       k === "index" ? selectedTarget?.default_index ?? "" : ""
                     }
                     value={form.overrides[k]}
-                    onChange={(e) =>
+                    onChange={(_e, { value }) =>
                       patch({
-                        overrides: { ...form.overrides, [k]: e.target.value },
+                        overrides: { ...form.overrides, [k]: String(value) },
                       })
                     }
                   />
                 </Field>
               ))}
-            </div>
-          </details>
-        </div>
+            </Grid>
+          </CollapsiblePanel>
+        </Stack>
       </Card>
 
       {/* Backfill (per-run): generate a window of history then finish. */}
       {!isReplay && (
         <Card title="Backfill (optional)">
-          <label className="flex items-center gap-2 text-sm text-slate-300">
-            <input
-              type="checkbox"
-              checked={backfillOn}
-              onChange={(e) => setBackfillOn(e.target.checked)}
-              className="h-4 w-4 rounded border-surface-muted bg-surface text-sky-500 focus:ring-sky-500"
-            />
-            Backfill historical data (generate the last N of history, then finish)
-          </label>
+          <Inline>
+            <Switch
+              appearance="checkbox"
+              selected={backfillOn}
+              onClick={() => setBackfillOn(!backfillOn)}
+            >
+              Backfill historical data (generate the last N of history, then
+              finish)
+            </Switch>
+          </Inline>
           {backfillOn && (
-            <div className="mt-3 space-y-3">
-              <div className="flex flex-wrap items-end gap-3">
-                <div className="w-24">
+            <Stack>
+              <Inline>
+                <div>
                   <Field label="Amount">
                     <TextInput
                       type="number"
-                      min={1}
                       value={backfillAmount}
-                      onChange={(e) => setBackfillAmount(e.target.value)}
+                      onChange={(_e, { value }) => setBackfillAmount(value)}
                     />
                   </Field>
                 </div>
-                <div className="w-28">
+                <div>
                   <Field label="Unit">
                     <Select
                       value={backfillUnit}
-                      onChange={(e) =>
-                        setBackfillUnit(e.target.value as "hours" | "days")
+                      onChange={(_e, { value }) =>
+                        setBackfillUnit(value as "hours" | "days")
                       }
                     >
-                      <option value="hours">hours</option>
-                      <option value="days">days</option>
+                      <Select.Option value="hours" label="hours" />
+                      <Select.Option value="days" label="days" />
                     </Select>
                   </Field>
                 </div>
                 {isMetrics && (
-                  <div className="w-40">
+                  <div>
                     <Field label="Resolution" hint="coarser = fewer points">
                       <Select
                         value={backfillRes}
-                        onChange={(e) => setBackfillRes(e.target.value)}
+                        onChange={(_e, { value }) => setBackfillRes(String(value))}
                       >
-                        <option value="">pack default</option>
-                        <option value="60">60 s</option>
-                        <option value="300">5 min</option>
-                        <option value="900">15 min</option>
-                        <option value="3600">1 hour</option>
+                        <Select.Option value="" label="pack default" />
+                        <Select.Option value="60" label="60 s" />
+                        <Select.Option value="300" label="5 min" />
+                        <Select.Option value="900" label="15 min" />
+                        <Select.Option value="3600" label="1 hour" />
                       </Select>
                     </Field>
                   </div>
                 )}
-              </div>
+              </Inline>
               {backfillEstimate && (
-                <p className="text-xs text-slate-400">
+                <Muted $small>
                   {"≈ "}
-                  <span className="font-medium text-slate-200">
+                  <Strong>
                     {backfillEstimate.events.toLocaleString()}
-                  </span>{" "}
+                  </Strong>{" "}
                   events
                   {backfillEstimate.series != null && (
                     <> {"·"} {backfillEstimate.series} series</>
                   )}
                   {" · ~"}
-                  <span className="font-medium text-slate-200">
+                  <Strong>
                     {backfillEstimate.seconds >= 3600
                       ? (backfillEstimate.seconds / 3600).toFixed(1) + " h"
                       : backfillEstimate.seconds >= 60
                         ? (backfillEstimate.seconds / 60).toFixed(1) + " min"
                         : Math.max(1, Math.round(backfillEstimate.seconds)) +
                           " s"}
-                  </span>{" "}
+                  </Strong>{" "}
                   to deliver at {backfillEstimate.deliverEps.toLocaleString()} eps
                   {backfillEstimate.bytes != null && (
                     <>
@@ -829,52 +819,52 @@ function JobWizard() {
                           : Math.round(backfillEstimate.bytes / 1e3) + " KB"}
                     </>
                   )}
-                </p>
+                </Muted>
               )}
-              <p className="rounded-md border border-amber-800/50 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
+              <Callout $tone="warning">
                 Re-running a backfill appends duplicate points; mstats will
                 double-count. Run once, or clear the window first.
                 {isMetrics
                   ? " Metrics backfill preserves the daily shape across the window."
                   : " Eventgen backfill fills the window to now with uniform density."}
-              </p>
-            </div>
+              </Callout>
+            </Stack>
           )}
         </Card>
       )}
 
       {/* Sticky action bar */}
-      <div className="sticky bottom-0 -mx-6 border-t border-surface-muted bg-surface-soft/95 px-6 py-3 backdrop-blur">
+      <StickyBar>
         {errText && (
-          <div className="mb-3 rounded-md border border-red-800/60 bg-red-950/40 px-3 py-2 text-sm text-red-200">
+          <Callout $tone="error">
             {errText}
             {lintErrors && lintErrors.length > 0 && (
-              <ul className="mt-1 list-disc space-y-0.5 pl-5 text-xs text-red-300">
+              <Bullets>
                 {lintErrors.map((e, i) => (
                   <li key={i}>{e}</li>
                 ))}
-              </ul>
+              </Bullets>
             )}
-          </div>
+          </Callout>
         )}
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="text-xs text-slate-500">
+        <Between>
+          <Muted $small>
             {missing.length > 0 ? (
               <span>Provide {missing.join(", ")} to continue.</span>
             ) : overCeiling ? (
-              <span className="text-red-300">
+              <Negative>
                 Over the engine ceiling — reduce the rate or add workers to launch.
-              </span>
+              </Negative>
             ) : targetRed ? (
-              <span className="text-amber-300">
+              <Warn>
                 Target last probed unhealthy; launch may be rejected.{" "}
                 <Badge tone="amber">warning</Badge>
-              </span>
+              </Warn>
             ) : (
               <span>Ready to save.</span>
             )}
-          </div>
-          <div className="flex items-center gap-2">
+          </Muted>
+          <Inline>
             <Button variant="secondary" disabled={!canSave} onClick={onSave}>
               {saving === "save"
                 ? "Saving…"
@@ -885,10 +875,10 @@ function JobWizard() {
             <Button variant="primary" disabled={!canRun} onClick={onSaveAndRun}>
               {saving === "run" ? "Launching…" : "Save & Run"}
             </Button>
-          </div>
-        </div>
-      </div>
-    </div>
+          </Inline>
+        </Between>
+      </StickyBar>
+    </Stack>
   );
 }
 

@@ -9,46 +9,21 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as UsersRouteImport } from './routes/users'
-import { Route as TargetsRouteImport } from './routes/targets'
-import { Route as SpecsRouteImport } from './routes/specs'
-import { Route as RunsRouteImport } from './routes/runs'
-import { Route as ReposRouteImport } from './routes/repos'
-import { Route as PacksRouteImport } from './routes/packs'
-import { Route as LoginRouteImport } from './routes/login'
 import { Route as IndexRouteImport } from './routes/index'
-import { Route as SpecsNewRouteImport } from './routes/specs_.new'
-import { Route as RunsRunIdRouteImport } from './routes/runs_.$runId'
+import { Route as LoginRouteImport } from './routes/login'
+import { Route as PacksRouteImport } from './routes/packs'
+import { Route as ReposRouteImport } from './routes/repos'
+import { Route as RunsRouteImport } from './routes/runs'
+import { Route as SpecsRouteImport } from './routes/specs'
+import { Route as TargetsRouteImport } from './routes/targets'
+import { Route as UsersRouteImport } from './routes/users'
 import { Route as MetricPacksNewRouteImport } from './routes/metric-packs.new'
+import { Route as RunsRunIdRouteImport } from './routes/runs_.$runId'
+import { Route as SpecsNewRouteImport } from './routes/specs_.new'
 
-const UsersRoute = UsersRouteImport.update({
-  id: '/users',
-  path: '/users',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const TargetsRoute = TargetsRouteImport.update({
-  id: '/targets',
-  path: '/targets',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const SpecsRoute = SpecsRouteImport.update({
-  id: '/specs',
-  path: '/specs',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const RunsRoute = RunsRouteImport.update({
-  id: '/runs',
-  path: '/runs',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ReposRoute = ReposRouteImport.update({
-  id: '/repos',
-  path: '/repos',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const PacksRoute = PacksRouteImport.update({
-  id: '/packs',
-  path: '/packs',
+const IndexRoute = IndexRouteImport.update({
+  id: '/',
+  path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LoginRoute = LoginRouteImport.update({
@@ -56,14 +31,39 @@ const LoginRoute = LoginRouteImport.update({
   path: '/login',
   getParentRoute: () => rootRouteImport,
 } as any)
-const IndexRoute = IndexRouteImport.update({
-  id: '/',
-  path: '/',
+const PacksRoute = PacksRouteImport.update({
+  id: '/packs',
+  path: '/packs',
   getParentRoute: () => rootRouteImport,
 } as any)
-const SpecsNewRoute = SpecsNewRouteImport.update({
-  id: '/specs_/new',
-  path: '/specs/new',
+const ReposRoute = ReposRouteImport.update({
+  id: '/repos',
+  path: '/repos',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const RunsRoute = RunsRouteImport.update({
+  id: '/runs',
+  path: '/runs',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SpecsRoute = SpecsRouteImport.update({
+  id: '/specs',
+  path: '/specs',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const TargetsRoute = TargetsRouteImport.update({
+  id: '/targets',
+  path: '/targets',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const UsersRoute = UsersRouteImport.update({
+  id: '/users',
+  path: '/users',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const MetricPacksNewRoute = MetricPacksNewRouteImport.update({
+  id: '/metric-packs/new',
+  path: '/metric-packs/new',
   getParentRoute: () => rootRouteImport,
 } as any)
 const RunsRunIdRoute = RunsRunIdRouteImport.update({
@@ -71,9 +71,9 @@ const RunsRunIdRoute = RunsRunIdRouteImport.update({
   path: '/runs/$runId',
   getParentRoute: () => rootRouteImport,
 } as any)
-const MetricPacksNewRoute = MetricPacksNewRouteImport.update({
-  id: '/metric-packs/new',
-  path: '/metric-packs/new',
+const SpecsNewRoute = SpecsNewRouteImport.update({
+  id: '/specs_/new',
+  path: '/specs/new',
   getParentRoute: () => rootRouteImport,
 } as any)
 
@@ -175,46 +175,11 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/users': {
-      id: '/users'
-      path: '/users'
-      fullPath: '/users'
-      preLoaderRoute: typeof UsersRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/targets': {
-      id: '/targets'
-      path: '/targets'
-      fullPath: '/targets'
-      preLoaderRoute: typeof TargetsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/specs': {
-      id: '/specs'
-      path: '/specs'
-      fullPath: '/specs'
-      preLoaderRoute: typeof SpecsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/runs': {
-      id: '/runs'
-      path: '/runs'
-      fullPath: '/runs'
-      preLoaderRoute: typeof RunsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/repos': {
-      id: '/repos'
-      path: '/repos'
-      fullPath: '/repos'
-      preLoaderRoute: typeof ReposRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/packs': {
-      id: '/packs'
-      path: '/packs'
-      fullPath: '/packs'
-      preLoaderRoute: typeof PacksRouteImport
+    '/': {
+      id: '/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/login': {
@@ -224,18 +189,53 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof LoginRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/': {
-      id: '/'
-      path: '/'
-      fullPath: '/'
-      preLoaderRoute: typeof IndexRouteImport
+    '/packs': {
+      id: '/packs'
+      path: '/packs'
+      fullPath: '/packs'
+      preLoaderRoute: typeof PacksRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/specs_/new': {
-      id: '/specs_/new'
-      path: '/specs/new'
-      fullPath: '/specs/new'
-      preLoaderRoute: typeof SpecsNewRouteImport
+    '/repos': {
+      id: '/repos'
+      path: '/repos'
+      fullPath: '/repos'
+      preLoaderRoute: typeof ReposRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/runs': {
+      id: '/runs'
+      path: '/runs'
+      fullPath: '/runs'
+      preLoaderRoute: typeof RunsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/specs': {
+      id: '/specs'
+      path: '/specs'
+      fullPath: '/specs'
+      preLoaderRoute: typeof SpecsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/targets': {
+      id: '/targets'
+      path: '/targets'
+      fullPath: '/targets'
+      preLoaderRoute: typeof TargetsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/users': {
+      id: '/users'
+      path: '/users'
+      fullPath: '/users'
+      preLoaderRoute: typeof UsersRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/metric-packs/new': {
+      id: '/metric-packs/new'
+      path: '/metric-packs/new'
+      fullPath: '/metric-packs/new'
+      preLoaderRoute: typeof MetricPacksNewRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/runs_/$runId': {
@@ -245,11 +245,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof RunsRunIdRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/metric-packs/new': {
-      id: '/metric-packs/new'
-      path: '/metric-packs/new'
-      fullPath: '/metric-packs/new'
-      preLoaderRoute: typeof MetricPacksNewRouteImport
+    '/specs_/new': {
+      id: '/specs_/new'
+      path: '/specs/new'
+      fullPath: '/specs/new'
+      preLoaderRoute: typeof SpecsNewRouteImport
       parentRoute: typeof rootRouteImport
     }
   }

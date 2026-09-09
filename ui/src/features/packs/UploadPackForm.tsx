@@ -5,6 +5,8 @@ import { api, ApiError } from "../../lib/api";
 import type { PackOut } from "../../lib/types";
 import { Button } from "../../components/Button";
 import { Field, TextInput } from "../../components/Field";
+import { Bullets, Callout, Form, Grid, Inline, Strong } from "../../components/text";
+import File from "@splunk/react-ui/File";
 
 // The "Upload pack" form body (rendered inside a Modal by the Packs page).
 // For the customer with no git access: a .tar.gz/.tgz/.tar or .zip of a pack
@@ -69,27 +71,34 @@ export function UploadPackForm({ onUploaded, onCancel }: Props) {
     : [];
 
   return (
-    <form onSubmit={submit} className="space-y-4">
+    <Form onSubmit={submit}>
       <Field
         label="Pack archive"
         hint="A .tar.gz, .tgz, .tar or .zip of the pack directory (wrapped in a folder or not — both work)."
       >
-        <input
-          type="file"
+        {/* Splunk's File, which brings the drop target and the selected-file
+            list rather than a bare <input type="file">. */}
+        <File
           accept=".tar.gz,.tgz,.tar,.zip,application/gzip,application/zip,application/x-tar"
-          onChange={(e) => {
-            setFile(e.target.files?.[0] ?? null);
+          allowMultiple={false}
+          onRequestAdd={(added) => {
+            setFile(added[0] ?? null);
             setLintFailed(null);
           }}
-          className="block w-full text-sm text-slate-300 file:mr-3 file:rounded-md file:border-0 file:bg-surface-muted file:px-3 file:py-1.5 file:text-sm file:text-slate-100 hover:file:bg-surface"
-        />
+          onRequestRemove={() => {
+            setFile(null);
+            setLintFailed(null);
+          }}
+        >
+          {file ? <File.Item key={file.name} name={file.name} /> : null}
+        </File>
       </Field>
 
-      <div className="grid grid-cols-2 gap-3">
+      <Grid $min="180px">
         <Field label="Name" hint="Optional; pack.yaml's name is used when blank.">
           <TextInput
             value={name}
-            onChange={(e) => setName(e.target.value)}
+            onChange={(_e, { value }) => setName(value)}
             placeholder="my-pack"
             spellCheck={false}
           />
@@ -97,33 +106,33 @@ export function UploadPackForm({ onUploaded, onCancel }: Props) {
         <Field label="Description" hint="Optional.">
           <TextInput
             value={description}
-            onChange={(e) => setDescription(e.target.value)}
+            onChange={(_e, { value }) => setDescription(value)}
             placeholder="What this pack generates"
           />
         </Field>
-      </div>
+      </Grid>
 
       {(fieldError || apiMessage) && (
-        <p className="rounded-md border border-red-800/60 bg-red-950/40 px-3 py-2 text-xs text-red-300">
+        <Callout $tone="error">
           {fieldError || apiMessage}
-        </p>
+        </Callout>
       )}
 
       {lintFailed && (
-        <div className="rounded-md border border-amber-800/60 bg-amber-950/40 px-3 py-2 text-xs text-amber-200">
-          <p className="font-medium">
+        <Callout $tone="warning">
+          <Strong>
             Uploaded as “{lintFailed.name}”, but it failed lint — fix the pack
             and upload again (runs are blocked until it lints clean):
-          </p>
-          <ul className="mt-1 list-disc space-y-0.5 pl-4 text-amber-300">
+          </Strong>
+          <Bullets>
             {lintErrors.map((err) => (
               <li key={err}>{err}</li>
             ))}
-          </ul>
-        </div>
+          </Bullets>
+        </Callout>
       )}
 
-      <div className="flex items-center justify-end gap-2 pt-1">
+      <Inline>
         <Button
           type="button"
           variant="ghost"
@@ -135,7 +144,7 @@ export function UploadPackForm({ onUploaded, onCancel }: Props) {
         <Button type="submit" variant="primary" disabled={mutation.isPending || !file}>
           {mutation.isPending ? "Uploading…" : "Upload pack"}
         </Button>
-      </div>
-    </form>
+      </Inline>
+    </Form>
   );
 }

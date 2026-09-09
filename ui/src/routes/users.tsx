@@ -18,6 +18,7 @@ import { NewUserForm } from "../features/users/NewUserForm";
 import { ResetPasswordModal } from "../features/users/ResetPasswordModal";
 import { USERS_QUERY_KEY } from "../features/users/keys";
 import { absoluteTime, relativeTime } from "../features/format";
+import { Inline, Stack, Strong } from "../components/text";
 
 // Admin Users page. Lists every user; lets an admin create users, change a
 // role, reset a password, (de)activate an account and delete one. The API owns
@@ -78,7 +79,7 @@ function Users() {
   // navigation should also be refused clearly rather than firing a 403 fetch.
   if (!isAdmin) {
     return (
-      <div className="space-y-5">
+      <Stack $gap="large">
         <PageHeader title="Users" />
         <Card>
           <EmptyState
@@ -86,7 +87,7 @@ function Users() {
             message="Only administrators can manage users. Ask an admin if you need access."
           />
         </Card>
-      </div>
+      </Stack>
     );
   }
 
@@ -95,19 +96,19 @@ function Users() {
       key: "username",
       header: "Username",
       cell: (u) => (
-        <div className="flex items-center gap-2">
-          <span className="font-medium text-slate-100">{u.username}</span>
+        <Inline>
+          <Strong>{u.username}</Strong>
           {me && u.id === me.id && (
             <Badge tone="sky">you</Badge>
           )}
-        </div>
+        </Inline>
       ),
     },
     {
       key: "email",
       header: "Email",
       cell: (u) => (
-        <span className="text-slate-300">{u.email || "—"}</span>
+        <span>{u.email || "—"}</span>
       ),
     },
     {
@@ -116,23 +117,20 @@ function Users() {
       cell: (u) => {
         const saving = patch.isPending && patch.variables?.id === u.id;
         return (
-          <div className="flex items-center gap-2">
+          <Inline>
             <Select
               value={u.role}
               disabled={saving}
-              className="w-32"
-              onChange={(e) =>
-                patch.mutate({ id: u.id, body: { role: e.target.value as Role } })
+              onChange={(_e, { value }) =>
+                patch.mutate({ id: u.id, body: { role: value as Role } })
               }
             >
               {ROLES.map((r) => (
-                <option key={r} value={r}>
-                  {r}
-                </option>
+                <Select.Option key={r} value={r} label={r} />
               ))}
             </Select>
             <Badge tone={roleTone(u.role)}>{u.role}</Badge>
-          </div>
+          </Inline>
         );
       },
     },
@@ -158,7 +156,6 @@ function Users() {
       header: "Last login",
       cell: (u) => (
         <span
-          className="text-slate-400"
           title={u.last_login_at ? absoluteTime(u.last_login_at) : undefined}
         >
           {u.last_login_at ? relativeTime(u.last_login_at) : "never"}
@@ -168,14 +165,14 @@ function Users() {
     {
       key: "actions",
       header: "",
-      className: "text-right whitespace-nowrap",
+      align: "right",
       cell: (u) => {
         const saving = patch.isPending && patch.variables?.id === u.id;
         const deleting = remove.isPending && remove.variables === u.id;
         const isConfirming = confirmDelete === u.id;
         const isSelf = !!me && u.id === me.id;
         return (
-          <div className="flex items-center justify-end gap-2">
+          <Inline>
             <Button
               variant="secondary"
               onClick={() => setResetFor(u)}
@@ -220,14 +217,14 @@ function Users() {
                 Delete
               </Button>
             )}
-          </div>
+          </Inline>
         );
       },
     },
   ];
 
   return (
-    <div className="space-y-5">
+    <Stack $gap="large">
       <PageHeader
         title="Users"
         subtitle="Local accounts and SSO identities. Passwords are write-only and never shown."
@@ -262,7 +259,7 @@ function Users() {
         open={resetFor !== null}
         onClose={() => setResetFor(null)}
       />
-    </div>
+    </Stack>
   );
 }
 

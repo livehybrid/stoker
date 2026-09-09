@@ -10,10 +10,19 @@ import { Table, type Column } from "../components/Table";
 import { Button } from "../components/Button";
 import { Badge, StatusBadge } from "../components/Badge";
 import { EmptyState, ErrorState, LoadingState } from "../components/States";
-import { cn } from "../components/cn";
 import { useToast } from "../components/Toast";
 import { parseApiError } from "../features/specs/errors";
 import { formatDuration, formatRate } from "../features/specs/format";
+import { EndRow, Inline, Muted, Stack, Strong } from "../components/text";
+import { Modal } from "../features/ui/Modal";
+import styled from "styled-components";
+import { variables } from "@splunk/themes";
+
+const Highlightable = styled.div<{ $on?: boolean }>`
+  border-radius: ${variables.borderRadius};
+  box-shadow: ${(props) => (props.$on ? variables.focusShadow : "none")};
+  transition: box-shadow 200ms;
+`;
 
 // ?highlight=<id> briefly emphasises a just-saved spec (set by the wizard on
 // save). It is presentational only.
@@ -34,24 +43,26 @@ function ConfirmDelete({
   busy: boolean;
 }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div className="w-full max-w-md rounded-lg border border-surface-muted bg-surface-soft p-5 shadow-xl">
-        <h2 className="text-sm font-semibold text-slate-100">Delete spec</h2>
-        <p className="mt-2 text-sm text-slate-400">
-          Delete <span className="text-slate-200">{spec.name}</span>? This cannot
-          be undone. A spec that has runs cannot be deleted (the runs reference
-          it).
-        </p>
-        <div className="mt-4 flex justify-end gap-2">
+    // Splunk's Modal, via the shared wrapper: focus trapping, Escape, and a
+    // refusal to close on a click away, which is what a destructive
+    // confirmation wants.
+    <Modal open onClose={onClose} title="Delete spec" width="480px"
+      footer={
+        <>
           <Button variant="ghost" onClick={onClose} disabled={busy}>
             Cancel
           </Button>
           <Button variant="danger" onClick={onConfirm} disabled={busy}>
             {busy ? "Deleting…" : "Delete"}
           </Button>
-        </div>
-      </div>
-    </div>
+        </>
+      }
+    >
+      <Muted>
+        Delete <Strong>{spec.name}</Strong>? This cannot be undone. A spec that
+        has runs cannot be deleted (the runs reference it).
+      </Muted>
+    </Modal>
   );
 }
 
@@ -124,10 +135,10 @@ function Specs() {
       key: "name",
       header: "Name",
       cell: (s) => (
-        <div className="flex items-center gap-2">
-          <span className="font-medium text-slate-100">{s.name}</span>
+        <Inline>
+          <Strong>{s.name}</Strong>
           {highlight === s.id && <Badge tone="sky">saved</Badge>}
-        </div>
+        </Inline>
       ),
     },
     {
@@ -136,9 +147,9 @@ function Specs() {
       cell: (s) => {
         const p = packById.get(s.pack_id);
         return p ? (
-          <span className="text-slate-300">{p.name}</span>
+          <span>{p.name}</span>
         ) : (
-          <span className="text-slate-500">#{s.pack_id}</span>
+          <Muted>#{s.pack_id}</Muted>
         );
       },
     },
@@ -148,12 +159,12 @@ function Specs() {
       cell: (s) => {
         const t = targetById.get(s.target_id);
         return t ? (
-          <span className="flex items-center gap-1.5">
-            <span className="text-slate-300">{t.name}</span>
+          <Inline>
+            <span>{t.name}</span>
             <StatusBadge state={t.health_state} />
-          </span>
+          </Inline>
         ) : (
-          <span className="text-slate-500">#{s.target_id}</span>
+          <Muted>#{s.target_id}</Muted>
         );
       },
     },
@@ -161,7 +172,7 @@ function Specs() {
       key: "rate",
       header: "Rate",
       cell: (s) => (
-        <span className="text-slate-300">
+        <span>
           {formatRate(s.rate_mode, s.rate_value, s.interval_s)}
         </span>
       ),
@@ -171,16 +182,16 @@ function Specs() {
       key: "duration",
       header: "Duration",
       cell: (s) => (
-        <span className="text-slate-400">{formatDuration(s.duration_s)}</span>
+        <Muted>{formatDuration(s.duration_s)}</Muted>
       ),
     },
     { key: "fleet", header: "Fleet", cell: (s) => s.fleet },
     {
       key: "actions",
       header: "",
-      className: "text-right",
+      align: "right",
       cell: (s) => (
-        <div className="flex justify-end gap-1.5">
+        <EndRow>
           <Button
             variant="primary"
             disabled={runM.isPending && runningId === s.id}
@@ -207,7 +218,7 @@ function Specs() {
           <Button variant="danger" onClick={() => setToDelete(s)}>
             Delete
           </Button>
-        </div>
+        </EndRow>
       ),
     },
   ];
@@ -215,7 +226,7 @@ function Specs() {
   const loading = specsQ.isPending || packsQ.isPending || targetsQ.isPending;
 
   return (
-    <div className="space-y-5">
+    <Stack $gap="large">
       <PageHeader
         title="Specs"
         subtitle="Saved job specifications: launch, edit, clone or delete."
@@ -228,11 +239,10 @@ function Specs() {
           </Button>
         }
       />
-      <Card
-        className={cn(
-          highlight != null && "ring-1 ring-sky-700/50 transition-shadow",
-        )}
-      >
+      {/* The card is highlighted briefly when arriving from a just-created
+          spec, so the row you are looking for announces itself. */}
+      <Highlightable $on={highlight != null}>
+        <Card>
         {loading ? (
           <LoadingState />
         ) : specsQ.isError ? (
@@ -258,7 +268,8 @@ function Specs() {
             }
           />
         )}
-      </Card>
+        </Card>
+      </Highlightable>
 
       {toDelete && (
         <ConfirmDelete
@@ -268,7 +279,7 @@ function Specs() {
           onConfirm={() => deleteM.mutate(toDelete.id)}
         />
       )}
-    </div>
+    </Stack>
   );
 }
 

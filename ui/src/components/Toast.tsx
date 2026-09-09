@@ -7,8 +7,27 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { cn } from "./cn";
+import MessageBar from "@splunk/react-ui/MessageBar";
+import styled from "styled-components";
+import { variables } from "@splunk/themes";
 
+/*
+ * Page-level feedback.
+ *
+ * This used to be toasts stacked in the bottom-right corner. Splunk UI
+ * deprecates that pattern outright: a message that removes itself is a message
+ * a screen-reader user, or anyone who looked away, never received. It is now a
+ * MessageBar at the top of the page, dismissible and persistent.
+ *
+ * Splunk's guidance also says not to stack MessageBars, because stacking
+ * breaks the one-to-one relationship between a message and the action that
+ * caused it. So only the newest is rendered, and older unread ones are counted
+ * beside it rather than piling up down the page.
+ *
+ * The `useToast()` API is unchanged, because every mutation in the app calls
+ * it and what those call sites mean ("tell the operator this happened") has
+ * not changed.
+ */
 type ToastTone = "info" | "success" | "error";
 
 interface ToastItem {
@@ -25,16 +44,24 @@ interface ToastApi {
 
 const ToastContext = createContext<ToastApi | null>(null);
 
-const TONE_STYLES: Record<ToastTone, string> = {
-  info: "border-sky-700 bg-sky-950/90 text-sky-100",
-  success: "border-emerald-700 bg-emerald-950/90 text-emerald-100",
-  error: "border-red-700 bg-red-950/90 text-red-100",
-};
+const Bar = styled.div`
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  padding: ${variables.spacingSmall} ${variables.spacingLarge} 0;
+  background-color: ${variables.backgroundColorPage};
+`;
 
-/**
- * Lightweight toast provider (a local stand-in for sonner). Toasts auto-dismiss
- * after ~4 s and stack bottom-right. Use via the `useToast()` hook.
- */
+const Count = styled.span`
+  margin-left: ${variables.spacingSmall};
+  color: ${variables.contentColorMuted};
+  font-size: ${variables.fontSizeSmall};
+`;
+
+// A confirmation is the one kind that may reasonably disappear: the state it
+// reports is visible in the page behind it. Errors stay until they are read.
+const AUTO_DISMISS_MS = 8000;
+
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<ToastItem[]>([]);
   const nextId = useRef(1);
@@ -45,9 +72,14 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 
   const show = useCallback(
     (message: string, tone: ToastTone = "info") => {
-      const id = nextId.current++;
-      setItems((prev) => [...prev, { id, message, tone }]);
-      window.setTimeout(() => remove(id), 4000);
+      const id = nextId.current;
+      nextId.current += 1;
+      // Capped: a mutation that fails every two seconds must not grow an
+      // unbounded list of identical messages in memory.
+      setItems((prev) => [...prev.slice(-9), { id, message, tone }]);
+      if (tone !== "error") {
+        window.setTimeout(() => remove(id), AUTO_DISMISS_MS);
+      }
     },
     [remove],
   );
@@ -61,32 +93,32 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     [show],
   );
 
+  const current = items[items.length - 1];
+  const older = items.length - 1;
+
   return (
     <ToastContext.Provider value={api}>
-      {children}
-      <div className="pointer-events-none fixed bottom-4 right-4 z-50 flex w-80 flex-col gap-2">
-        {items.map((t) => (
-          <div
-            key={t.id}
-            className={cn(
-              "pointer-events-auto cursor-pointer rounded-md border px-3 py-2 text-sm shadow-lg",
-              TONE_STYLES[t.tone],
-            )}
-            onClick={() => remove(t.id)}
-            role="status"
+      {current && (
+        <Bar>
+          <MessageBar
+            type={current.tone}
+            aria-label="Stoker notification"
+            onRequestClose={() => remove(current.id)}
           >
-            {t.message}
-          </div>
-        ))}
-      </div>
+            {current.message}
+            {older > 0 && <Count>and {older} earlier message(s)</Count>}
+          </MessageBar>
+        </Bar>
+      )}
+      {children}
     </ToastContext.Provider>
   );
 }
 
 export function useToast(): ToastApi {
-  const ctx = useContext(ToastContext);
-  if (!ctx) {
-    throw new Error("useToast must be used within a ToastProvider");
+  const api = useContext(ToastContext);
+  if (!api) {
+    throw new Error("useToast() must be used inside a <ToastProvider>");
   }
-  return ctx;
+  return api;
 }

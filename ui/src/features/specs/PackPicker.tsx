@@ -10,13 +10,34 @@ import type { PackOut } from "../../lib/types";
 import { Badge, StatusBadge } from "../../components/Badge";
 import { TextInput } from "../../components/Field";
 import { LoadingState, ErrorState } from "../../components/States";
-import { cn } from "../../components/cn";
 import { packLooksReplay, packLooksTrusted } from "./replay";
 import { packIsMetrics } from "../metrics/config";
+import { Between, Bullets, Grid, Inline, Label, Mono, Muted, Panel, Pre, ScrollList, Stack, Strong, Tags } from "../../components/text";
+import styled from "styled-components";
+import { variables } from "@splunk/themes";
+import { Button } from "../../components/Button";
+
+const Selectable = styled.div<{ $selected?: boolean; $disabled?: boolean }>`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: ${variables.spacingMedium};
+  border: 1px solid
+    ${(props) => (props.$selected ? variables.contentColorAccent : variables.borderColor)};
+  border-radius: ${variables.borderRadius};
+  background-color: ${(props) =>
+    props.$selected ? variables.interactiveColorOverlaySelected : "transparent"};
+  opacity: ${(props) => (props.$disabled ? 0.5 : 1)};
+
+  &:hover {
+    border-color: ${(props) =>
+      props.$disabled ? variables.borderColor : variables.interactiveColorBorderHover};
+  }
+`;
 
 function PackBadges({ pack }: { pack: PackOut }) {
   return (
-    <span className="flex flex-wrap items-center gap-1">
+    <Tags>
       {pack.verified ? (
         <Badge tone="green">verified</Badge>
       ) : (
@@ -25,7 +46,7 @@ function PackBadges({ pack }: { pack: PackOut }) {
       {pack.lint_status !== "ok" && <StatusBadge state={pack.lint_status} />}
       {packLooksReplay(pack) && <Badge tone="amber">replay</Badge>}
       {packLooksTrusted(pack) && <Badge tone="sky">trusted code</Badge>}
-    </span>
+    </Tags>
   );
 }
 
@@ -40,52 +61,51 @@ function PackPreview({ packId }: { packId: number }) {
 
   const { stanzas, sample_lines, lint_status, lint_errors } = q.data;
   return (
-    <div className="space-y-3 text-sm">
-      <div className="flex items-center gap-2">
-        <span className="text-slate-400">Lint:</span>
+    <Stack>
+      <Inline>
+        <Muted>Lint:</Muted>
         <StatusBadge state={lint_status} />
-      </div>
+      </Inline>
       {lint_errors.length > 0 && (
-        <ul className="list-disc space-y-0.5 pl-5 text-xs text-red-300">
+        <Bullets>
           {lint_errors.map((e, i) => (
             <li key={i}>{e}</li>
           ))}
-        </ul>
+        </Bullets>
       )}
       <div>
-        <div className="mb-1 text-xs uppercase tracking-wide text-slate-500">
+        <Label>
           Stanzas ({stanzas.length})
-        </div>
+        </Label>
         {stanzas.length === 0 ? (
-          <p className="text-xs text-slate-500">No stanzas parsed.</p>
+          <Muted $small>No stanzas parsed.</Muted>
         ) : (
-          <div className="space-y-2">
+          <Stack>
             {stanzas.map((s) => {
               const lines = sample_lines[s] ?? [];
               return (
                 <div
                   key={s}
-                  className="rounded-md border border-surface-muted bg-surface"
                 >
-                  <div className="border-b border-surface-muted px-2 py-1 font-mono text-xs text-slate-300">
+                  <Mono>
                     [{s}]
-                  </div>
+                  </Mono>
                   {lines.length > 0 ? (
-                    <pre className="max-h-40 overflow-auto px-2 py-1 text-[11px] leading-relaxed text-slate-400">
+                    <Pre>
                       {lines.join("\n")}
-                    </pre>
+                    </Pre>
                   ) : (
-                    <p className="px-2 py-1 text-[11px] text-slate-600">
+                    <Muted $small>
                       No sample lines.
-                    </p>
+                    </Muted>
                   )}
                 </div>
               );
             })}
-          </div>
+          </Stack>
         )}
       </div>
-    </div>
+    </Stack>
   );
 }
 
@@ -127,18 +147,18 @@ export function PackPicker({
     : packs;
 
   return (
-    <div className="grid gap-4 md:grid-cols-2">
-      <div className="space-y-2">
+    <Grid $min="300px">
+      <Stack>
         <TextInput
           placeholder="Filter packs…"
           value={filter}
-          onChange={(e) => setFilter(e.target.value)}
+          onChange={(_e, { value }) => setFilter(value)}
         />
-        <div className="max-h-96 space-y-1 overflow-auto pr-1">
+        <ScrollList>
           {shown.length === 0 ? (
-            <p className="px-2 py-6 text-center text-sm text-slate-500">
+            <Muted>
               No packs match.
-            </p>
+            </Muted>
           ) : (
             shown.map((p) => {
               const active = p.id === selectedId;
@@ -154,43 +174,33 @@ export function PackPicker({
                 packMergeable(primary) &&
                 packMergeable(p);
               return (
-                <div
-                  key={p.id}
-                  className={cn(
-                    "flex w-full items-stretch gap-1 rounded-md border transition-colors",
-                    active
-                      ? "border-sky-600 bg-sky-950/40"
-                      : inMerge
-                        ? "border-sky-800/70 bg-sky-950/20"
-                        : "border-surface-muted bg-surface hover:bg-surface-muted/40",
-                  )}
-                >
+                <Selectable key={p.id} $selected={active || inMerge}>
                   <button
                     type="button"
                     onClick={() => onSelect(p)}
-                    className="min-w-0 flex-1 px-3 py-2 text-left"
                   >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="truncate text-sm font-medium text-slate-100">
+                    <Between>
+                      <Strong>
                         {p.name}
-                      </span>
-                      <span className="shrink-0 text-xs text-slate-500">
+                      </Strong>
+                      <Muted $small>
                         {p.stanza_count ?? "—"} stanza
                         {p.stanza_count === 1 ? "" : "s"}
-                      </span>
-                    </div>
+                      </Muted>
+                    </Between>
                     {p.description && (
-                      <p className="mt-0.5 truncate text-xs text-slate-500">
+                      <Muted $small>
                         {p.description}
-                      </p>
+                      </Muted>
                     )}
-                    <div className="mt-1.5 flex flex-wrap items-center gap-1">
+                    <Tags>
                       <PackBadges pack={p} />
                       {inMerge && <Badge tone="sky">in merge</Badge>}
-                    </div>
+                    </Tags>
                   </button>
                   {canToggle && (
-                    <button
+                    <Button
+                      variant={inMerge ? "primary" : "ghost"}
                       type="button"
                       title={
                         inMerge
@@ -198,32 +208,26 @@ export function PackPicker({
                           : "Also send this pack in the same run"
                       }
                       onClick={() => onToggleExtra(p)}
-                      className={cn(
-                        "shrink-0 self-center rounded-md border px-2 py-1 mr-2 text-xs transition-colors",
-                        inMerge
-                          ? "border-sky-700 bg-sky-900/50 text-sky-200 hover:bg-sky-900/80"
-                          : "border-surface-muted text-slate-400 hover:bg-surface-muted/60 hover:text-slate-200",
-                      )}
                     >
                       {inMerge ? "✓ Added" : "+ Add"}
-                    </button>
+                    </Button>
                   )}
-                </div>
+                </Selectable>
               );
             })
           )}
-        </div>
-      </div>
+        </ScrollList>
+      </Stack>
 
-      <div className="rounded-md border border-surface-muted bg-surface-soft p-3">
+      <Panel>
         {selectedId != null ? (
           <PackPreview packId={selectedId} />
         ) : (
-          <p className="text-sm text-slate-500">
+          <Muted>
             Select a pack to preview its stanzas and sample lines.
-          </p>
+          </Muted>
         )}
-      </div>
-    </div>
+      </Panel>
+    </Grid>
   );
 }

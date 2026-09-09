@@ -1,15 +1,26 @@
 import type { ReactNode } from "react";
-import { cn } from "./cn";
+import Chip from "@splunk/react-ui/Chip";
 
+/*
+ * A status pill.
+ *
+ * This is Splunk's Chip. The tone names are kept because call sites all over
+ * the app pass them, and because they say what the colour MEANS ("amber" for
+ * a transitional state) rather than which Splunk appearance implements it.
+ */
 type Tone = "neutral" | "green" | "amber" | "red" | "sky" | "slate";
 
-const TONES: Record<Tone, string> = {
-  neutral: "bg-surface-muted text-slate-200",
-  green: "bg-emerald-900/60 text-emerald-300 border border-emerald-700/60",
-  amber: "bg-amber-900/50 text-amber-300 border border-amber-700/60",
-  red: "bg-red-900/60 text-red-300 border border-red-700/60",
-  sky: "bg-sky-900/60 text-sky-300 border border-sky-700/60",
-  slate: "bg-slate-800 text-slate-400 border border-slate-700",
+// Chip's neutral appearance is the absence of one, so `neutral` maps to
+// undefined rather than to a name.
+type ChipAppearance = "outline" | "info" | "success" | "warning" | "error";
+
+const TONES: Record<Tone, ChipAppearance | undefined> = {
+  neutral: undefined,
+  green: "success",
+  amber: "warning",
+  red: "error",
+  sky: "info",
+  slate: "outline",
 };
 
 export function Badge({
@@ -19,16 +30,7 @@ export function Badge({
   tone?: Tone;
   children: ReactNode;
 }) {
-  return (
-    <span
-      className={cn(
-        "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
-        TONES[tone],
-      )}
-    >
-      {children}
-    </span>
-  );
+  return <Chip appearance={TONES[tone]}>{children}</Chip>;
 }
 
 // Map a target/run health or state string to a badge tone.

@@ -1,39 +1,42 @@
-import type { InputHTMLAttributes, ReactNode, SelectHTMLAttributes } from "react";
-import { cn } from "./cn";
+import type { ReactNode } from "react";
+import ControlGroup from "@splunk/react-ui/ControlGroup";
+import SplunkSelect from "@splunk/react-ui/Select";
+import Text from "@splunk/react-ui/Text";
 
-const CONTROL =
-  "w-full rounded-md border border-surface-muted bg-surface px-3 py-1.5 text-sm text-slate-100 " +
-  "placeholder:text-slate-500 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500";
-
-interface FieldWrapperProps {
-  label: ReactNode;
+/*
+ * Form controls, from Splunk UI.
+ *
+ * `Field` is Splunk's ControlGroup: it owns the label, the help text and the
+ * error, and wires the accessibility relationships between them and whatever
+ * control it wraps, which the hand-rolled <label> it replaced did not. An
+ * error replaces the hint rather than stacking under it: when something is
+ * wrong, the thing to read is what is wrong.
+ *
+ * Note the change of signature that comes with these controls. Splunk's call
+ * `onChange(event, { value })` rather than leaving the caller to read
+ * `event.target.value`. That is the library's contract and it is worth having:
+ * a Number gives back a number, and a Select gives back the option's value
+ * rather than a string scraped off a DOM node.
+ */
+interface FieldProps {
+  label: string;
   hint?: ReactNode;
-  error?: ReactNode;
+  error?: string;
   children: ReactNode;
 }
 
-/** Label + control + optional hint/error, laid out consistently. */
-export function Field({ label, hint, error, children }: FieldWrapperProps) {
+export function Field({ label, hint, error, children }: FieldProps) {
   return (
-    <label className="block space-y-1">
-      <span className="text-xs font-medium text-slate-300">{label}</span>
+    <ControlGroup
+      label={label}
+      labelPosition="top"
+      help={error ? undefined : hint}
+      error={error}
+    >
       {children}
-      {hint && !error && <span className="block text-xs text-slate-500">{hint}</span>}
-      {error && <span className="block text-xs text-red-400">{error}</span>}
-    </label>
+    </ControlGroup>
   );
 }
 
-export function TextInput(props: InputHTMLAttributes<HTMLInputElement>) {
-  const { className, ...rest } = props;
-  return <input className={cn(CONTROL, className)} {...rest} />;
-}
-
-export function Select(props: SelectHTMLAttributes<HTMLSelectElement>) {
-  const { className, children, ...rest } = props;
-  return (
-    <select className={cn(CONTROL, className)} {...rest}>
-      {children}
-    </select>
-  );
-}
+export const TextInput = Text;
+export const Select = SplunkSelect;

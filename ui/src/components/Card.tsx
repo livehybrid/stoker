@@ -1,29 +1,36 @@
 import type { ReactNode } from "react";
-import { cn } from "./cn";
+import SplunkCard from "@splunk/react-ui/Card";
+import styled from "styled-components";
+
+/*
+ * A surface panel with an optional header row (title + actions).
+ *
+ * Splunk's Card. `flush` removes the body padding, which is what a table
+ * wants: a Table inside a padded Card looks inset and gives up a lot of width
+ * on pages whose whole job is showing wide tables of numbers.
+ */
+const FullWidth = styled(SplunkCard)`
+  width: 100%;
+`;
+
+const Body = styled(SplunkCard.Body)<{ $flush?: boolean }>`
+  padding: ${(props) => (props.$flush ? "0" : undefined)};
+  overflow-x: auto;
+`;
 
 interface CardProps {
   title?: ReactNode;
   actions?: ReactNode;
   className?: string;
+  flush?: boolean;
   children?: ReactNode;
 }
 
-/** A surface panel with an optional header row (title + actions). */
-export function Card({ title, actions, className, children }: CardProps) {
+export function Card({ title, actions, className, flush, children }: CardProps) {
   return (
-    <section
-      className={cn(
-        "rounded-lg border border-surface-muted bg-surface-soft shadow-sm",
-        className,
-      )}
-    >
-      {(title || actions) && (
-        <header className="flex items-center justify-between gap-2 border-b border-surface-muted px-4 py-3">
-          <h2 className="text-sm font-semibold text-slate-200">{title}</h2>
-          {actions && <div className="flex items-center gap-2">{actions}</div>}
-        </header>
-      )}
-      <div className="p-4">{children}</div>
-    </section>
+    <FullWidth className={className}>
+      {(title || actions) && <SplunkCard.Header title={title}>{actions}</SplunkCard.Header>}
+      <Body $flush={flush}>{children}</Body>
+    </FullWidth>
   );
 }

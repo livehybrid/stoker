@@ -9,7 +9,7 @@ Status: **shipped and running.** The worker image, the FastAPI + SQLAlchemy cont
 ```mermaid
 flowchart TB
     subgraph clients[" "]
-        UI["Browser UI<br/>(React / Vite / TanStack)"]
+        UI["Browser UI<br/>(React / Vite / Splunk UI)"]
         OPS["Operators<br/>(REST API)"]
     end
 
@@ -259,11 +259,68 @@ corpora (BOTSv3, attack_data, NASA-HTTP, …) you can wire in as `rawreplay`
 ## Repo layout
 
 ```
+### The operator UI
+
+The console is built from **Splunk's own component library** (`@splunk/react-ui`,
+`@splunk/themes`) with **`@splunk/visualizations`** for the charts, so its
+tables, dialogs, form controls, chips, messages, tabs, side panels, axes,
+legends and tooltips are the ones an operator already knows from Splunk Web,
+and the whole page follows the light and dark themes with the product. It
+replaced a hand-rolled Tailwind component set and recharts, which drew
+perfectly good charts that looked like nothing else in Splunk.
+
+```bash
+cd ui
+npm install
+npm run dev        # vite, proxying /api to a local control plane on :8080
+npm run build      # tsc --noEmit, then the production build into ui/dist
+npm run smoke      # renders every route of a build in jsdom
+```
+
+Four things are worth knowing:
+
+- **React is pinned to 18.3.1.** Splunk UI 5 peers on React <= 18 and
+  `@splunk/visualizations` on `^18.3.1`; there is no Splunk UI release that
+  supports React 19. Nothing in this app used a React 19 API.
+- **Nothing hard-codes a colour, a size or a font.** Everything comes from
+  `@splunk/themes`, either as a `variables.*` interpolation in a
+  styled-component or from `useSplunkTheme()` where a value is needed in
+  JavaScript (the charts). That is what makes the light scheme work without a
+  second palette maintained by hand. Tailwind is gone.
+- **The chart library expects Splunk Web's page globals.** The charting bundle
+  underneath it is the same code Splunk Web ships, and it reads `locale_name`
+  and `$C` off `window` *while it is being evaluated*.
+  `ui/src/splunk-web-globals.ts` defines them and is imported first in
+  `main.tsx`; without it the bundle throws `window.locale_name is not a
+  function` on load.
+- **Charts are lazily loaded.** `@splunk/visualizations` is by far the largest
+  dependency (it carries Highcharts and its own jQuery), and most pages have no
+  chart on them, so `ui/src/components/chart/` splits it into its own chunk.
+
+The shared pieces live in `ui/src/components/`: `Button`, `Card`, `Badge`,
+`Field`, `Table`, `Toast` and `text.tsx` wrap Splunk components behind the prop
+names this app already used, so pages did not have to be rewritten around a new
+API. `text.tsx` holds the layout and typography primitives (`Stack`, `Inline`,
+`Grid`, `Muted`, `Mono`, `Panel`, `Callout` and friends) that replaced the
+Tailwind utility classes.
+
+Two Splunk conventions the console now follows deliberately:
+
+- **Toasts are gone.** Splunk UI deprecates the pattern outright: a message
+  that removes itself is a message somebody never received. `useToast()` keeps
+  its API but renders a dismissible `MessageBar` at the top of the page, and
+  only the newest, because stacking breaks the tie between a message and the
+  action that caused it.
+- **Only set a colour when it carries meaning.** A target rate, an error count
+  and a concurrency ceiling earn one; an ordinary series takes Splunk's default
+  categorical palette.
+
 worker/    agent (control-plane protocol, token-bucket pacing, HEC client)
            + engines: vendored eventgen 7.2.1 and rawreplay/Piston
 server/    FastAPI control plane: routes (agent/operator/auth/users/tokens),
            lifecycle, drivers (swarm/k8s/fake), gitsync, bundles, crypto, models
-ui/        React / Vite / TanStack Router single-page app (built into the image)
+ui/        React / Vite / TanStack Router single-page app, built from Splunk's
+           own component library (built into the image; see "The operator UI")
 packs/     bundled packs (see "Bundled packs"): flatline, apigw, web-access,
            aws-cloudtrail, aws-s3-access, aws-elb-alb, splunk-tutorial-web,
            splunk-tutorial-secure, splunk-tutorial-vendor-sales (eventgen)

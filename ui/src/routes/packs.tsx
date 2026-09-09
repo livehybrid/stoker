@@ -14,6 +14,7 @@ import { Modal } from "../features/ui/Modal";
 import { PackCard } from "../features/packs/PackCard";
 import { PackPreviewDrawer } from "../features/packs/PackPreviewDrawer";
 import { UploadPackForm } from "../features/packs/UploadPackForm";
+import { Grid, Inline, Muted, Stack } from "../components/text";
 
 // Packs page: a filterable grid of indexed sample packs (filter by repo, wired
 // to the URL so a "View indexed packs" link from a repo card deep-links here),
@@ -67,57 +68,55 @@ function Packs() {
   }
 
   return (
-    <div className="space-y-5">
+    <Stack $gap="large">
       <PageHeader
         title="Packs"
         subtitle="Sample packs to launch jobs from: indexed eventgen packs and metric packs you build here."
         actions={
-          <div className="flex items-center gap-2">
+          <Inline>
             <Button variant="secondary" onClick={() => setUploadOpen(true)}>
               Upload pack
             </Button>
             <Link to="/metric-packs/new">
               <Button variant="primary">+ New metric pack</Button>
             </Link>
-          </div>
+          </Inline>
         }
       />
 
       <Card>
-        <div className="flex flex-wrap items-end gap-3">
-          <div className="min-w-64 flex-1">
+        <Inline>
+          <div>
             <Field label="Search" hint="name, description, tags, sourcetype or engine">
               <TextInput
                 value={search}
-                onChange={(e) => setSearch(e.target.value)}
+                onChange={(_e, { value }) => setSearch(value)}
                 placeholder="e.g. aws, cloudtrail, metrics, web…"
                 autoComplete="off"
               />
             </Field>
           </div>
-          <div className="w-64 max-w-full">
+          <div>
             <Field label="Filter by repo">
               <Select
                 value={repo === undefined ? "" : String(repo)}
-                onChange={(e) => setRepoFilter(e.target.value)}
+                onChange={(_e, { value }) => setRepoFilter(String(value))}
               >
-                <option value="">All repos</option>
+                <Select.Option value="" label="All repos" />
                 {repoOptions.map((r) => (
-                  <option key={r.id} value={String(r.id)}>
-                    {r.url}
-                  </option>
+                  <Select.Option key={r.id} value={String(r.id)} label={r.url} />
                 ))}
               </Select>
             </Field>
           </div>
           {packsQ.data && (
-            <p className="pb-2 text-xs text-slate-500">
+            <Muted $small>
               {filtered.length} of {packsQ.data.length} pack
               {packsQ.data.length === 1 ? "" : "s"}
               {repo !== undefined ? " in this repo" : ""}
-            </p>
+            </Muted>
           )}
-        </div>
+        </Inline>
       </Card>
 
       {packsQ.isPending ? (
@@ -139,11 +138,11 @@ function Packs() {
           message={`Nothing matches "${search.trim()}". Clear the search to see all packs.`}
         />
       ) : (
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+        <Grid $min="260px">
           {filtered.map((pack) => (
             <PackCard key={pack.id} pack={pack} onPreview={setPreview} />
           ))}
-        </div>
+        </Grid>
       )}
 
       <Modal
@@ -161,7 +160,7 @@ function Packs() {
       </Modal>
 
       <PackPreviewDrawer pack={preview} onClose={() => setPreview(null)} />
-    </div>
+    </Stack>
   );
 }
 

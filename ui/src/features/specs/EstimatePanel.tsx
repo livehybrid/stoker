@@ -7,15 +7,16 @@ import type { ReactNode } from "react";
 import type { SpecEstimate } from "../../lib/types";
 import { Badge } from "../../components/Badge";
 import { formatNumber } from "./format";
+import { Callout, Grid, Label, Muted, Negative, Panel, Stack, Strong } from "../../components/text";
 
 function Stat({ label, value }: { label: string; value: ReactNode }) {
   return (
-    <div className="rounded-md border border-surface-muted bg-surface px-3 py-2">
-      <div className="text-[11px] uppercase tracking-wide text-slate-500">
+    <Panel>
+      <Label>
         {label}
-      </div>
-      <div className="mt-0.5 text-sm font-medium text-slate-100">{value}</div>
-    </div>
+      </Label>
+      <Strong>{value}</Strong>
+    </Panel>
   );
 }
 
@@ -39,8 +40,8 @@ export function EstimatePanel({
   const totalGb = gb != null ? gb * workers : null;
 
   return (
-    <div className="space-y-3">
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+    <Stack>
+      <Grid $min="160px">
         <Stat label="Workers" value={workers} />
         <Stat
           label="Per-worker share"
@@ -69,31 +70,31 @@ export function EstimatePanel({
             pct != null ? (
               <Badge tone={pctTone}>{formatNumber(pct)}%</Badge>
             ) : (
-              <span className="text-slate-500">n/a</span>
+              <Muted>n/a</Muted>
             )
           }
         />
-      </div>
+      </Grid>
 
       {(totalEps != null || totalGb != null) && (
-        <p className="text-sm text-slate-400">
+        <Muted>
           {workers} worker{workers === 1 ? "" : "s"}
           {totalGb != null && gb != null ? (
             <>
               {" "}
               × {formatNumber(gb)} GB/day ={" "}
-              <span className="text-slate-200">
+              <Strong>
                 {formatNumber(totalGb)} GB/day
-              </span>
+              </Strong>
             </>
           ) : null}
           {totalEps != null ? (
             <>
               {" "}
               ≈{" "}
-              <span className="text-slate-200">
+              <Strong>
                 {formatNumber(totalEps)} events/s
-              </span>{" "}
+              </Strong>{" "}
               in aggregate
             </>
           ) : null}
@@ -106,44 +107,44 @@ export function EstimatePanel({
             </>
           ) : null}
           .
-        </p>
+        </Muted>
       )}
 
       {over && (
-        <div className="rounded-md border border-red-800/60 bg-red-950/40 px-3 py-2 text-sm text-red-200">
-          <p className="font-medium">Slice exceeds the engine ceiling.</p>
-          <p className="mt-1 text-red-300/90">
+        <Callout $tone="error">
+          <Strong>Slice exceeds the engine ceiling.</Strong>
+          <Negative>
             {estimate.detail ?? "Reduce the rate or add workers."}
             {estimate.suggested_workers
               ? ` Use at least ${estimate.suggested_workers} workers.`
               : ""}
-          </p>
-        </div>
+          </Negative>
+        </Callout>
       )}
 
       {estimate.rate_mode === "count_interval" && (
-        <p className="text-xs text-slate-500">
+        <Muted $small>
           count / interval is engine-paced: no rate ceiling and no exact-rate
           guarantee.
-        </p>
+        </Muted>
       )}
 
       {estimate.rate_mode !== "count_interval" &&
         estimate.ok &&
         estimate.ceiling_limit == null && (
-          <p className="text-xs text-slate-500">
+          <Muted $small>
             No per-worker ceiling applies here (disabled or none configured for
             this engine/fleet); the control plane will not block on rate.
-          </p>
+          </Muted>
         )}
 
       {source && (
-        <p className="text-[11px] text-slate-600">
+        <Muted $small>
           {source === "live"
             ? "Live estimate from the control plane."
             : "Preview computed locally; the control plane re-checks at launch."}
-        </p>
+        </Muted>
       )}
-    </div>
+    </Stack>
   );
 }

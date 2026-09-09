@@ -8,6 +8,7 @@ import { Badge, StatusBadge } from "../../components/Badge";
 import { Button } from "../../components/Button";
 import { ErrorState, LoadingState } from "../../components/States";
 import { Drawer } from "../ui/Drawer";
+import { Between, Bullets, Callout, Inline, Mono, Muted, Panel, Pre, Stack, Strong } from "../../components/text";
 
 // How many events the "Preview events" render requests (the server clamps to a
 // sane max regardless).
@@ -63,8 +64,8 @@ export function PackPreviewDrawer({ pack, onClose }: Props) {
       ) : q.isError ? (
         <ErrorState error={q.error} onRetry={() => q.refetch()} />
       ) : (
-        <div className="space-y-4">
-          <div className="flex flex-wrap items-center gap-2">
+        <Stack $gap="medium">
+          <Inline>
             <StatusBadge state={q.data.lint_status} />
             {pack.verified ? (
               <Badge tone="green">verified</Badge>
@@ -74,20 +75,20 @@ export function PackPreviewDrawer({ pack, onClose }: Props) {
             <Badge tone="neutral">
               {q.data.stanzas.length} stanza{q.data.stanzas.length === 1 ? "" : "s"}
             </Badge>
-          </div>
+          </Inline>
 
           {/* Rendered-events preview: a lightweight in-process render (tokens
               like timestamp / ipv4 / integer substituted), no fleet or HEC.
               Opt-in so it only runs when the author asks. */}
-          <div className="rounded-md border border-surface-muted bg-surface px-3 py-3">
-            <div className="flex items-center justify-between gap-2">
+          <Panel>
+            <Between>
               <div>
-                <h4 className="text-xs font-semibold text-slate-200">
+                <Strong>
                   Rendered events
-                </h4>
-                <p className="mt-0.5 text-[11px] text-slate-500">
+                </Strong>
+                <Muted $small>
                   A few sample events with tokens applied. No fleet, no HEC.
-                </p>
+                </Muted>
               </div>
               <Button
                 variant="secondary"
@@ -102,66 +103,66 @@ export function PackPreviewDrawer({ pack, onClose }: Props) {
                     ? "Re-render"
                     : "Preview events"}
               </Button>
-            </div>
+            </Between>
             {showEvents &&
               (eventsQ.isPending ? (
                 <LoadingState label="Rendering events…" />
               ) : eventsQ.isError ? (
                 <ErrorState error={eventsQ.error} onRetry={() => eventsQ.refetch()} />
               ) : eventsQ.data.events.length === 0 ? (
-                <p className="mt-2 text-[11px] text-slate-500">
+                <Muted $small>
                   No events could be rendered (no sample-mode stanza or no
                   readable sample file).
-                </p>
+                </Muted>
               ) : (
-                <pre className="mt-2 max-h-56 overflow-auto rounded-md border border-surface-muted bg-surface-soft px-3 py-2 text-[11px] leading-relaxed text-slate-300">
+                <Pre>
                   {eventsQ.data.events.join("\n")}
-                </pre>
+                </Pre>
               ))}
-          </div>
+          </Panel>
 
           {q.data.lint_errors.length > 0 && (
-            <div className="rounded-md border border-red-800/60 bg-red-950/40 px-3 py-2 text-xs text-red-300">
-              <p className="font-medium">Lint errors</p>
-              <ul className="mt-1 list-disc space-y-0.5 pl-4">
+            <Callout $tone="error">
+              <Strong>Lint errors</Strong>
+              <Bullets>
                 {q.data.lint_errors.map((err, i) => (
                   <li key={i}>{err}</li>
                 ))}
-              </ul>
-            </div>
+              </Bullets>
+            </Callout>
           )}
 
           {q.data.stanzas.length === 0 ? (
-            <p className="text-sm text-slate-500">
+            <Muted>
               No stanzas found in this pack's eventgen.conf.
-            </p>
+            </Muted>
           ) : (
-            <div className="space-y-4">
+            <Stack $gap="medium">
               {q.data.stanzas.map((stanza) => {
                 const lines = q.data.sample_lines[stanza] ?? [];
                 return (
                   <div key={stanza}>
-                    <div className="flex items-center justify-between gap-2">
-                      <h4 className="font-mono text-xs font-semibold text-slate-200">
+                    <Between>
+                      <Mono>
                         [{stanza}]
-                      </h4>
-                      <span className="text-[11px] text-slate-500">
+                      </Mono>
+                      <Muted $small>
                         {lines.length
                           ? `first ${lines.length} line${lines.length === 1 ? "" : "s"}`
                           : "no sample lines"}
-                      </span>
-                    </div>
+                      </Muted>
+                    </Between>
                     {lines.length > 0 && (
-                      <pre className="mt-1 max-h-56 overflow-auto rounded-md border border-surface-muted bg-surface px-3 py-2 text-[11px] leading-relaxed text-slate-300">
+                      <Pre>
                         {lines.join("\n")}
-                      </pre>
+                      </Pre>
                     )}
                   </div>
                 );
               })}
-            </div>
+            </Stack>
           )}
-        </div>
+        </Stack>
       )}
     </Drawer>
   );

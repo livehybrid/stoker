@@ -8,6 +8,7 @@ import { Field, TextInput, Select } from "../../components/Field";
 import { Button } from "../../components/Button";
 import { useToast } from "../../components/Toast";
 import { USERS_QUERY_KEY } from "./keys";
+import { Form, Grid, Inline, Negative } from "../../components/text";
 
 interface FormState {
   username: string;
@@ -72,12 +73,12 @@ export function NewUserForm() {
   }
 
   return (
-    <form onSubmit={onSubmit} className="space-y-4">
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+    <Form onSubmit={onSubmit}>
+      <Grid>
         <Field label="Username">
           <TextInput
             value={form.username}
-            onChange={(e) => set("username", e.target.value)}
+            onChange={(_e, { value }) => set("username", value)}
             placeholder="jsmith"
             autoComplete="off"
           />
@@ -86,12 +87,10 @@ export function NewUserForm() {
         <Field label="Role">
           <Select
             value={form.role}
-            onChange={(e) => set("role", e.target.value as Role)}
+            onChange={(_e, { value }) => set("role", value as Role)}
           >
             {ROLES.map((r) => (
-              <option key={r} value={r}>
-                {r}
-              </option>
+              <Select.Option key={r} value={r} label={r} />
             ))}
           </Select>
         </Field>
@@ -103,7 +102,7 @@ export function NewUserForm() {
           <TextInput
             type="password"
             value={form.password}
-            onChange={(e) => set("password", e.target.value)}
+            onChange={(_e, { value }) => set("password", value)}
             placeholder="at least 8 characters"
             autoComplete="new-password"
           />
@@ -113,16 +112,16 @@ export function NewUserForm() {
           <TextInput
             type="email"
             value={form.email}
-            onChange={(e) => set("email", e.target.value)}
+            onChange={(_e, { value }) => set("email", value)}
             placeholder="jsmith@example.com"
             autoComplete="off"
           />
         </Field>
-      </div>
+      </Grid>
 
-      {fieldError && <p className="text-sm text-red-400">{fieldError}</p>}
+      {fieldError && <Negative>{fieldError}</Negative>}
 
-      <div className="flex items-center gap-3">
+      <Inline>
         <Button type="submit" variant="primary" disabled={create.isPending}>
           {create.isPending ? "Creating…" : "Create user"}
         </Button>
@@ -137,7 +136,7 @@ export function NewUserForm() {
         >
           Reset
         </Button>
-      </div>
-    </form>
+      </Inline>
+    </Form>
   );
 }

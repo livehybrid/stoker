@@ -6,10 +6,99 @@ import {
   useRouterState,
 } from "@tanstack/react-router";
 import { useMutation } from "@tanstack/react-query";
-import { cn } from "../components/cn";
+import Button from "@splunk/react-ui/Button";
+import Divider from "@splunk/react-ui/Divider";
+import Heading from "@splunk/react-ui/Heading";
+import Moon from "@splunk/react-icons/Moon";
+import Sun from "@splunk/react-icons/Sun";
+import styled from "styled-components";
+import { variables } from "@splunk/themes";
+
 import { api, ApiError, LOGIN_PATH } from "../lib/api";
 import { useAuth, useRefreshAuth } from "../lib/auth";
+import { useColorScheme } from "../theme";
 import { useToast } from "../components/Toast";
+import { Muted } from "../components/text";
+
+/*
+ * The shell: a fixed left nav and the routed outlet.
+ *
+ * Splunk UI has no navigation-rail component, so the rail itself is a styled
+ * <aside> built from theme tokens; everything inside it (the links, the theme
+ * switch, sign out) is a Splunk component. Nothing here knows a hex value, so
+ * switching colour scheme switches the chrome with the pages.
+ */
+const Shell = styled.div`
+  display: flex;
+  min-height: 100vh;
+`;
+
+const Rail = styled.aside`
+  display: flex;
+  flex-direction: column;
+  width: 208px;
+  flex-shrink: 0;
+  border-right: 1px solid ${variables.borderColor};
+  background-color: ${variables.backgroundColorSidebar};
+`;
+
+const Brand = styled.div`
+  padding: ${variables.spacingLarge} ${variables.spacingLarge} ${variables.spacingMedium};
+`;
+
+const Nav = styled.nav`
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 ${variables.spacingSmall};
+`;
+
+const NavLink = styled(Link)`
+  display: block;
+  padding: ${variables.spacingSmall} ${variables.spacingMedium};
+  border-radius: ${variables.borderRadius};
+  color: ${variables.contentColorDefault};
+  font-size: ${variables.fontSize};
+  text-decoration: none;
+
+  &:hover {
+    background-color: ${variables.interactiveColorOverlayHover};
+  }
+
+  &[data-status="active"] {
+    background-color: ${variables.interactiveColorOverlaySelected};
+    color: ${variables.contentColorAccent};
+  }
+`;
+
+const Footer = styled.div`
+  border-top: 1px solid ${variables.borderColor};
+  padding: ${variables.spacingMedium};
+  display: flex;
+  flex-direction: column;
+  gap: ${variables.spacingSmall};
+`;
+
+const Username = styled.p`
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  font-size: ${variables.fontSizeSmall};
+`;
+
+const Content = styled.main`
+  flex: 1;
+  overflow-x: hidden;
+`;
+
+const Page = styled.div`
+  margin: 0 auto;
+  max-width: 72rem;
+  padding: ${variables.spacingLarge} ${variables.spacingXLarge} ${variables.spacingXXLarge};
+`;
 
 // Root layout: a fixed left nav plus the routed <Outlet/>. Every page renders
 // inside this shell EXCEPT the login screen, which is a standalone full-page
@@ -60,24 +149,33 @@ function UserMenu() {
   }
 
   return (
-    <div className="border-t border-surface-muted px-4 py-3">
-      <p className="truncate text-xs font-medium text-slate-300" title={user.username}>
-        {user.username}
-      </p>
-      <p className="mb-2 text-[11px] uppercase tracking-wide text-slate-600">
-        {user.role}
-      </p>
-      <button
+    <Footer>
+      <div>
+        <Username title={user.username}>{user.username}</Username>
+        <Muted $small>{user.role}</Muted>
+      </div>
+      <Button
+        appearance="subtle"
+        inline={false}
         onClick={() => logout.mutate()}
         disabled={logout.isPending}
-        className={cn(
-          "w-full rounded-md border border-surface-muted px-3 py-1.5 text-left text-sm font-medium text-slate-300",
-          "hover:bg-surface-muted hover:text-slate-100 disabled:opacity-50",
-        )}
-      >
-        {logout.isPending ? "Signing out…" : "Log out"}
-      </button>
-    </div>
+        label={logout.isPending ? "Signing out…" : "Log out"}
+      />
+    </Footer>
+  );
+}
+
+/** The one control the operator has over the theme. */
+function ThemeToggle() {
+  const { colorScheme, toggle } = useColorScheme();
+  return (
+    <Button
+      appearance="subtle"
+      inline={false}
+      icon={colorScheme === "dark" ? <Sun /> : <Moon />}
+      onClick={toggle}
+      label={colorScheme === "dark" ? "Light theme" : "Dark theme"}
+    />
   );
 }
 
@@ -92,41 +190,36 @@ function RootLayout() {
   const items = NAV.filter((item) => !item.adminOnly || isAdmin);
 
   return (
-    <div className="flex min-h-screen">
-      <aside className="flex w-52 shrink-0 flex-col border-r border-surface-muted bg-surface-soft">
-        <div className="px-4 py-4">
-          <span className="text-lg font-semibold tracking-tight text-slate-100">
-            Stoker
-          </span>
-          <p className="text-xs text-slate-500">load-generation control plane</p>
-        </div>
-        <nav className="flex-1 space-y-0.5 px-2">
+    <Shell>
+      <Rail>
+        <Brand>
+          <Heading level={2}>Stoker</Heading>
+          <Muted $small>load-generation control plane</Muted>
+        </Brand>
+        <Nav>
           {items.map((item) => (
-            <Link
+            <NavLink
               key={item.to}
               to={item.to}
               // Exact match only for the dashboard root; others match prefixes
               // so a detail route (e.g. /runs/$runId) keeps "Runs" active.
               activeOptions={{ exact: item.to === "/" }}
-              className={cn(
-                "block rounded-md px-3 py-2 text-sm font-medium text-slate-300",
-                "hover:bg-surface-muted hover:text-slate-100",
-              )}
-              activeProps={{ className: "bg-surface-muted text-white" }}
             >
               {item.label}
-            </Link>
+            </NavLink>
           ))}
-        </nav>
+        </Nav>
+        <Divider />
+        <ThemeToggle />
         <UserMenu />
-      </aside>
+      </Rail>
 
-      <main className="flex-1 overflow-x-hidden">
-        <div className="mx-auto max-w-6xl px-6 py-6">
+      <Content>
+        <Page>
           <Outlet />
-        </div>
-      </main>
-    </div>
+        </Page>
+      </Content>
+    </Shell>
   );
 }
 

@@ -1,11 +1,56 @@
-import type { ReactNode } from "react";
-import { useEffect } from "react";
-import { cn } from "../../components/cn";
+import { useEffect, useRef, type ReactNode } from "react";
+import Heading from "@splunk/react-ui/Heading";
+import SidePanel from "@splunk/react-ui/SidePanel";
+import styled from "styled-components";
+import { variables } from "@splunk/themes";
 
-// A right-side slide-over panel (page-owned, not part of the shared kit). Used
-// by the Packs preview. Closes on the backdrop click or Escape. No Radix
-// dependency (foundation deliberately omits it); this is a minimal, accessible
-// overlay sufficient for a preview drawer.
+/*
+ * A right-side slide-over panel, on Splunk's SidePanel. Used by the Packs
+ * preview.
+ *
+ * The escape key, the click-away, the slide animation and the focus handling
+ * are the component's now; this file is the header layout and nothing else.
+ */
+const DrawerPanel = styled.div`
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-width: 0;
+`;
+
+const Header = styled.header`
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: ${variables.spacingMedium};
+  padding: ${variables.spacingLarge};
+  border-bottom: 1px solid ${variables.borderColor};
+`;
+
+const Titles = styled.div`
+  min-width: 0;
+`;
+
+const Subtitle = styled.p`
+  margin: 2px 0 0;
+  color: ${variables.contentColorMuted};
+  font-size: ${variables.fontSizeSmall};
+  overflow-wrap: anywhere;
+`;
+
+const Actions = styled.div`
+  display: flex;
+  align-items: center;
+  gap: ${variables.spacingSmall};
+  flex-shrink: 0;
+`;
+
+const Body = styled.div`
+  flex: 1;
+  overflow-y: auto;
+  padding: ${variables.spacingLarge};
+`;
+
 interface DrawerProps {
   open: boolean;
   onClose: () => void;
@@ -13,6 +58,7 @@ interface DrawerProps {
   subtitle?: ReactNode;
   actions?: ReactNode;
   children?: ReactNode;
+  /** A CSS width, e.g. "36rem". */
   width?: string;
 }
 
@@ -23,56 +69,40 @@ export function Drawer({
   subtitle,
   actions,
   children,
-  width = "max-w-xl",
+  width = "36rem",
 }: DrawerProps) {
+  const opener = useRef<Element | null>(null);
   useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+    if (open) {
+      opener.current = document.activeElement;
+    }
+  }, [open]);
 
-  if (!open) return null;
+  const returnFocus = () => {
+    const el = opener.current;
+    if (el instanceof HTMLElement && document.contains(el)) {
+      el.focus();
+    }
+  };
 
   return (
-    <div className="fixed inset-0 z-40 flex justify-end" role="dialog" aria-modal="true">
-      <div
-        className="absolute inset-0 bg-black/50"
-        onClick={onClose}
-        aria-hidden="true"
-      />
-      <div
-        className={cn(
-          "relative flex h-full w-full flex-col border-l border-surface-muted bg-surface-soft shadow-2xl",
-          width,
-        )}
-      >
-        <header className="flex items-start justify-between gap-3 border-b border-surface-muted px-5 py-4">
-          <div className="min-w-0">
-            {title && (
-              <h2 className="truncate text-base font-semibold text-slate-100">
-                {title}
-              </h2>
-            )}
-            {subtitle && (
-              <p className="mt-0.5 truncate text-xs text-slate-500">{subtitle}</p>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            {actions}
-            <button
-              onClick={onClose}
-              aria-label="Close"
-              className="rounded-md px-2 py-1 text-slate-400 hover:bg-surface-muted hover:text-slate-100"
-            >
-              ✕
-            </button>
-          </div>
-        </header>
-        <div className="flex-1 overflow-y-auto px-5 py-4">{children}</div>
-      </div>
-    </div>
+    <SidePanel
+      open={open}
+      dockPosition="right"
+      onRequestClose={onClose}
+      returnFocus={returnFocus}
+      innerStyle={{ width: `min(${width}, 100vw)` }}
+    >
+      <DrawerPanel>
+        <Header>
+          <Titles>
+            {title && <Heading level={2}>{title}</Heading>}
+            {subtitle && <Subtitle>{subtitle}</Subtitle>}
+          </Titles>
+          {actions && <Actions>{actions}</Actions>}
+        </Header>
+        <Body>{children}</Body>
+      </DrawerPanel>
+    </SidePanel>
   );
 }

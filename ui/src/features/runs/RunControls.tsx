@@ -7,6 +7,30 @@ import { TextInput } from "../../components/Field";
 import { useToast } from "../../components/Toast";
 import type { RunDetail } from "../../lib/types";
 
+import styled from "styled-components";
+import { variables } from "@splunk/themes";
+import { Inline, Label } from "../../components/text";
+
+const Controls = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: ${variables.spacingMedium} ${variables.spacingXXLarge};
+`;
+
+const Group = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: ${variables.spacingXSmall};
+`;
+
+const Count = styled.span`
+  min-width: 2ch;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+`;
+
+
 // Run controls (section 10.3): Stop, Force stop, Scale ± (workers) and Rescale
 // rate. Each wires straight to its endpoint; all disable on a terminal run and
 // while a mutation is in flight. A successful action invalidates the run so the
@@ -81,11 +105,11 @@ export function RunControls({
   const rateChanged = rateValid && parsedRate !== rateValue;
 
   return (
-    <div className="flex flex-wrap items-end gap-x-6 gap-y-4">
+    <Controls>
       {/* Stop / force stop */}
-      <div className="space-y-1">
-        <span className="block text-xs font-medium text-slate-400">Lifecycle</span>
-        <div className="flex gap-2">
+      <Group>
+        <Label>Lifecycle</Label>
+        <Inline>
           <Button
             variant="secondary"
             disabled={terminal || busy}
@@ -108,15 +132,13 @@ export function RunControls({
           >
             Force stop
           </Button>
-        </div>
-      </div>
+        </Inline>
+      </Group>
 
       {/* Scale workers */}
-      <div className="space-y-1">
-        <span className="block text-xs font-medium text-slate-400">
-          Workers ({workers})
-        </span>
-        <div className="flex items-center gap-2">
+      <Group>
+        <Label>Workers ({workers})</Label>
+        <Inline>
           <Button
             variant="secondary"
             disabled={terminal || busy || workers <= 1}
@@ -125,9 +147,7 @@ export function RunControls({
           >
             −
           </Button>
-          <span className="min-w-[2ch] text-center text-sm tabular-nums text-slate-200">
-            {workers}
-          </span>
+          <Count>{workers}</Count>
           <Button
             variant="secondary"
             disabled={terminal || busy}
@@ -136,23 +156,19 @@ export function RunControls({
           >
             +
           </Button>
-        </div>
-      </div>
+        </Inline>
+      </Group>
 
       {/* Rescale rate */}
       {rescalable && (
-        <div className="space-y-1">
-          <span className="block text-xs font-medium text-slate-400">
-            Rate ({rateMode})
-          </span>
-          <div className="flex items-center gap-2">
+        <Group>
+          <Label>Rate ({rateMode})</Label>
+          <Inline>
             <TextInput
               type="number"
-              min="0"
-              step="any"
               value={rateInput}
-              onChange={(e) => setRateInput(e.target.value)}
-              className="w-32"
+              onChange={(_e, { value }) => setRateInput(value)}
+              inline
               disabled={terminal || busy}
             />
             <Button
@@ -162,9 +178,9 @@ export function RunControls({
             >
               Rescale
             </Button>
-          </div>
-        </div>
+          </Inline>
+        </Group>
       )}
-    </div>
+    </Controls>
   );
 }

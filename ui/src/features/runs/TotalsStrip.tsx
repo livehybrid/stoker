@@ -1,6 +1,32 @@
 import type { ReactNode } from "react";
+import styled from "styled-components";
+import { variables } from "@splunk/themes";
+
 import type { RunDetail } from "../../lib/types";
+import { Label } from "../../components/text";
 import { fmtBytes, fmtElapsed, fmtInt } from "./format";
+
+const Strip = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  gap: ${variables.spacingLarge} ${variables.spacingXXLarge};
+`;
+
+const Cell = styled.div`
+  min-width: 7rem;
+`;
+
+const Value = styled.div<{ $tone?: "red" | "amber" }>`
+  font-size: ${variables.fontSizeXLarge};
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: ${(props) =>
+    props.$tone === "red"
+      ? variables.errorColor
+      : props.$tone === "amber"
+        ? variables.warningColor
+        : variables.contentColorDefault};
+`;
 
 // A compact totals strip for the run header: cumulative events + volume + HEC
 // outcome counts + elapsed. Values come from the folded totals_json (updated as
@@ -20,13 +46,11 @@ function Stat({
   value: ReactNode;
   tone?: "red" | "amber";
 }) {
-  const valueClass =
-    tone === "red" ? "text-red-400" : tone === "amber" ? "text-amber-400" : "text-slate-100";
   return (
-    <div className="min-w-[7rem]">
-      <div className={`text-lg font-semibold tabular-nums ${valueClass}`}>{value}</div>
-      <div className="text-xs uppercase tracking-wide text-slate-500">{label}</div>
-    </div>
+    <Cell>
+      <Value $tone={tone}>{value}</Value>
+      <Label>{label}</Label>
+    </Cell>
   );
 }
 
@@ -41,7 +65,7 @@ export function TotalsStrip({ run }: { run: RunDetail }) {
   const retries = num(t, "retries");
 
   return (
-    <div className="flex flex-wrap gap-x-8 gap-y-4">
+    <Strip>
       <Stat label="Events" value={fmtInt(events)} />
       <Stat label="Volume" value={fmtBytes(bytes)} />
       <Stat label="HEC 2xx" value={fmtInt(ok)} />
@@ -66,6 +90,6 @@ export function TotalsStrip({ run }: { run: RunDetail }) {
         tone={retries && retries > 0 ? "amber" : undefined}
       />
       <Stat label="Elapsed" value={fmtElapsed(run.t0 ?? run.created_at, run.ended_at)} />
-    </div>
+    </Strip>
   );
 }

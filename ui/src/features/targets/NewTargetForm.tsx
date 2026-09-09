@@ -6,6 +6,8 @@ import type { TargetCreate, TargetOut, TargetUpdate } from "../../lib/types";
 import { Field, TextInput, Select } from "../../components/Field";
 import { Button } from "../../components/Button";
 import { useToast } from "../../components/Toast";
+import { Form, Grid, Inline, Negative } from "../../components/text";
+import Switch from "@splunk/react-ui/Switch";
 
 // Env tags the design references (lab / staging / prod). Free enough that a new
 // tag is not needed; kept as a select so the strip colouring stays predictable.
@@ -144,12 +146,12 @@ export function NewTargetForm({
   }
 
   return (
-    <form onSubmit={onSubmit} className="space-y-4">
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+    <Form onSubmit={onSubmit}>
+      <Grid>
         <Field label="Name">
           <TextInput
             value={form.name}
-            onChange={(e) => set("name", e.target.value)}
+            onChange={(_e, { value }) => set("name", String(value))}
             placeholder="prod-hec-eu"
             autoComplete="off"
           />
@@ -158,12 +160,10 @@ export function NewTargetForm({
         <Field label="Environment">
           <Select
             value={form.env_tag}
-            onChange={(e) => set("env_tag", e.target.value)}
+            onChange={(_e, { value }) => set("env_tag", String(value))}
           >
             {ENV_TAGS.map((tag) => (
-              <option key={tag} value={tag}>
-                {tag}
-              </option>
+              <Select.Option key={tag} value={tag} label={tag} />
             ))}
           </Select>
         </Field>
@@ -174,7 +174,7 @@ export function NewTargetForm({
         >
           <TextInput
             value={form.hec_url}
-            onChange={(e) => set("hec_url", e.target.value)}
+            onChange={(_e, { value }) => set("hec_url", String(value))}
             placeholder="https://hec.example.com:8088"
             autoComplete="off"
             inputMode="url"
@@ -192,7 +192,7 @@ export function NewTargetForm({
           <TextInput
             type="password"
             value={form.token}
-            onChange={(e) => set("token", e.target.value)}
+            onChange={(_e, { value }) => set("token", String(value))}
             placeholder={
               editing
                 ? "leave blank to keep current"
@@ -205,7 +205,7 @@ export function NewTargetForm({
         <Field label="Default index" hint="Optional; blank uses the token default.">
           <TextInput
             value={form.default_index}
-            onChange={(e) => set("default_index", e.target.value)}
+            onChange={(_e, { value }) => set("default_index", String(value))}
             placeholder="main"
             autoComplete="off"
           />
@@ -217,28 +217,26 @@ export function NewTargetForm({
         >
           <TextInput
             type="number"
-            min={0}
-            step="any"
             value={form.max_concurrent_gb_day}
-            onChange={(e) => set("max_concurrent_gb_day", e.target.value)}
+            onChange={(_e, { value }) => set("max_concurrent_gb_day", String(value))}
             placeholder="e.g. 250"
           />
         </Field>
-      </div>
+      </Grid>
 
-      <label className="flex items-center gap-2 text-sm text-slate-300">
-        <input
-          type="checkbox"
-          checked={form.verify_tls}
-          onChange={(e) => set("verify_tls", e.target.checked)}
-          className="h-4 w-4 rounded border-surface-muted bg-surface text-sky-500 focus:ring-sky-500"
-        />
-        Verify TLS certificate
-      </label>
+      <Inline>
+        <Switch
+          appearance="checkbox"
+          selected={form.verify_tls}
+          onClick={() => set("verify_tls", !form.verify_tls)}
+        >
+          Verify TLS certificate
+        </Switch>
+      </Inline>
 
-      {fieldError && <p className="text-sm text-red-400">{fieldError}</p>}
+      {fieldError && <Negative>{fieldError}</Negative>}
 
-      <div className="flex items-center gap-3">
+      <Inline>
         <Button type="submit" variant="primary" disabled={save.isPending}>
           {save.isPending
             ? editing
@@ -263,7 +261,7 @@ export function NewTargetForm({
         >
           {editing ? "Cancel" : "Reset"}
         </Button>
-      </div>
-    </form>
+      </Inline>
+    </Form>
   );
 }

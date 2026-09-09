@@ -1,25 +1,32 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/*
+ * Only what has to exist before React mounts.
+ *
+ * Everything else is themed by @splunk/themes, so this must not fight it: the
+ * background is the one the enterprise dark theme paints, and it is replaced
+ * by the theme's own the moment the app renders. This file used to be
+ * Tailwind's three @tailwind directives plus a slate palette; the palette now
+ * comes from the theme, which is what makes the light scheme work without a
+ * second one maintained by hand.
+ */
+:root {
+  color-scheme: dark;
+}
 
-@layer base {
-  :root {
-    color-scheme: dark;
-  }
+html,
+body,
+#root {
+  height: 100%;
+}
 
-  html,
-  body,
-  #root {
-    height: 100%;
-  }
+* {
+  box-sizing: border-box;
+}
 
-  body {
-    @apply bg-surface text-slate-100 antialiased;
-    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
-      Helvetica, Arial, sans-serif;
-  }
-
-  a {
-    @apply text-sky-400 hover:text-sky-300;
-  }
+body {
+  margin: 0;
+  background: #0e1114;
+  color: #c3cbd4;
+  font-family: "Splunk Platform Sans", Roboto, Droid, "Helvetica Neue", Helvetica,
+    Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
 }

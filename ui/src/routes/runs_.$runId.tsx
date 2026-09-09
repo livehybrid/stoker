@@ -9,7 +9,6 @@ import { Card } from "../components/Card";
 import { Badge, StatusBadge } from "../components/Badge";
 import { Button } from "../components/Button";
 import { ErrorState, LoadingState } from "../components/States";
-import { cn } from "../components/cn";
 
 import {
   endReasonLabel,
@@ -32,6 +31,8 @@ import { TotalsStrip } from "../features/runs/TotalsStrip";
 import { SpecSnapshotPanel } from "../features/runs/SpecSnapshotPanel";
 import { EventLogPanel } from "../features/runs/EventLogPanel";
 import { LogTailPanel } from "../features/runs/LogTailPanel";
+import { Inline, Muted, Stack } from "../components/text";
+import TabBar from "@splunk/react-ui/TabBar";
 
 // Run detail — the flagship live view (design section 10.3). Polls run + metrics
 // at 5 s while the run is active and stops once it reaches a terminal state.
@@ -89,18 +90,18 @@ function RunDetailPage() {
 
   if (run.isPending) {
     return (
-      <div className="space-y-5">
+      <Stack $gap="large">
         <PageHeader title={`Run #${runId}`} />
         <Card>
           <LoadingState />
         </Card>
-      </div>
+      </Stack>
     );
   }
 
   if (run.isError) {
     return (
-      <div className="space-y-5">
+      <Stack $gap="large">
         <PageHeader
           title={`Run #${runId}`}
           actions={
@@ -112,7 +113,7 @@ function RunDetailPage() {
         <Card>
           <ErrorState error={run.error} onRetry={() => run.refetch()} />
         </Card>
-      </div>
+      </Stack>
     );
   }
 
@@ -124,32 +125,31 @@ function RunDetailPage() {
   const workers = leases.length;
 
   return (
-    <div className="space-y-5">
+    <Stack $gap="large">
       <PageHeader
         title={`Run #${data.id}`}
         subtitle={
-          <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <Inline>
             <span>
               Spec{" "}
               <Link
                 to="/specs"
-                className="text-sky-400 hover:text-sky-300"
               >
                 #{data.spec_id}
               </Link>
             </span>
-            <span className="text-slate-600">·</span>
+            <Muted>·</Muted>
             <span>started {fmtDateTime(data.t0 ?? data.created_at)}</span>
             {data.ended_at && (
               <>
-                <span className="text-slate-600">·</span>
+                <Muted>·</Muted>
                 <span>ended {fmtDateTime(data.ended_at)}</span>
               </>
             )}
-          </span>
+          </Inline>
         }
         actions={
-          <span className="flex items-center gap-1.5">
+          <Inline>
             <StatusBadge state={data.state} />
             {data.degraded && <Badge tone="amber">degraded</Badge>}
             {data.end_reason && (
@@ -160,7 +160,7 @@ function RunDetailPage() {
             <Link to="/runs">
               <Button variant="ghost">All runs</Button>
             </Link>
-          </span>
+          </Inline>
         }
       />
 
@@ -173,9 +173,9 @@ function RunDetailPage() {
       <Card
         title="Throughput"
         actions={
-          <span className="text-xs text-slate-500">
+          <Muted $small>
             target vs actual events/s · bytes/s on the right axis
-          </span>
+          </Muted>
         }
       >
         {metrics.isPending ? (
@@ -206,10 +206,10 @@ function RunDetailPage() {
           rateValue={rateValue}
         />
         {terminal && (
-          <p className="mt-3 text-xs text-slate-500">
+          <Muted>
             This run is {data.state}; controls are disabled. Use Re-run on the runs
             list to launch its spec again.
-          </p>
+          </Muted>
         )}
       </Card>
 
@@ -218,28 +218,13 @@ function RunDetailPage() {
       </Card>
 
       <Card>
-        <div className="mb-4 flex gap-1 border-b border-surface-muted">
-          {(
-            [
-              ["snapshot", "Spec snapshot"],
-              ["events", "Event log"],
-              ["logs", "Log tail"],
-            ] as [Tab, string][]
-          ).map(([key, label]) => (
-            <button
-              key={key}
-              onClick={() => setTab(key)}
-              className={cn(
-                "-mb-px border-b-2 px-3 py-2 text-sm font-medium transition-colors",
-                tab === key
-                  ? "border-sky-500 text-slate-100"
-                  : "border-transparent text-slate-400 hover:text-slate-200",
-              )}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
+        {/* Splunk's TabBar: the selected state, the keyboard behaviour and the
+            accessibility relationships between tab and panel come with it. */}
+        <TabBar activeTabId={tab} onChange={(_e, { selectedTabId }) => setTab(selectedTabId as Tab)}>
+          <TabBar.Tab label="Spec snapshot" tabId="snapshot" />
+          <TabBar.Tab label="Event log" tabId="events" />
+          <TabBar.Tab label="Log tail" tabId="logs" />
+        </TabBar>
 
         {tab === "snapshot" && (
           <SpecSnapshotPanel snapshot={data.spec_snapshot_json} />
@@ -249,7 +234,7 @@ function RunDetailPage() {
           <LogTailPanel runId={id} leases={leases} active={!terminal} />
         )}
       </Card>
-    </div>
+    </Stack>
   );
 }
 
