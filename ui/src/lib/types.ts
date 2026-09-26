@@ -520,3 +520,85 @@ export interface AuthStatus {
   sso_enabled: boolean;
   user?: UserOut | null;
 }
+
+// --------------------------------------------------------------------------- //
+// Pack builder (/api/pack-builder): sample events -> eventgen pack
+// --------------------------------------------------------------------------- //
+
+export type BuilderReplacementKind =
+  | "timestamp"
+  | "list"
+  | "values"
+  | "ipv4"
+  | "guid"
+  | "mac"
+  | "integer"
+  | "float"
+  | "hex"
+  | "static"
+  | "sequence";
+
+export interface BuilderReplacement {
+  kind: BuilderReplacementKind;
+  format?: string; // timestamp: strftime
+  list?: string; // list: shipped word list name
+  values?: string[]; // values: custom / observed values
+  min?: number; // integer, float
+  max?: number;
+  decimals?: number; // float
+  length?: number; // hex
+  value?: string; // static
+  start?: number; // sequence
+}
+
+export interface BuilderToken {
+  id: string;
+  field: string;
+  pattern: string; // regex; group 1 is replaced when present, else the whole match
+  enabled: boolean;
+  replacement: BuilderReplacement;
+}
+
+export interface BuilderSuggestion extends BuilderToken {
+  kind: string; // timestamp | json | kv | access | bare | phrase | wordlist
+  why: string;
+  examples: string[];
+  matches: number; // sample events the pattern matched
+}
+
+// [start, end, token id] spans each token rewrites, per event.
+export type BuilderHighlights = Array<Array<[number, number, string]>>;
+
+export interface BuilderAnalyseResponse {
+  events: number;
+  event_list: string[];
+  suggestions: BuilderSuggestion[];
+  highlights: BuilderHighlights;
+}
+
+export interface BuilderConfig {
+  name: string;
+  description?: string;
+  sourcetype?: string | null;
+  tags?: string[];
+  events: string[];
+  tokens: BuilderToken[];
+  count: number;
+  interval: number;
+  order: "sequential" | "random";
+}
+
+export interface BuilderPreviewResponse {
+  events: string[];
+  warnings: string[];
+  bytes_per_event: number;
+  highlights: BuilderHighlights;
+}
+
+export interface WordlistInfo {
+  name: string;
+  title: string;
+  description: string;
+  count: number;
+  sample: string[];
+}

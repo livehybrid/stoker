@@ -77,8 +77,11 @@ function Packs() {
             <Button variant="secondary" onClick={() => setUploadOpen(true)}>
               Upload pack
             </Button>
+            <Link to="/pack-builder">
+              <Button variant="primary">+ Build pack from events</Button>
+            </Link>
             <Link to="/metric-packs/new">
-              <Button variant="primary">+ New metric pack</Button>
+              <Button variant="secondary">+ New metric pack</Button>
             </Link>
           </Inline>
         }

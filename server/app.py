@@ -448,6 +448,7 @@ def create_app():
     from .routes.auth import router as auth_router
     from .routes.auth import users_router
     from .routes.metrics import router as metric_packs_router
+    from .routes.packbuilder import router as pack_builder_router
     from .routes.tokens import router as tokens_router
 
     app.include_router(agent_router)
@@ -456,6 +457,7 @@ def create_app():
     app.include_router(users_router)
     app.include_router(tokens_router)
     app.include_router(metric_packs_router)
+    app.include_router(pack_builder_router)
 
     # Session guard for /api/* (agent + webhook + unauthenticated auth endpoints
     # are exempt; the SPA shell and /healthz are public). Installed after the

@@ -1,0 +1,137 @@
+[
+  {
+    "name": "cities",
+    "title": "Cities",
+    "description": "World cities (spaces kept, e.g. \"New York\")"
+  },
+  {
+    "name": "countries",
+    "title": "Countries",
+    "description": "Country names"
+  },
+  {
+    "name": "country_codes",
+    "title": "Country codes",
+    "description": "ISO 3166 alpha-2 codes"
+  },
+  {
+    "name": "first_names",
+    "title": "First names",
+    "description": "Given names"
+  },
+  {
+    "name": "last_names",
+    "title": "Last names",
+    "description": "Family names"
+  },
+  {
+    "name": "full_names",
+    "title": "Full names",
+    "description": "\"First Last\" pairs"
+  },
+  {
+    "name": "usernames",
+    "title": "Usernames",
+    "description": "first.last style accounts plus service accounts"
+  },
+  {
+    "name": "emails",
+    "title": "Email addresses",
+    "description": "Addresses on example domains"
+  },
+  {
+    "name": "departments",
+    "title": "Departments",
+    "description": "Organisation departments"
+  },
+  {
+    "name": "hostnames",
+    "title": "Server hostnames",
+    "description": "role-env-NN names (web-prd-03)"
+  },
+  {
+    "name": "workstations",
+    "title": "Workstations",
+    "description": "WS-SITE-NNNN names"
+  },
+  {
+    "name": "internal_ips",
+    "title": "Internal IPs",
+    "description": "RFC 1918 addresses (10/8, 172.16/12, 192.168/16)"
+  },
+  {
+    "name": "external_ips",
+    "title": "External IPs",
+    "description": "Documentation ranges and generated public-looking addresses"
+  },
+  {
+    "name": "mac_addresses",
+    "title": "MAC addresses",
+    "description": "Colon-separated lower-case"
+  },
+  {
+    "name": "http_methods",
+    "title": "HTTP methods",
+    "description": "Weighted: mostly GET, some POST"
+  },
+  {
+    "name": "http_status",
+    "title": "HTTP status codes",
+    "description": "Weighted: mostly 200, a few 3xx/4xx/5xx"
+  },
+  {
+    "name": "uri_paths",
+    "title": "URI paths",
+    "description": "Web and API paths incl. a few probes"
+  },
+  {
+    "name": "user_agents",
+    "title": "User agents",
+    "description": "Browsers, mobiles, bots and API clients"
+  },
+  {
+    "name": "process_names",
+    "title": "Process names",
+    "description": "Linux and Windows processes"
+  },
+  {
+    "name": "actions",
+    "title": "Actions",
+    "description": "Firewall-style outcomes, mostly allowed"
+  },
+  {
+    "name": "severities",
+    "title": "Severities",
+    "description": "informational to critical, weighted"
+  },
+  {
+    "name": "log_levels",
+    "title": "Log levels",
+    "description": "INFO/DEBUG/WARN/ERROR/FATAL, weighted"
+  },
+  {
+    "name": "aws_regions",
+    "title": "AWS regions",
+    "description": "Region codes"
+  },
+  {
+    "name": "protocols",
+    "title": "Network protocols",
+    "description": "TCP/UDP/ICMP/GRE, weighted"
+  },
+  {
+    "name": "ports",
+    "title": "Common ports",
+    "description": "Weighted towards 443/80/53/22"
+  },
+  {
+    "name": "auth_results",
+    "title": "Auth results",
+    "description": "success/failure/locked_out/mfa_required"
+  },
+  {
+    "name": "file_extensions",
+    "title": "File extensions",
+    "description": "Documents, archives, binaries, scripts"
+  }
+]

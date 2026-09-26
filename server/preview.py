@@ -16,7 +16,11 @@ Supported token replacements (mirroring the vendored eventgen's semantics —
 * ``replacementType = random`` (or ``rated``) with ``replacement = ipv4`` — a
   random dotted-quad IPv4 address.
 * ``replacementType = random`` (or ``rated``) with ``replacement = integer[a:b]``
-  — a random integer in ``[a, b]``.
+  — a random integer in ``[a, b]``; also ``guid``, ``mac``, ``hex(n)`` and
+  ``float[a:b]``.
+* ``replacementType = file`` / ``mvfile`` / ``seqfile`` — a random line (or
+  mvfile column) from the named file, read only when it resolves inside the pack.
+* ``replacementType = static`` — the literal replacement.
 
 Any other replacement type is left as-is (the token's matched text is kept), so
 an unsupported token never corrupts the preview; it simply is not substituted.
@@ -39,7 +43,8 @@ import logging
 import os
 import random
 import re
-from typing import Dict, List, Optional, Tuple
+import uuid
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import bundles
 
@@ -109,7 +114,7 @@ def preview_pack(pack_dir, n=PREVIEW_N_DEFAULT):
     if not lines:
         return []
 
-    tokens = _stanza_tokens(parser, stanza)
+    tokens = [_resolve_file_token(t, pack_root) for t in _stanza_tokens(parser, stanza)]
     now = datetime.datetime.now()
 
     out = []  # type: List[str]
@@ -313,6 +318,10 @@ def _replacement_value(rtype, replacement, now):
     Anything else -> ``None`` (leave the token's matched text in place).
     """
     rtype = (rtype or "").lower()
+    if rtype == "__choice__":
+        return random.choice(replacement) if replacement else None
+    if rtype == "static":
+        return replacement
     if rtype == "timestamp":
         pattern = replacement or "%Y-%m-%dT%H:%M:%S"
         try:
@@ -329,7 +338,49 @@ def _replacement_value(rtype, replacement, now):
             if end >= start:
                 return str(random.randint(start, end))
             return None
+        lowered = value.lower()
+        if lowered == "guid":
+            return str(uuid.uuid4())
+        if lowered == "mac":
+            return ":".join("%02x" % random.randint(0, 255) for _ in range(6))
+        m = re.match(r"^hex\((\d{1,3})\)$", lowered)
+        if m:
+            return "".join(random.choice("0123456789ABCDEF") for _ in range(int(m.group(1))))
+        m = re.match(r"^float\[(-?\d+(?:\.(\d+))?):(-?\d+(?:\.\d+)?)\]$", lowered)
+        if m:
+            lo, hi, d = float(m.group(1)), float(m.group(3)), len(m.group(2) or "")
+            if hi >= lo:
+                return "%.*f" % (d, random.uniform(lo, hi))
+            return None
     return None
+
+
+def _resolve_file_token(token, pack_root):
+    # type: (Tuple[re.Pattern, str, str], str) -> Tuple[re.Pattern, str, Any]
+    """Turn a ``file`` / ``mvfile`` / ``seqfile`` token into a choice over its
+    lines, read path-confined like the sample pool (eventgen resolves the path
+    against the pack root, the working directory the agent sets). A path that
+    escapes the pack, or an unreadable file, leaves the token unsupported (its
+    matched text stays in place). ``mvfile``'s ``path:N`` picks column N.
+    """
+    compiled, rtype, replacement = token
+    if (rtype or "").lower() not in ("file", "mvfile", "seqfile"):
+        return token
+    path_text, column = replacement, 0
+    head, sep, tail = replacement.rpartition(":")
+    if sep and tail.isdigit() and int(tail) > 0:
+        path_text, column = head, int(tail)
+    if os.path.isabs(path_text):
+        return (compiled, "__unsupported__", "")
+    path = _safe_join(pack_root, pack_root, path_text)
+    if path is None or not os.path.isfile(path):
+        return (compiled, "__unsupported__", "")
+    values = _read_lines(path)
+    if column:
+        cols = [line.split(",") for line in values]
+        values = [c[column - 1] for c in cols if len(c) >= column]
+    values = [v.strip() for v in values if v.strip()]
+    return (compiled, "__choice__", values) if values else (compiled, "__unsupported__", "")
 
 
 def _random_ipv4():

@@ -22,6 +22,10 @@ import type {
   MetricPreviewResponse,
   MetricsOut,
   PackOut,
+  BuilderAnalyseResponse,
+  BuilderConfig,
+  BuilderPreviewResponse,
+  WordlistInfo,
   PackPreview,
   PackPreviewRun,
   PackUploadMeta,
@@ -279,6 +283,31 @@ export const metricPacks = {
 };
 
 // --------------------------------------------------------------------------- //
+// Pack builder (sample events -> eventgen pack with shipped word lists)
+// --------------------------------------------------------------------------- //
+
+export const packBuilder = {
+  wordlists: () => request<WordlistInfo[]>("GET", "/pack-builder/wordlists"),
+  wordlist: (name: string) =>
+    request<{ name: string; count: number; values: string[] }>(
+      "GET",
+      `/pack-builder/wordlists/${encodeURIComponent(name)}`,
+    ),
+  analyse: (text: string) =>
+    request<BuilderAnalyseResponse>("POST", "/pack-builder/analyse", { body: { text } }),
+  preview: (config: BuilderConfig, n = 20, seed?: number) =>
+    request<BuilderPreviewResponse>("POST", "/pack-builder/preview", {
+      body: { config, n, seed },
+    }),
+  create: (config: BuilderConfig) =>
+    request<PackOut>("POST", "/pack-builder/packs", { body: { config } }),
+  get: (id: number) =>
+    request<{ pack_id: number; config: BuilderConfig }>("GET", `/pack-builder/packs/${id}`),
+  update: (id: number, config: BuilderConfig) =>
+    request<PackOut>("PUT", `/pack-builder/packs/${id}`, { body: { config } }),
+};
+
+// --------------------------------------------------------------------------- //
 // Specs
 // --------------------------------------------------------------------------- //
 
@@ -361,6 +390,7 @@ export const api = {
   repos,
   packs,
   metricPacks,
+  packBuilder,
   specs,
   runs,
   auth,

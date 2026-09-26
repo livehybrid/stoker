@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as LoginRouteImport } from './routes/login'
+import { Route as PackBuilderRouteImport } from './routes/pack-builder'
 import { Route as PacksRouteImport } from './routes/packs'
 import { Route as ReposRouteImport } from './routes/repos'
 import { Route as RunsRouteImport } from './routes/runs'
@@ -29,6 +30,11 @@ const IndexRoute = IndexRouteImport.update({
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
   path: '/login',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PackBuilderRoute = PackBuilderRouteImport.update({
+  id: '/pack-builder',
+  path: '/pack-builder',
   getParentRoute: () => rootRouteImport,
 } as any)
 const PacksRoute = PacksRouteImport.update({
@@ -80,6 +86,7 @@ const SpecsNewRoute = SpecsNewRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
+  '/pack-builder': typeof PackBuilderRoute
   '/packs': typeof PacksRoute
   '/repos': typeof ReposRoute
   '/runs': typeof RunsRoute
@@ -93,6 +100,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
+  '/pack-builder': typeof PackBuilderRoute
   '/packs': typeof PacksRoute
   '/repos': typeof ReposRoute
   '/runs': typeof RunsRoute
@@ -107,6 +115,7 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
+  '/pack-builder': typeof PackBuilderRoute
   '/packs': typeof PacksRoute
   '/repos': typeof ReposRoute
   '/runs': typeof RunsRoute
@@ -122,6 +131,7 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/login'
+    | '/pack-builder'
     | '/packs'
     | '/repos'
     | '/runs'
@@ -135,6 +145,7 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/login'
+    | '/pack-builder'
     | '/packs'
     | '/repos'
     | '/runs'
@@ -148,6 +159,7 @@ export interface FileRouteTypes {
     | '__root__'
     | '/'
     | '/login'
+    | '/pack-builder'
     | '/packs'
     | '/repos'
     | '/runs'
@@ -162,6 +174,7 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   LoginRoute: typeof LoginRoute
+  PackBuilderRoute: typeof PackBuilderRoute
   PacksRoute: typeof PacksRoute
   ReposRoute: typeof ReposRoute
   RunsRoute: typeof RunsRoute
@@ -187,6 +200,13 @@ declare module '@tanstack/react-router' {
       path: '/login'
       fullPath: '/login'
       preLoaderRoute: typeof LoginRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/pack-builder': {
+      id: '/pack-builder'
+      path: '/pack-builder'
+      fullPath: '/pack-builder'
+      preLoaderRoute: typeof PackBuilderRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/packs': {
@@ -258,6 +278,7 @@ declare module '@tanstack/react-router' {
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   LoginRoute: LoginRoute,
+  PackBuilderRoute: PackBuilderRoute,
   PacksRoute: PacksRoute,
   ReposRoute: ReposRoute,
   RunsRoute: RunsRoute,

@@ -1,0 +1,17 @@
+.pdf
+.docx
+.xlsx
+.pptx
+.txt
+.csv
+.zip
+.png
+.jpg
+.log
+.json
+.xml
+.exe
+.dll
+.ps1
+.sh
+.py

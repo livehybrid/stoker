@@ -1,0 +1,145 @@
+London
+Manchester
+Birmingham
+Leeds
+Glasgow
+Edinburgh
+Bristol
+Liverpool
+Sheffield
+Cardiff
+Belfast
+Newcastle
+Nottingham
+Leicester
+Southampton
+Brighton
+Oxford
+Cambridge
+York
+Aberdeen
+Dublin
+Paris
+Lyon
+Marseille
+Berlin
+Munich
+Hamburg
+Frankfurt
+Amsterdam
+Rotterdam
+Brussels
+Antwerp
+Madrid
+Barcelona
+Valencia
+Lisbon
+Porto
+Rome
+Milan
+Naples
+Turin
+Vienna
+Zurich
+Geneva
+Copenhagen
+Stockholm
+Oslo
+Helsinki
+Warsaw
+Krakow
+Prague
+Budapest
+Athens
+Istanbul
+Bucharest
+Sofia
+Reykjavik
+Tallinn
+Riga
+Vilnius
+Kyiv
+New York
+Los Angeles
+Chicago
+Houston
+Phoenix
+Philadelphia
+San Antonio
+San Diego
+Dallas
+Austin
+Seattle
+Denver
+Boston
+Atlanta
+Miami
+Portland
+Toronto
+Montreal
+Vancouver
+Calgary
+Ottawa
+Mexico City
+Guadalajara
+Monterrey
+Bogota
+Lima
+Santiago
+Buenos Aires
+Sao Paulo
+Rio de Janeiro
+Brasilia
+Caracas
+Quito
+Montevideo
+Tokyo
+Osaka
+Kyoto
+Seoul
+Busan
+Beijing
+Shanghai
+Shenzhen
+Guangzhou
+Hong Kong
+Taipei
+Singapore
+Kuala Lumpur
+Bangkok
+Jakarta
+Manila
+Hanoi
+Ho Chi Minh City
+Mumbai
+Delhi
+Bengaluru
+Chennai
+Hyderabad
+Kolkata
+Karachi
+Lahore
+Dhaka
+Colombo
+Dubai
+Abu Dhabi
+Doha
+Riyadh
+Tel Aviv
+Cairo
+Casablanca
+Lagos
+Nairobi
+Accra
+Addis Ababa
+Johannesburg
+Cape Town
+Durban
+Sydney
+Melbourne
+Brisbane
+Perth
+Adelaide
+Auckland
+Wellington
+Christchurch

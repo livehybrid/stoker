@@ -151,6 +151,33 @@ const ROUTES = {
     },
     '/runs/7/metrics': { samples: SAMPLES },
     '/runs/7/events': { events: [] },
+    '/pack-builder/wordlists': [
+        { name: 'cities', title: 'Cities', description: 'World cities', count: 150, sample: ['London', 'Paris'] },
+        { name: 'usernames', title: 'Usernames', description: 'Accounts', count: 300, sample: ['ada.smith'] },
+    ],
+    '/pack-builder/analyse': {
+        events: 2,
+        event_list: ['user=alice city=London', 'user=bob city=Paris'],
+        suggestions: [
+            {
+                id: 'f1_user', field: 'user', kind: 'kv', pattern: '\\buser=([^\\s]+)', enabled: true,
+                replacement: { kind: 'list', list: 'usernames' }, why: 'field name suggests usernames',
+                examples: ['alice', 'bob'], matches: 2,
+            },
+            {
+                id: 'f2_city', field: 'city', kind: 'kv', pattern: '\\bcity=([^\\s]+)', enabled: true,
+                replacement: { kind: 'values', values: ['London', 'Paris'] }, why: '2 distinct values',
+                examples: ['London', 'Paris'], matches: 2,
+            },
+        ],
+        highlights: [[[5, 10, 'f1_user'], [16, 22, 'f2_city']], [[5, 8, 'f1_user'], [14, 19, 'f2_city']]],
+    },
+    '/pack-builder/preview': {
+        events: ['user=ada.smith city=Leeds-preview', 'user=bob.jones city=York-preview'],
+        warnings: [],
+        bytes_per_event: 30,
+        highlights: [[[5, 10, 'f1_user']], []],
+    },
 };
 
 function lookup(url) {
@@ -356,6 +383,36 @@ const go = async (pathname) => {
 
     await go('/packs');
     await check('packs', 'apache-access');
+    await check('packs: builder entry point', 'Build pack from events');
+
+    await go('/pack-builder');
+    await check('pack builder', 'Build a pack from events');
+    // Drive the flow: type events, analyse, see fields + highlights + preview.
+    // Splunk's TextArea also renders an aria-hidden "shadow" textarea to size
+    // itself; type into the real one.
+    const area = Array.from(window.document.querySelectorAll('textarea')).find(
+        (t) => t.getAttribute('aria-hidden') !== 'true' && t.tabIndex !== -1
+    );
+    if (!area) {
+        problems.push('pack builder: no events textarea');
+    } else {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+        setter.call(area, 'user=alice city=London\nuser=bob city=Paris');
+        area.dispatchEvent(new window.Event('input', { bubbles: true }));
+        await settle(200);
+        const analyseButton = Array.from(window.document.querySelectorAll('button')).find(
+            (b) => (b.textContent || '').includes('Analyse events')
+        );
+        if (!analyseButton) {
+            problems.push('pack builder: no Analyse button');
+        } else {
+            analyseButton.click();
+            await check('pack builder: fields listed', 'Fields to vary (2 of 2 on)');
+            await check('pack builder: word list offered', 'Word list: Usernames');
+            await waitFor('pack builder: highlights', () => window.document.querySelectorAll('mark').length >= 2);
+            await check('pack builder: live preview', 'city=Leeds-preview', 5000);
+        }
+    }
 
     await go('/repos');
     await check('repos', 'livehybrid/packs');

@@ -154,6 +154,11 @@ export function PackCard({ pack, onPreview }: Props) {
               Preview
             </Button>
           )}
+          {!isMetric && isLocal && (pack.tags_json ?? []).includes("pack-builder") && (
+            <Link to="/pack-builder" search={{ edit: pack.id }}>
+              <Button variant="secondary">Edit in builder</Button>
+            </Link>
+          )}
           {/* Pre-selects this pack in the wizard via its ?pack=<id> search
               param (validated by src/routes/specs.new.tsx). */}
           <Link to="/specs/new" search={{ pack: pack.id }}>

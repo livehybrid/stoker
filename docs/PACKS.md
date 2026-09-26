@@ -578,6 +578,66 @@ curl -H "Authorization: Bearer stk_..." \
 
 ---
 
+## Building a pack from sample events (pack builder)
+
+**Packs → Build pack from events** (`/pack-builder`) turns a handful of real
+events into an eventgen pack without writing any `eventgen.conf` by hand.
+
+1. **Paste or upload events**: one per line (access logs, syslog, `key=value`,
+   JSON lines) or a JSON array of objects. Up to 5,000 events, 64 KB each, 2 MB
+   in total.
+2. **Review the suggested fields.** The analyser marks what it would vary and
+   recommends a replacement for each. It finds timestamps in the common formats
+   (ISO 8601, access log, syslog, `date time`, `%a %b %d %Y`, epoch seconds and
+   milliseconds inside keys), JSON and `key=value` fields (classified by value
+   shape and key name), access-log method / path / status / bytes / user agent,
+   GUIDs, emails, MACs and IPv4 addresses anchored on the text before them (so
+   "from" and "to" addresses stay separate fields), `for USER from` / `port N`
+   phrases, `name[pid]` process ids, and city, country and first names found in
+   free text. Constants are suggested but switched off. Select any other text in
+   an event to add it as a field, or add a regex.
+3. **Choose replacements**: a shipped word list, "values I list" (the values
+   seen, editable, one per line), random IPv4 / GUID / MAC / integer / decimal /
+   hex, a sequence number, a fixed value, or the event timestamp in any strftime
+   format.
+4. **Preview** renders generated events live, with the same token semantics the
+   engines apply, and warns about a field whose pattern matches nothing.
+5. **Create pack** writes an ordinary pack under `PACK_UPLOAD_DIR` and registers
+   it through the same lint as an uploaded pack, tagged `pack-builder`. **Edit in
+   builder** on the pack card reopens it; saving rebuilds the directory in place.
+   Runs already provisioned keep their content-addressed bundle.
+
+What the builder writes:
+
+```
+<pack>/
+  pack.yaml                    name, tags (pack-builder, ...), engine, description,
+                               estimates.bytes_per_event, defaults.sourcetype
+  default/eventgen.conf        one sample stanza, the tokens in apply order
+  samples/<slug>.sample        your events, one per line
+  samples/lists/<list>.sample  every word list and value list the tokens use
+  stoker-builder.json          the builder config, for reopening the pack
+```
+
+Token order is timestamps first, then generated values, then list/value/static
+replacements, so no pattern can match inside text another field inserted (an
+IPv4 pattern inside `Chrome/128.0.0.0`, say). Patterns avoid lookaround, so
+they run on both firebox and the vendored Python eventgen.
+
+**Shipped word lists** (`server/packbuilder/wordlists/`, regenerate with
+`python3 tools/gen_wordlists.py`): cities, countries, country codes, first
+names, last names, full names, usernames, emails, departments, server hostnames,
+workstations, internal IPs (RFC 1918), external IPs, MAC addresses, HTTP methods,
+HTTP status codes, URI paths, user agents, process names, actions, severities,
+log levels, AWS regions, protocols, common ports, auth results and file
+extensions. All values are authored synthetic data. A value repeated in a list is
+proportionally more likely, which is how the weighted lists (status codes,
+methods, ports) express their mix.
+
+API: `GET /api/pack-builder/wordlists[/{name}]`, `POST /api/pack-builder/analyse
+{text}`, `POST /api/pack-builder/preview {config, n, seed}`, `POST
+/api/pack-builder/packs {config}` (201), `GET|PUT /api/pack-builder/packs/{id}`.
+
 ## Running more than one pack in a job
 
 A spec normally names one pack. It can instead name a **primary pack plus extra
