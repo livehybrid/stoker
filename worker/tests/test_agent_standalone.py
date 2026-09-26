@@ -372,3 +372,60 @@ def test_small_drain_budget_clamps_flush_timeout(tmp_path):
     assert agent.run() == 0
     assert sinks[0].flush_timeout is not None
     assert sinks[0].flush_timeout <= 5.0
+
+
+def test_firebox_gets_the_hec_envelope_policy(tmp_path, monkeypatch):
+    """With a firebox binary present the agent asks the engine for HEC-line
+    envelopes (STOKER_ENVELOPE=hec + the slice's metadata policy) and forwards
+    the lines as bytes; STOKER_FAST_ENVELOPE=0 restores the classic envelope."""
+    import stat
+    fake = tmp_path / "firebox"
+    fake.write_text("#!/bin/sh\nexit 0\n")
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("STOKER_FIREBOX_BIN", str(fake))
+    monkeypatch.delenv("STOKER_ENGINE_CMD", raising=False)
+    captured = {}
+
+    def factory(conf, sock, cwd=None, extra_env=None):
+        captured.update(extra_env or {})
+        return StubEngine(conf, sock, cwd=cwd)
+
+    env = {
+        "STOKER_STANDALONE": "1",
+        "STOKER_BUNDLE": make_pack(tmp_path),
+        "STOKER_HEC_URL": "http://fake-hec:8088",
+        "STOKER_HEC_TOKEN": "tok",
+        "STOKER_INDEX": "loadtest",
+        "STOKER_SOURCETYPE": "st_override",
+        "STOKER_RATE_MODE": "eps",
+        "STOKER_RATE_VALUE": "200",
+        "STOKER_DURATION_S": "2",
+        "STOKER_OUTPUT_SOCKET": str(tmp_path / "out.sock"),
+        "STOKER_METRICS_PORT": "0",
+        "STOKER_HEARTBEAT_S": "1",
+    }
+    sinks = []
+
+    def hec_factory(url, token, gzip_enabled, verify_tls, ack):
+        sink = FakeHec(url, token, gzip_enabled, verify_tls, ack)
+        sinks.append(sink)
+        return sink
+
+    agent = Agent(load_config(env), hec_factory=hec_factory, engine_factory=factory)
+    assert agent.run() == 0
+    assert captured["STOKER_ENVELOPE"] == "hec"
+    policy = json.loads(captured["STOKER_ENVELOPE_META"])
+    assert policy["overrides"]["index"] == "loadtest"
+    assert policy["overrides"]["sourcetype"] == "st_override"
+    assert set(policy["defaults"]) == {"index", "sourcetype", "source", "host"}
+    assert sinks[0].events, "nothing delivered"
+    assert all(isinstance(e, bytes) for e in sinks[0].events)
+    assert 300 <= len(sinks[0].events) <= 500  # ~200 eps x 2 s, paced
+
+    # opt out: classic envelope, no policy env
+    captured.clear()
+    env["STOKER_FAST_ENVELOPE"] = "0"
+    agent = Agent(load_config(env), hec_factory=hec_factory, engine_factory=factory)
+    assert agent.run() == 0
+    assert "STOKER_ENVELOPE" not in captured
+    assert all(isinstance(e, dict) for e in sinks[1].events)

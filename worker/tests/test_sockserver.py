@@ -279,3 +279,47 @@ def test_serves_several_concurrent_producers(tmp_path):
             c.close()
     finally:
         server.stop(join_timeout_s=5.0)
+
+
+def test_hec_envelope_forwards_bytes_and_paces(sock_path):
+    """The HEC-line envelope: lines are forwarded as bytes without decoding,
+    non-objects are counted malformed, and the bucket still gates."""
+    hec = FakeHec()
+    bucket = open_bucket()
+    server = SocketServer(sock_path, hec, bucket, make_filler(make_slice()),
+                          gated=True, envelope="hec")
+    server.start()
+    try:
+        client = connect(sock_path)
+        client.sendall(b'{"time":1,"index":"i","event":"a"}\n{"event":"b"}\nnot json\n')
+        assert wait_for(lambda: len(hec) == 2)
+        assert hec.events == [b'{"time":1,"index":"i","event":"a"}', b'{"event":"b"}']
+        assert wait_for(lambda: server.malformed == 1)
+        assert server.received == 2
+        client.close()
+    finally:
+        server.stop()
+
+
+def test_hec_envelope_lines_split_linearly_across_chunks(sock_path):
+    """A line that straddles two recv() chunks is reassembled once."""
+    hec = FakeHec()
+    server = SocketServer(sock_path, hec, open_bucket(), make_filler(make_slice()),
+                          gated=False, envelope="hec")
+    server.start()
+    try:
+        client = connect(sock_path)
+        big = b'{"event":"' + b"x" * 200000 + b'"}\n'
+        client.sendall(big + b'{"event":"tail"}\n')
+        assert wait_for(lambda: len(hec) == 2)
+        assert hec.events[0] == big.rstrip(b"\n")
+        assert hec.events[1] == b'{"event":"tail"}'
+        client.close()
+    finally:
+        server.stop()
+
+
+def test_unknown_envelope_rejected(sock_path):
+    with pytest.raises(ValueError):
+        SocketServer(sock_path, FakeHec(), open_bucket(), make_filler(make_slice()),
+                     envelope="csv")

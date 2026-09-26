@@ -30,6 +30,7 @@ from .slice import SpecSlice
 log = logging.getLogger("stoker.sock")
 
 _META_FIELDS = ("index", "sourcetype", "source", "host")
+ENVELOPES = ("stoker", "hec")
 _MAX_BUFFER = 4 * 1024 * 1024  # discard pathological unterminated lines
 # Listener backlog. Must exceed 1: a multi-process engine opens one connection
 # per generator process and they arrive together, so a backlog of 1 would refuse
@@ -62,8 +63,15 @@ def make_filler(spec):
 class SocketServer(object):
     """Listener thread for STOKER_OUTPUT_SOCKET."""
 
-    def __init__(self, path, hec, bucket, filler, gated=True):
-        # type: (str, Any, TokenBucket, Callable[[Dict[str, Any]], Dict[str, Any]], bool) -> None
+    def __init__(self, path, hec, bucket, filler, gated=True, envelope="stoker"):
+        # type: (str, Any, TokenBucket, Callable[[Dict[str, Any]], Dict[str, Any]], bool, str) -> None
+        if envelope not in ENVELOPES:
+            raise ValueError("envelope must be one of %r, got %r" % (ENVELOPES, envelope))
+        # "stoker": every line is decoded, metadata filled and re-queued as a
+        # dict. "hec": the engine (firebox) already applied the metadata rules,
+        # so the line is forwarded to the HEC client as bytes after pacing;
+        # decoding each event is exactly the per-event cost this mode removes.
+        self._envelope = envelope
         self._path = path
         self._hec = hec
         self._bucket = bucket
@@ -207,12 +215,14 @@ class SocketServer(object):
                 if buf.strip():
                     self._handle_line(buf)
                 return
-            buf += chunk
-            while True:
-                idx = buf.find(b"\n")
-                if idx < 0:
-                    break
-                line, buf = buf[:idx], buf[idx + 1:]
+            # Split once per chunk (linear); the old find/slice loop copied the
+            # remainder of the buffer for every line, which at firebox's 100 KB
+            # writes was quadratic.
+            if buf:
+                chunk = buf + chunk
+            parts = chunk.split(b"\n")
+            buf = parts.pop()  # unterminated remainder, if any
+            for line in parts:
                 if not self._handle_line(line):
                     return  # bucket closed: draining
             if len(buf) > _MAX_BUFFER:
@@ -220,12 +230,33 @@ class SocketServer(object):
                 self._inc_malformed()
                 buf = b""
 
+    def _handle_hec_line(self, line):
+        # type: (bytes) -> bool
+        """HEC-line envelope: pace, then forward the bytes untouched. Only the
+        object shape is checked (a full decode is what this path avoids)."""
+        if not (line.startswith(b"{") and line.endswith(b"}")):
+            self._inc_malformed()
+            return True
+        if self._gated:
+            if not self._bucket.acquire():
+                return False  # closed for drain
+        elif self._bucket.closed:
+            return False
+        try:
+            self._hec.put(line)
+        except RuntimeError:
+            return False  # hec stopped during drain
+        self._inc_received()
+        return True
+
     def _handle_line(self, line):
         # type: (bytes) -> bool
         """Process one NDJSON line. Returns False only when draining."""
         line = line.strip()
         if not line:
             return True
+        if self._envelope == "hec":
+            return self._handle_hec_line(line)
         try:
             envelope = json.loads(line.decode("utf-8"))
         except (ValueError, UnicodeDecodeError):

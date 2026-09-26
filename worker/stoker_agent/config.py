@@ -81,6 +81,10 @@ class Config:
     hec_verify_tls: bool
     zero_output_s: float = DEFAULT_ZERO_OUTPUT_S
     zero_output_max_restarts: int = DEFAULT_ZERO_OUTPUT_MAX_RESTARTS
+    # firebox emits final HEC lines and the agent forwards bytes (see
+    # docs/WORKER-CONTRACT.md "HEC-line envelope"); STOKER_FAST_ENVELOPE=0
+    # keeps the classic envelope even with firebox.
+    fast_envelope: bool = True
 
 
 def _get(env, key):
@@ -166,6 +170,8 @@ def load_config(env=None):
     zero_output_s = _as_float("STOKER_ZERO_OUTPUT_S",
                               _get(env, "STOKER_ZERO_OUTPUT_S")
                               or str(DEFAULT_ZERO_OUTPUT_S), minimum=0.0)
+    fast_envelope = (_get(env, "STOKER_FAST_ENVELOPE") or "1").lower() not in (
+        "0", "false", "no", "off")
     zero_output_max_restarts = _as_int(
         "STOKER_ZERO_OUTPUT_MAX_RESTARTS",
         _get(env, "STOKER_ZERO_OUTPUT_MAX_RESTARTS")
@@ -237,6 +243,7 @@ def load_config(env=None):
             hec_verify_tls=hec_verify_tls,
             zero_output_s=zero_output_s,
             zero_output_max_restarts=zero_output_max_restarts,
+            fast_envelope=fast_envelope,
         )
 
     # Managed mode.
@@ -277,4 +284,5 @@ def load_config(env=None):
         hec_verify_tls=hec_verify_tls,
         zero_output_s=zero_output_s,
         zero_output_max_restarts=zero_output_max_restarts,
+        fast_envelope=fast_envelope,
     )

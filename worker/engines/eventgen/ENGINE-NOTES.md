@@ -21,6 +21,11 @@ agent's filler behaves identically). Differences that matter to the agent:
   lines (start summary, per-sample lines, the final `done:` totals).
 - **Native backfill works** (`backfill = -1h` generates every past interval),
   though the agent still uses its earliest-widening rewrite for backfill runs.
+- **HEC-line envelope**: the agent launches firebox with `STOKER_ENVELOPE=hec`
+  and the slice's metadata policy (`STOKER_ENVELOPE_META`), so firebox emits
+  final HEC objects and the socket reader only paces and forwards bytes (no
+  per-event decode/fill/re-encode). `STOKER_FAST_ENVELOPE=0` restores the
+  classic envelope; the Python engine always uses the classic one.
 
 
 Everything below was read out of the vendored 7.2.1 source (paths relative to `worker/engines/eventgen/splunk_eventgen/`). It is the behaviour the agent can rely on.

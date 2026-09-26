@@ -122,8 +122,9 @@ class HecClient(object):
     # -- producer side --------------------------------------------------
 
     def put(self, envelope):
-        # type: (Dict[str, Any]) -> None
-        """Enqueue one envelope; blocks while the queue is full."""
+        # type: (Any) -> None
+        """Enqueue one envelope (a dict, or the bytes of a final HEC object);
+        blocks while the queue is full."""
         while True:
             if self._stopping.is_set():
                 raise RuntimeError("HecClient is stopped; put() rejected")
@@ -248,7 +249,11 @@ class HecClient(object):
         return len(lines), b"\n".join(lines)
 
     def _serialise_or_count(self, item):
-        # type: (Dict[str, Any]) -> Optional[bytes]
+        # type: (Any) -> Optional[bytes]
+        if isinstance(item, (bytes, bytearray)):
+            # A final HEC object from the engine (the HEC-line envelope): the
+            # socket reader forwarded it verbatim, nothing to serialise.
+            return bytes(item)
         try:
             return serialise_envelope(item)
         except (TypeError, ValueError, KeyError):

@@ -23,7 +23,7 @@ from .config import Config
 from .control import (ControlClient, DeadManError, StandaloneControl,
                       SupersededError)
 from .engine import (STOP_GRACE_S, EngineError, EngineRunner,
-                     MetricsRunner, RawReplayRunner)
+                     MetricsRunner, RawReplayRunner, eventgen_impl)
 from .metrics import CpuTracker, Metrics, read_rss_mb
 from .pacing import TokenBucket
 from .slice import SliceError, SpecSlice, parse_iso8601
@@ -52,8 +52,8 @@ def _default_hec_factory(url, token, gzip_enabled, verify_tls, ack):
                      verify_tls=verify_tls, ack=ack)
 
 
-def _default_engine_factory(conf_path, socket_path, cwd=None):
-    return EngineRunner(conf_path, socket_path, cwd=cwd)
+def _default_engine_factory(conf_path, socket_path, cwd=None, extra_env=None):
+    return EngineRunner(conf_path, socket_path, cwd=cwd, extra_env=extra_env)
 
 
 class _RawReplayView(object):
@@ -228,10 +228,12 @@ class Agent(object):
                 self._bucket.pause()  # nothing flows before T0
                 # park the anchor far ahead so pre-release lag_s reads 0
                 self._bucket.anchor_at(self._clock() + 1e9)
+                envelope, engine_env = self._eventgen_envelope(
+                    cfg, sl, is_rawreplay or is_metrics)
                 metrics.start()
                 self._sock = SocketServer(cfg.output_socket, self._hec,
                                           self._bucket, make_filler(sl),
-                                          gated=gated)
+                                          gated=gated, envelope=envelope)
                 self._sock.start()
                 # cwd rooted at the pack so the engine resolves relative pack
                 # paths (eventgen's file-token replacement samples/foo.sample;
@@ -242,6 +244,11 @@ class Agent(object):
                                                                 gated, workdir)
                 elif is_metrics:
                     self._engine = self._build_metrics_engine(sl, pack, workdir)
+                elif engine_env:
+                    self._engine = self._engine_factory(conf_path,
+                                                        cfg.output_socket,
+                                                        pack.pack_dir,
+                                                        extra_env=engine_env)
                 else:
                     self._engine = self._engine_factory(conf_path,
                                                         cfg.output_socket,
@@ -400,6 +407,31 @@ class Agent(object):
             backfill_end_s=sl.backfill_end_s,
             backfill_resolution_s=sl.backfill_resolution_s,
             cwd=pack.pack_dir, log_dir=log_dir)
+
+    def _eventgen_envelope(self, cfg, sl, other_engine):
+        # type: (Config, SpecSlice, bool) -> tuple
+        """Pick the socket envelope for an eventgen run.
+
+        With firebox as the engine (and no STOKER_ENGINE_CMD override, whose
+        launcher may not be firebox) the agent asks for the **HEC-line
+        envelope**: firebox applies the slice's metadata rules itself
+        (override > engine value > default) and emits final HEC objects, and
+        the socket reader only paces and forwards bytes. Returns
+        ``(envelope, extra_env_for_the_engine_or_None)``; the classic
+        ``"stoker"`` envelope for every other engine, for the Python eventgen,
+        or when STOKER_FAST_ENVELOPE=0."""
+        if other_engine or not cfg.fast_envelope or os.environ.get("STOKER_ENGINE_CMD"):
+            return "stoker", None
+        try:
+            impl, _binary = eventgen_impl()
+        except EngineError:
+            return "stoker", None
+        if impl != "firebox":
+            return "stoker", None
+        policy = {"overrides": dict(sl.overrides), "defaults": sl.hec_defaults()}
+        log.info("firebox will emit HEC-line envelopes; the agent forwards bytes")
+        return "hec", {"STOKER_ENVELOPE": "hec",
+                       "STOKER_ENVELOPE_META": json.dumps(policy)}
 
     def _set_assigned(self, count, unit, reason_when_zero=None):
         # type: (int, str, Optional[str]) -> None

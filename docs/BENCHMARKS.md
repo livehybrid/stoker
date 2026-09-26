@@ -28,10 +28,11 @@ What the numbers say:
   (a third of it), and above 5,000 it never finished templating its first
   interval's batch inside the run, because it renders a whole interval before
   flushing anything.
-- **firebox delivers the share exactly** up to about 4,700 eps per worker,
-  then flattens. That flat line is the **agent**: with a Rust engine feeding
-  it, the Python reader thread (JSON-decode each envelope, token bucket,
-  re-serialise for HEC, gzip) saturates one core at 4.5 to 4.7k events/s.
+- **firebox delivers the share exactly** up to about 4,700 eps per worker
+  with the classic envelope, then flattens. That flat line is the **agent**:
+  with a Rust engine feeding it, the Python reader thread (JSON-decode each
+  envelope, token bucket, re-serialise for HEC, gzip) saturates one core at
+  4.5 to 4.7k events/s. The HEC-line envelope below lifts that to ~15k.
 - The raw engine, without the agent, templates this pack at ~105k events/s per
   thread (linear to the cores the box can spare): the engine is no longer a
   factor in per-worker throughput. See the firebox repo's `BENCHMARKS.md`.
@@ -39,13 +40,33 @@ What the numbers say:
   eight reader threads starve the HEC senders for the GIL. firebox therefore
   shares one connection by default (`FIREBOX_SOCKET_CONNECTIONS=single`).
 
+## With the HEC-line envelope (the default with firebox)
+
+The agent's per-event decode/fill/re-encode was that wall, so firebox now
+emits final HEC objects (`STOKER_ENVELOPE=hec`, metadata policy in
+`STOKER_ENVELOPE_META`, both set by the agent) and the reader only paces and
+forwards bytes. Same harness, same pack:
+
+| engine | target eps | delivered eps | achieved | agent+engine CPU (cores) |
+|---|---|---|---|---|
+| firebox (hec envelope) | 5,000 | 4,998 | 100% | 0.83 |
+| firebox (hec envelope) | 10,000 | 10,000 | 100% | 1.07 |
+| firebox (hec envelope) | 20,000 | 11,895 | 59% | 1.02 |
+| firebox (hec envelope) | 50,000 | 15,343 | 31% | 1.28 |
+| firebox (hec envelope) | 100,000 | 11,060 | 11% | 1.01 |
+
+Exact delivery to 10,000 eps per worker, ceiling ~15,000: three times the
+classic envelope and over twenty times the Python engine. `STOKER_FAST_ENVELOPE=0`
+restores the classic envelope (the Python engine always uses it). The next
+wall is the agent's per-line token bucket and queue hand-off (~65 us per event
+on one core) plus its HEC senders; the fix for that is batching inside the
+agent.
+
 Consequences for operating Stoker:
 
 - The 5,000 eps default per-worker ceiling (`STOKER_MAX_EPS_PER_WORKER`) is
-  now an honest agent limit on a box like this; fleets scale horizontally as
-  before, but every worker actually hits its share.
-- Raising per-worker throughput further means moving the agent's per-event
-  work out of Python (have firebox emit final HEC lines so the reader only
-  paces and forwards bytes), tracked as the next step.
+  now comfortably inside what one worker delivers; on a box like this it can
+  be raised to ~10,000 with exact delivery. Fleets scale horizontally as
+  before, and every worker actually hits its share.
 - `STOKER_EVENTGEN_IMPL=python` restores the old engine per worker if a pack
   ever needs something firebox does not implement (see the firebox `COMPAT.md`).

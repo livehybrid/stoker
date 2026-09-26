@@ -328,3 +328,16 @@ def test_repr_and_headers_never_expose_token():
         client = make_client(sink.url, senders=1)
         assert TOKEN not in repr(client)
         client.flush_and_stop(5.0)
+
+
+def test_pre_serialised_bytes_pass_through_untouched():
+    """The HEC-line envelope hands the client final objects as bytes; they
+    join the batch verbatim next to dict envelopes."""
+    from stoker_agent.hec_client import HecClient
+    client = HecClient("http://127.0.0.1:9", "tok", senders=0)
+    client._queue.put(b'{"time":1,"event":"raw"}')
+    client._queue.put({"event": "dict", "index": "i"})
+    client._stopping.set()
+    count, body = client._collect_batch()
+    assert count == 2
+    assert body == b'{"time":1,"event":"raw"}\n{"index":"i","event":"dict"}'
