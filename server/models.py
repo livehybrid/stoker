@@ -219,6 +219,14 @@ class Spec(Base):
     fleet: Mapped[str] = mapped_column(String(64), nullable=False, default="swarm-local")
     strict_release: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     driver_opts_json: Mapped[Optional[Any]] = mapped_column(JSON_VARIANT, nullable=True)
+    # Which eventgen implementation the workers run: "firebox" | "python";
+    # null = auto (firebox when the image carries its binary, else the vendored
+    # Python eventgen). Projected as STOKER_EVENTGEN_IMPL only when set, so an
+    # untouched spec's worker env stays byte-for-byte what it was.
+    eventgen_impl: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    # False keeps the classic socket envelope even with firebox
+    # (STOKER_FAST_ENVELOPE=0); null/True = the HEC-line envelope default.
+    fast_envelope: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     created_at: Mapped[datetime.datetime] = _ts_column(nullable=False, default=utcnow)
 
     pack: Mapped[Pack] = relationship(back_populates="specs")

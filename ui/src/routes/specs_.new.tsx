@@ -67,6 +67,10 @@ interface FormState {
   duration_s: string;
   fleet: string;
   strict_release: boolean;
+  // Eventgen implementation knob (eventgen engine only): "auto" | "firebox" |
+  // "python", and whether firebox uses the HEC-line socket envelope.
+  eventgen_impl: string;
+  fast_envelope: boolean;
   overrides: Record<OverrideKey, string>;
 }
 
@@ -84,6 +88,8 @@ function emptyForm(): FormState {
     duration_s: "",
     fleet: "swarm-local",
     strict_release: false,
+    eventgen_impl: "auto",
+    fast_envelope: true,
     overrides: { index: "", sourcetype: "", source: "", host: "" },
   };
 }
@@ -103,6 +109,8 @@ function formFromSpec(spec: SpecOut): FormState {
     duration_s: spec.duration_s != null ? String(spec.duration_s) : "",
     fleet: spec.fleet ?? "swarm-local",
     strict_release: !!spec.strict_release,
+    eventgen_impl: spec.eventgen_impl ?? "auto",
+    fast_envelope: spec.fast_envelope !== false,
     overrides: {
       index: str(ov.index),
       sourcetype: str(ov.sourcetype),
@@ -399,6 +407,8 @@ function JobWizard() {
       duration_s: numOrNull(form.duration_s),
       fleet: form.fleet,
       strict_release: form.strict_release,
+      eventgen_impl: form.eventgen_impl === "auto" ? null : form.eventgen_impl,
+      fast_envelope: form.fast_envelope ? null : false,
       overrides: collectOverrides(form.overrides),
     };
   }
@@ -418,6 +428,9 @@ function JobWizard() {
       duration_s: numOrNull(form.duration_s),
       fleet: form.fleet,
       strict_release: form.strict_release,
+      // "auto" clears back to the worker default server-side.
+      eventgen_impl: form.eventgen_impl === "auto" ? null : form.eventgen_impl,
+      fast_envelope: form.fast_envelope ? null : false,
       overrides: collectOverrides(form.overrides),
     };
   }
@@ -700,6 +713,32 @@ function JobWizard() {
               source="preview"
             />
           </Panel>
+
+          {form.engine === "eventgen" && (
+            <Grid $min="260px">
+              <Field label="Engine implementation">
+                <Select
+                  value={form.eventgen_impl}
+                  onChange={(_e, { value }) => patch({ eventgen_impl: String(value) })}
+                >
+                  <Select.Option value="auto" label="auto (firebox when the image has it)" />
+                  <Select.Option value="firebox" label="firebox (fail if missing)" />
+                  <Select.Option value="python" label="python (vendored eventgen)" />
+                </Select>
+              </Field>
+              <Field label="Socket envelope (firebox)">
+                <Switch
+                  appearance="checkbox"
+                  selected={form.fast_envelope}
+                  disabled={form.eventgen_impl === "python"}
+                  onClick={() => patch({ fast_envelope: !form.fast_envelope })}
+                >
+                  HEC-line envelope (firebox emits final HEC objects, about three
+                  times the per-worker ceiling of the classic envelope)
+                </Switch>
+              </Field>
+            </Grid>
+          )}
 
           <Inline>
             <Switch

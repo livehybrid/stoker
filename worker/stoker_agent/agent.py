@@ -166,6 +166,10 @@ class Agent(object):
         # itself to the control plane instead of sitting at 0 EPS unexplained.
         self._assigned_work = None    # type: Optional[int]
         self._assigned_reason = None  # type: Optional[str]
+        # Which eventgen implementation this worker runs (firebox | python)
+        # and which socket envelope it speaks; reported on heartbeats.
+        self._engine_impl = None      # type: Optional[str]
+        self._envelope = None         # type: Optional[str]
         # measured-eps window
         self._last_events = 0
         self._last_events_t = None  # type: Optional[float]
@@ -420,14 +424,19 @@ class Agent(object):
         ``(envelope, extra_env_for_the_engine_or_None)``; the classic
         ``"stoker"`` envelope for every other engine, for the Python eventgen,
         or when STOKER_FAST_ENVELOPE=0."""
-        if other_engine or not cfg.fast_envelope or os.environ.get("STOKER_ENGINE_CMD"):
+        self._envelope = "stoker"
+        if other_engine:
             return "stoker", None
+        if os.environ.get("STOKER_ENGINE_CMD"):
+            return "stoker", None  # a custom launcher: implementation unknown
         try:
             impl, _binary = eventgen_impl()
         except EngineError:
             return "stoker", None
-        if impl != "firebox":
+        self._engine_impl = impl
+        if impl != "firebox" or not cfg.fast_envelope:
             return "stoker", None
+        self._envelope = "hec"
         policy = {"overrides": dict(sl.overrides), "defaults": sl.hec_defaults()}
         log.info("firebox will emit HEC-line envelopes; the agent forwards bytes")
         return "hec", {"STOKER_ENVELOPE": "hec",
@@ -760,6 +769,11 @@ class Agent(object):
             payload["assigned_work"] = self._assigned_work
             if self._assigned_reason:
                 payload["assigned_reason"] = self._assigned_reason
+        # Engine implementation report (optional, additive, same rules): which
+        # eventgen runs and which socket envelope it speaks.
+        if self._engine_impl is not None:
+            payload["engine_impl"] = self._engine_impl
+            payload["envelope"] = self._envelope or "stoker"
         return payload
 
     # -- drain ---------------------------------------------------------------

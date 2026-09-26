@@ -429,3 +429,62 @@ def test_firebox_gets_the_hec_envelope_policy(tmp_path, monkeypatch):
     assert agent.run() == 0
     assert "STOKER_ENVELOPE" not in captured
     assert all(isinstance(e, dict) for e in sinks[1].events)
+
+
+def test_engine_report_rides_the_heartbeat(tmp_path, monkeypatch):
+    """The agent reports the eventgen implementation it launched and the
+    socket envelope on every heartbeat (additive fields); nothing is reported
+    under a STOKER_ENGINE_CMD override, whose launcher may be anything."""
+    import stat
+    fake = tmp_path / "firebox"
+    fake.write_text("#!/bin/sh\nexit 0\n")
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("STOKER_FIREBOX_BIN", str(fake))
+    monkeypatch.delenv("STOKER_ENGINE_CMD", raising=False)
+    env = {
+        "STOKER_STANDALONE": "1",
+        "STOKER_BUNDLE": make_pack(tmp_path),
+        "STOKER_HEC_URL": "http://fake-hec:8088",
+        "STOKER_HEC_TOKEN": "tok",
+        "STOKER_INDEX": "loadtest",
+        "STOKER_RATE_MODE": "eps",
+        "STOKER_RATE_VALUE": "100",
+        "STOKER_OUTPUT_SOCKET": str(tmp_path / "out.sock"),
+        "STOKER_METRICS_PORT": "0",
+    }
+    cfg = load_config(env)
+    sl = SpecSlice.from_standalone(cfg)
+
+    agent = Agent(cfg)
+    assert agent._eventgen_envelope(cfg, sl, False)[0] == "hec"
+    payload = agent._heartbeat_payload(sl)
+    assert payload["engine_impl"] == "firebox"
+    assert payload["envelope"] == "hec"
+
+    env["STOKER_FAST_ENVELOPE"] = "0"
+    cfg = load_config(env)
+    agent = Agent(cfg)
+    assert agent._eventgen_envelope(cfg, sl, False)[0] == "stoker"
+    payload = agent._heartbeat_payload(sl)
+    assert payload["engine_impl"] == "firebox"
+    assert payload["envelope"] == "stoker"
+
+    env.pop("STOKER_FAST_ENVELOPE")
+    env["STOKER_EVENTGEN_IMPL"] = "python"
+    monkeypatch.setenv("STOKER_EVENTGEN_IMPL", "python")
+    agent = Agent(load_config(env))
+    assert agent._eventgen_envelope(load_config(env), sl, False)[0] == "stoker"
+    payload = agent._heartbeat_payload(sl)
+    assert payload["engine_impl"] == "python"
+    assert payload["envelope"] == "stoker"
+
+    monkeypatch.delenv("STOKER_EVENTGEN_IMPL")
+    monkeypatch.setenv("STOKER_ENGINE_CMD", "/bin/echo {conf}")
+    agent = Agent(load_config(env))
+    assert agent._eventgen_envelope(load_config(env), sl, False)[0] == "stoker"
+    assert "engine_impl" not in agent._heartbeat_payload(sl)
+
+    # other engines never report an eventgen implementation
+    agent = Agent(load_config(env))
+    assert agent._eventgen_envelope(load_config(env), sl, True)[0] == "stoker"
+    assert "engine_impl" not in agent._heartbeat_payload(sl)

@@ -1620,6 +1620,7 @@ def record_heartbeat(db, run, slot, lease_id, payload, settings=None):
     # old worker never sends it and nothing changes) so the roster can explain
     # a slot that legitimately holds no work instead of showing a bare 0 EPS.
     store_assigned_work(lease, payload)
+    store_engine_report(lease, payload)
 
     # Persist the counters (defensively parsed; ignores the popped _bearer).
     db.add(build_metric_sample(run, slot, payload))
@@ -2102,6 +2103,41 @@ ASSIGNED_REASON_KEY = "_assigned_reason"
 # Reasons come off the wire from a worker; bound their stored length so a
 # hostile/buggy agent cannot bloat the JSON column via its heartbeats.
 _ASSIGNED_REASON_MAX = 300
+# The worker's engine-implementation report (``engine_impl``: firebox |
+# python, ``envelope``: hec | stoker), stored with the same private-key
+# convention so the roster can show which engine each slot actually runs.
+ENGINE_IMPL_KEY = "_engine_impl"
+ENVELOPE_KEY = "_envelope"
+_ENGINE_IMPLS = ("firebox", "python")
+_ENVELOPES = ("hec", "stoker")
+
+
+def store_engine_report(lease, payload):
+    # type: (WorkerLease, Mapping[str, Any]) -> None
+    """Persist a heartbeat's optional engine-implementation report on the
+    lease (``_engine_impl`` / ``_envelope`` in ``share_json``).
+
+    Defensive like :func:`store_assigned_work`: an absent or unknown
+    ``engine_impl`` leaves the lease untouched (an old worker changes
+    nothing), an unknown ``envelope`` is dropped, and the dict is re-assigned
+    only when a value actually changed so steady-state heartbeats do not churn
+    the row.
+    """
+    impl = payload.get("engine_impl")
+    if not isinstance(impl, str) or impl not in _ENGINE_IMPLS:
+        return
+    envelope = payload.get("envelope")
+    if not isinstance(envelope, str) or envelope not in _ENVELOPES:
+        envelope = None
+    share = dict(lease.share_json or {})
+    if share.get(ENGINE_IMPL_KEY) == impl and share.get(ENVELOPE_KEY) == envelope:
+        return
+    share[ENGINE_IMPL_KEY] = impl
+    if envelope is None:
+        share.pop(ENVELOPE_KEY, None)
+    else:
+        share[ENVELOPE_KEY] = envelope
+    lease.share_json = share
 
 
 def store_assigned_work(lease, payload):
@@ -2149,7 +2185,7 @@ def mark_retarget(lease, share):
     """
     new_share = dict(share or {})
     old_share = lease.share_json or {}
-    for key in (ASSIGNED_WORK_KEY, ASSIGNED_REASON_KEY):
+    for key in (ASSIGNED_WORK_KEY, ASSIGNED_REASON_KEY, ENGINE_IMPL_KEY, ENVELOPE_KEY):
         if key in old_share and key not in new_share:
             new_share[key] = old_share[key]
     new_share[RETARGET_MARKER] = True
@@ -2395,6 +2431,8 @@ def build_spec_snapshot(spec, target, overrides=None, rate_mode=None,
         "sourcetype": merged_overrides.get("sourcetype"),
         "telemetry_interval_s": (spec.driver_opts_json or {}).get("telemetry_interval_s", 5),
         "driver_opts": spec.driver_opts_json or {},
+        "eventgen_impl": getattr(spec, "eventgen_impl", None) or "auto",
+        "fast_envelope": getattr(spec, "fast_envelope", None) is not False,
         "target": {
             "id": target.id,
             "name": target.name,
@@ -2458,6 +2496,16 @@ def build_run_snapshot(run, spec, target, hec_token, settings=None, workers=None
     engine = (spec.engine or "eventgen").strip()
     if engine and engine != "eventgen":
         env["STOKER_ENGINE"] = engine
+    else:
+        # The spec's eventgen implementation knob. Both default to the worker's
+        # own defaults (auto -> firebox when present; HEC-line envelope on), so
+        # only a pinned value is projected and an untouched spec's env is
+        # byte-for-byte unchanged.
+        impl = (getattr(spec, "eventgen_impl", None) or "").strip().lower()
+        if impl and impl != "auto":
+            env["STOKER_EVENTGEN_IMPL"] = impl
+        if getattr(spec, "fast_envelope", None) is False:
+            env["STOKER_FAST_ENVELOPE"] = "0"
     if hec_token:
         env["STOKER_HEC_TOKEN"] = hec_token
     # Project the target's TLS-verify choice. The worker defaults to verify ON
@@ -2882,6 +2930,7 @@ __all__ = [
     "is_lease_holder", "build_bundle_ref", "build_slice", "iso_from_dt",
     "public_share", "mark_retarget", "clear_retarget",
     "store_assigned_work", "ASSIGNED_WORK_KEY", "ASSIGNED_REASON_KEY",
+    "store_engine_report", "ENGINE_IMPL_KEY", "ENVELOPE_KEY",
     "build_spec_snapshot",
     "build_run_snapshot", "counters_from_payload", "build_metric_sample",
     "fold_totals", "maybe_refresh_jwt", "cmd_continue", "cmd_superseded",

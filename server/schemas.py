@@ -330,6 +330,22 @@ class FleetOut(BaseModel):
 # Specs (Appendix A JobSpec)
 # --------------------------------------------------------------------------- #
 
+_EVENTGEN_IMPLS = ("auto", "firebox", "python")
+
+
+def _normalise_impl(v):
+    # type: (Optional[str]) -> Optional[str]
+    """``auto``/blank -> None (the worker's default), else a known implementation."""
+    if v is None:
+        return None
+    v = v.strip().lower()
+    if v in ("", "auto"):
+        return None
+    if v not in _EVENTGEN_IMPLS:
+        raise ValueError("eventgen_impl must be one of %s" % ", ".join(_EVENTGEN_IMPLS))
+    return v
+
+
 class SpecCreate(BaseModel):
     name: str
     pack_id: int
@@ -349,6 +365,19 @@ class SpecCreate(BaseModel):
     fleet: str = "swarm-local"
     strict_release: bool = False
     driver_opts: Optional[Dict[str, Any]] = None
+    # Which eventgen implementation the workers run: auto (firebox when the
+    # image carries it, else the vendored Python eventgen), firebox (required)
+    # or python (forced). Stored as None for auto; ignored by other engines.
+    eventgen_impl: Optional[str] = None
+    # False keeps the classic socket envelope even with firebox
+    # (STOKER_FAST_ENVELOPE=0); None/True = the HEC-line envelope default.
+    fast_envelope: Optional[bool] = None
+
+    @field_validator("eventgen_impl")
+    @classmethod
+    def _validate_eventgen_impl(cls, v):
+        # type: (Optional[str]) -> Optional[str]
+        return _normalise_impl(v)
 
     @field_validator("engine")
     @classmethod
@@ -381,6 +410,15 @@ class SpecUpdate(BaseModel):
     fleet: Optional[str] = None
     strict_release: Optional[bool] = None
     driver_opts: Optional[Dict[str, Any]] = None
+    # Send "auto" (or null) to clear back to the worker default.
+    eventgen_impl: Optional[str] = None
+    fast_envelope: Optional[bool] = None
+
+    @field_validator("eventgen_impl")
+    @classmethod
+    def _validate_eventgen_impl(cls, v):
+        # type: (Optional[str]) -> Optional[str]
+        return _normalise_impl(v)
 
     @field_validator("engine")
     @classmethod
@@ -414,6 +452,8 @@ class SpecOut(BaseModel):
     fleet: str
     strict_release: bool
     driver_opts_json: Optional[Dict[str, Any]] = None
+    eventgen_impl: Optional[str] = None
+    fast_envelope: Optional[bool] = None
     created_at: datetime.datetime
 
 

@@ -24,6 +24,9 @@ interface Snapshot {
   telemetry_interval_s?: number;
   overrides?: Record<string, unknown> | null;
   driver_opts?: Record<string, unknown> | null;
+  // Eventgen implementation knob frozen with the spec (eventgen engine only).
+  eventgen_impl?: string | null;
+  fast_envelope?: boolean | null;
   target?: {
     id?: number;
     name?: string;
@@ -77,6 +80,15 @@ export function SpecSnapshotPanel({ snapshot }: { snapshot: unknown }) {
           label="Strict release"
           value={snap.strict_release ? "yes" : "no"}
         />
+        {snap.engine === "eventgen" && (
+          <Row label="Eventgen impl" value={snap.eventgen_impl ?? "auto"} />
+        )}
+        {snap.engine === "eventgen" && (
+          <Row
+            label="Socket envelope"
+            value={snap.fast_envelope === false ? "classic" : "HEC-line"}
+          />
+        )}
         <Row label="Index" value={snap.index} />
         <Row label="Sourcetype" value={snap.sourcetype} />
         <Row

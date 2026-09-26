@@ -269,6 +269,11 @@ export interface SpecCreate {
   fleet?: string; // default "swarm-local"
   strict_release?: boolean; // default false
   driver_opts?: Record<string, unknown> | null;
+  // Eventgen implementation: "firebox" | "python"; null/omitted = auto
+  // (firebox when the worker image carries it). Ignored by other engines.
+  eventgen_impl?: string | null;
+  // false keeps the classic socket envelope with firebox; null = HEC-line.
+  fast_envelope?: boolean | null;
 }
 
 // Partial update; unset fields are left unchanged (send only what changes).
@@ -289,6 +294,8 @@ export type SpecUpdate = Partial<{
   fleet: string;
   strict_release: boolean;
   driver_opts: Record<string, unknown> | null;
+  eventgen_impl: string | null;
+  fast_envelope: boolean | null;
 }>;
 
 export interface SpecOut {
@@ -308,6 +315,8 @@ export interface SpecOut {
   fleet: string;
   strict_release: boolean;
   driver_opts_json?: Record<string, unknown> | null;
+  eventgen_impl?: string | null;
+  fast_envelope?: boolean | null;
   created_at: string;
 }
 
@@ -368,6 +377,8 @@ export interface LeaseOut {
   // holds — metrics series / eventgen stanzas / a replay dataset) and
   // `_assigned_reason` (a short explanation when it holds none). Read them via
   // leaseAssignedWork()/leaseAssignedReason() in features/runs/LeaseTable.
+  // An eventgen worker also reports `_engine_impl` (firebox | python) and
+  // `_envelope` (hec | stoker); see leaseEngineImpl() there.
   share_json?: Record<string, unknown> | null;
   holder?: string | null;
   node?: string | null;

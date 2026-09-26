@@ -129,8 +129,8 @@ def test_delta_0003_adds_specs_extra_pack_ids(tmp_path):
         command.stamp(cfg, "0002_bigint_counters_and_indexes", purge=True)
     assert "extra_pack_ids_json" not in _spec_columns()
 
-    run_migrations()  # managed at 0002 -> upgrade head applies 0003
-    assert _head_rev() == "0003_spec_extra_pack_ids"
+    run_migrations()  # managed at 0002 -> upgrade head applies 0003 (and on)
+    assert _head_rev() == "0004_spec_eventgen_impl"
     assert "extra_pack_ids_json" in _spec_columns()
 
 
@@ -147,3 +147,38 @@ def test_baseline_upgrade_builds_schema_via_cli(tmp_path):
     cfg.set_main_option("sqlalchemy.url", url)
     command.upgrade(cfg, "head")  # env.py builds its own engine + runs the baseline
     assert {"runs", "api_tokens", "alembic_version"} <= _tables()
+
+
+def test_delta_0004_adds_specs_eventgen_impl(tmp_path):
+    """A live DB stamped at 0003 gains ``specs.eventgen_impl`` and
+    ``specs.fast_envelope`` from the 0004 delta (the real upgrade path).
+    Simulated by migrating to head, dropping both columns and re-stamping at
+    0003."""
+    _use(tmp_path, "delta0004.db")
+    from alembic import command
+    from alembic.config import Config
+
+    from server.migrate import run_migrations
+
+    run_migrations()
+
+    def _spec_columns():
+        # type: () -> set
+        return {c["name"] for c in inspect(db_mod.get_engine()).get_columns("specs")}
+
+    assert {"eventgen_impl", "fast_envelope"} <= _spec_columns()
+
+    with db_mod.get_engine().begin() as conn:
+        conn.execute(text("ALTER TABLE specs DROP COLUMN eventgen_impl"))
+        conn.execute(text("ALTER TABLE specs DROP COLUMN fast_envelope"))
+        cfg = Config()
+        cfg.set_main_option(
+            "script_location",
+            os.path.join(os.path.dirname(db_mod.__file__), "migrations"))
+        cfg.attributes["connection"] = conn
+        command.stamp(cfg, "0003_spec_extra_pack_ids", purge=True)
+    assert not ({"eventgen_impl", "fast_envelope"} & _spec_columns())
+
+    run_migrations()  # managed at 0003 -> upgrade head applies 0004
+    assert _head_rev() == "0004_spec_eventgen_impl"
+    assert {"eventgen_impl", "fast_envelope"} <= _spec_columns()

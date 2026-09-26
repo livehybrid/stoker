@@ -56,6 +56,11 @@ class AgentHeartbeatRequest(HeartbeatRequest):
 
     assigned_work: Optional[int] = None
     assigned_reason: Optional[str] = None
+    # Which eventgen implementation the worker actually runs (firebox |
+    # python) and which socket envelope it speaks (hec | stoker); optional and
+    # additive in both directions like the assigned-work pair.
+    engine_impl: Optional[str] = None
+    envelope: Optional[str] = None
 
 
 # --------------------------------------------------------------------------- #

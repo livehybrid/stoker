@@ -40,6 +40,17 @@ export function leaseAssignedReason(lease: LeaseOut): string | null {
   return typeof v === "string" && v ? v : null;
 }
 
+/**
+ * The eventgen implementation the worker reported it runs (firebox | python)
+ * with the socket envelope it speaks, or null when not (yet) reported.
+ */
+export function leaseEngineImpl(lease: LeaseOut): { impl: string; envelope: string | null } | null {
+  const impl = lease.share_json?.["_engine_impl"];
+  if (typeof impl !== "string" || !impl) return null;
+  const env = lease.share_json?.["_envelope"];
+  return { impl, envelope: typeof env === "string" && env ? env : null };
+}
+
 export function LeaseTable({
   leases,
   latest,
@@ -57,6 +68,19 @@ export function LeaseTable({
       ),
     },
     { key: "node", header: "Node", cell: (l) => l.node ?? "—" },
+    {
+      key: "engine",
+      header: "Engine",
+      cell: (l) => {
+        const rep = leaseEngineImpl(l);
+        if (!rep) return "—";
+        return (
+          <Mono title={rep.envelope ? `${rep.envelope} envelope` : undefined}>
+            {rep.impl}
+          </Mono>
+        );
+      },
+    },
     {
       key: "assigned",
       header: "Assigned work",

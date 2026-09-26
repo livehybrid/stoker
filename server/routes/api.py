@@ -795,6 +795,8 @@ def create_spec(body: SpecCreate, db: Session = Depends(get_db)):
         fleet=body.fleet,
         strict_release=body.strict_release,
         driver_opts_json=body.driver_opts or None,
+        eventgen_impl=body.eventgen_impl,
+        fast_envelope=body.fast_envelope,
     )
     db.add(spec)
     db.commit()
@@ -852,6 +854,8 @@ def export_spec(spec_id: int, db: Session = Depends(get_db)):
         "extra_pack_ids": spec.extra_pack_ids_json or None,
         "overrides": spec.overrides_json or None,
         "driver_opts": spec.driver_opts_json or None,
+        "eventgen_impl": spec.eventgen_impl,
+        "fast_envelope": spec.fast_envelope,
     }
     body = {k: v for k, v in body.items() if v is not None}
 
