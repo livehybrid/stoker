@@ -1,0 +1,3 @@
+[submodule "worker/engines/firebox"]
+	path = worker/engines/firebox
+	url = git@github.com:livehybrid/firebox.git

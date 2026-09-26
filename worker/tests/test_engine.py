@@ -139,3 +139,83 @@ def test_stop_reaps_the_whole_engine_group(tmp_path, monkeypatch):
     # The load-bearing assertion: the SIGTERM-ignoring child (an orphaned
     # eventgen worker) is gone because stop() killed the whole group.
     assert not _alive(child_pid), "orphaned engine child survived stop()"
+
+
+# --------------------------------------------------------------------------- #
+# Engine implementation selection: firebox (Rust) by default when its binary is
+# present, the vendored Python eventgen otherwise or when forced.
+
+import stat as _stat
+
+from stoker_agent.engine import EngineError, build_command, eventgen_impl
+
+
+def _fake_firebox(tmp_path):
+    binary = tmp_path / "firebox"
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(binary.stat().st_mode | _stat.S_IXUSR)
+    return str(binary)
+
+
+def test_build_command_uses_firebox_when_binary_named(tmp_path):
+    binary = _fake_firebox(tmp_path)
+    env = {"STOKER_FIREBOX_BIN": binary}
+    assert build_command("/w/eventgen.conf", env) == [binary, "-v", "generate", "/w/eventgen.conf"]
+    assert eventgen_impl(env) == ("firebox", binary)
+
+
+def test_build_command_finds_firebox_on_path(tmp_path):
+    binary = _fake_firebox(tmp_path)
+    env = {"PATH": str(tmp_path)}
+    assert build_command("/w/eventgen.conf", env)[0] == binary
+
+
+def test_build_command_auto_falls_back_to_python(tmp_path):
+    env = {"PATH": str(tmp_path)}  # empty dir: no firebox anywhere
+    cmd = build_command("/w/eventgen.conf", env)
+    assert cmd[1:] == ["-m", "splunk_eventgen", "generate", "/w/eventgen.conf"]
+    assert eventgen_impl(env) == ("python", None)
+
+
+def test_build_command_python_forced_ignores_binary(tmp_path):
+    binary = _fake_firebox(tmp_path)
+    env = {"STOKER_FIREBOX_BIN": binary, "STOKER_EVENTGEN_IMPL": "python"}
+    assert build_command("/w/eventgen.conf", env)[1:3] == ["-m", "splunk_eventgen"]
+
+
+def test_build_command_firebox_forced_without_binary_fails(tmp_path):
+    env = {"PATH": str(tmp_path), "STOKER_EVENTGEN_IMPL": "firebox"}
+    try:
+        build_command("/w/eventgen.conf", env)
+    except EngineError as exc:
+        assert "firebox" in str(exc)
+    else:
+        raise AssertionError("expected EngineError")
+
+
+def test_build_command_rejects_unknown_impl():
+    try:
+        build_command("/w/eventgen.conf", {"STOKER_EVENTGEN_IMPL": "cobol"})
+    except EngineError:
+        pass
+    else:
+        raise AssertionError("expected EngineError")
+
+
+def test_build_command_non_executable_explicit_binary_is_ignored(tmp_path):
+    binary = tmp_path / "firebox"
+    binary.write_text("not executable")
+    env = {"STOKER_FIREBOX_BIN": str(binary), "PATH": str(tmp_path)}
+    assert eventgen_impl(env) == ("python", None)
+
+
+def test_build_command_threads_passthrough(tmp_path):
+    binary = _fake_firebox(tmp_path)
+    env = {"STOKER_FIREBOX_BIN": binary, "STOKER_FIREBOX_THREADS": "4"}
+    assert build_command("/w/eventgen.conf", env)[-2:] == ["--threads", "4"]
+
+
+def test_engine_cmd_override_beats_impl_selection(tmp_path):
+    binary = _fake_firebox(tmp_path)
+    env = {"STOKER_FIREBOX_BIN": binary, "STOKER_ENGINE_CMD": "/bin/echo {conf} x"}
+    assert build_command("/w/eventgen.conf", env) == ["/bin/echo", "/w/eventgen.conf", "x"]

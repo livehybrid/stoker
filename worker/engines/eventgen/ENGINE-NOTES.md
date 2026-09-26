@@ -1,5 +1,28 @@
 # Eventgen engine notes for the agent builder
 
+## firebox is the default engine
+
+Since 2026-09-26 the worker runs **firebox** (`worker/engines/firebox`, the
+Rust rewrite) whenever its binary is present; everything below about the
+vendored Python tree still applies when `STOKER_EVENTGEN_IMPL=python` or the
+binary is absent. Same rewritten conf, same socket protocol, same envelope
+(`time` int for sample mode, float for replay; the eventgen global defaults
+`index=main`, `sourcetype=eventgen`, `host=127.0.0.1` still flow through so the
+agent's filler behaves identically). Differences that matter to the agent:
+
+- **Throughput**: multi-threaded, hundreds of thousands of events/s per worker
+  before the agent's Python reader becomes the wall (see docs/BENCHMARKS.md).
+  The `generatorWorkers`/`threading = process` knobs are irrelevant.
+- **Backpressure**: blocking socket writes, as before. Intervals the engine could
+  not schedule in time are *skipped*, never bursted late, and a socket write
+  failure exits the engine (rc 1) instead of leaving a silent dead plugin.
+- **Startup**: ~10 ms instead of ~4 s, so the warm-up window before T0 is short.
+- **Logging**: `-v` (INFO) to stderr; the agent's ring buffer holds the last 50
+  lines (start summary, per-sample lines, the final `done:` totals).
+- **Native backfill works** (`backfill = -1h` generates every past interval),
+  though the agent still uses its earliest-widening rewrite for backfill runs.
+
+
 Everything below was read out of the vendored 7.2.1 source (paths relative to `worker/engines/eventgen/splunk_eventgen/`). It is the behaviour the agent can rely on.
 
 ## Invoking generate

@@ -8,7 +8,9 @@ One container, two processes:
 
 1. **Agent** (`worker/stoker_agent/`, entrypoint `python -m stoker_agent`): owns the control-plane conversation, the pacing token bucket, the HEC client and all counters. Binds a unix socket first, then spawns the engine. Engine-agnostic: HEC delivery, pacing, metadata stamping, drain and control-plane wiring are identical for every engine.
 2. **Engine** subprocess, one of:
-   - **eventgen** (vendored `splunk_eventgen` 7.2.1): `python -m splunk_eventgen generate <rewritten.conf>`. Templates events from samples and streams every event to the agent through the `stoker` output plugin. Knows nothing about HEC, JWTs or the control plane.
+   - **eventgen**: templates events from samples per the pack's `eventgen.conf` and streams every event to the agent over the output socket. Knows nothing about HEC, JWTs or the control plane. Two implementations speak the same conf and protocol, selected by `STOKER_EVENTGEN_IMPL`:
+     - **firebox** (default when its binary is present): the Rust rewrite (private repo `livehybrid/firebox`, git submodule `worker/engines/firebox`, compiled into the image at `/usr/local/bin/firebox`), launched as `firebox -v generate <rewritten.conf>`. Multi-threaded (every core; `STOKER_FIREBOX_THREADS` overrides), tens of times the Python engine's throughput. Behavioural parity with the Python engine is documented in the firebox repo's `COMPAT.md` and enforced by its parity harness, which the CI runs against the vendored tree.
+     - **python** (fallback, `STOKER_EVENTGEN_IMPL=python` to force): the vendored `splunk_eventgen` 7.2.1, `python -m splunk_eventgen generate <rewritten.conf>`, streaming through the `stoker` output plugin.
    - **rawreplay / Piston** (`stoker_rawreplay`): `python -m stoker_rawreplay` (no conf argument; configured entirely from `STOKER_RAWREPLAY_*` env). Replays a recorded dataset byte-for-byte.
    - **metrics** (`stoker_metrics`): `python -m stoker_metrics` (no conf argument; configured from `STOKER_METRICS_*` env). Generates synthetic Splunk **metric** data points (`event: "metric"` + a `fields` object) over a shaped time series. Engine-paced (count_interval), sharding the series matrix by slot. See [metrics engine](#metrics-engine).
 
@@ -100,7 +102,11 @@ Defaults in brackets; each is validated with the stated minimum:
 | `STOKER_ZERO_OUTPUT_S` | `45.0` | zero-output watchdog (eventgen only): a released worker that reads nothing from the engine socket for this long restarts the engine in place (a non-deterministic multiprocessing fork hang can leave `splunk_eventgen generate` alive but silent at 0 eps). `0` disables |
 | `STOKER_ZERO_OUTPUT_MAX_RESTARTS` | `3` | how many in-place engine restarts the watchdog attempts before failing the slot (`exit 5`) |
 | `STOKER_LOG_LEVEL` | `INFO` | root log level (stderr) |
-| `STOKER_ENGINE_CMD` | none | eventgen launcher override; `{conf}` placeholder or the conf is appended |
+| `STOKER_ENGINE_CMD` | none | eventgen launcher override; `{conf}` placeholder or the conf is appended (beats `STOKER_EVENTGEN_IMPL`) |
+| `STOKER_EVENTGEN_IMPL` | `auto` | `auto` (firebox when a binary is found, else python), `firebox` (required; a missing binary fails the run with a config error), `python` (force the vendored eventgen) |
+| `STOKER_FIREBOX_BIN` | none | explicit path to the firebox binary; otherwise `firebox` on `PATH` (`/usr/local/bin/firebox` in the image) |
+| `STOKER_FIREBOX_THREADS` | none | passed as `--threads`; default = every CPU the cgroup allows |
+| `FIREBOX_SOCKET_CONNECTIONS` | `per-thread` | firebox opens one agent-socket connection per generator thread (`single` shares one) |
 | `EVENTGEN_LOG_DIR` | `<workdir>/eventgen-logs` | eventgen's rotating log dir (created if absent); the agent sets it when unset |
 
 ## Spec slice (claim response / standalone synthesis)
@@ -238,7 +244,10 @@ SIGTERM/SIGINT set the drain flag (`request_drain`). The drain (`Agent._shutdown
 
 `log_tail` is the last 50 engine stdout/stderr lines (a daemon reader keeps a ring buffer). Exit codes: `0` clean drain, `2` config error, `3` HEC auth failure in standalone mode, `4` dead-man expiry.
 
-## Engine packaging (vendored eventgen)
+## Engine packaging (firebox + vendored eventgen)
+
+- `worker/engines/firebox/` is a git submodule of the private `livehybrid/firebox` repo. The worker Dockerfile's first stage cross-compiles it (static musl, `--no-default-features --features http`) for the target platform on the build host and copies the binary to `/usr/local/bin/firebox`; when the submodule is not checked out the stage is empty and the image runs the Python engine. CI checks the submodule out with the read-only deploy key in the `FIREBOX_DEPLOY_KEY` secret (`tools/firebox_submodule.sh`); locally, `git submodule update --init worker/engines/firebox`.
+- firebox speaks the socket protocol below natively (`outputMode = stoker`); it writes one connection per generator thread, which the agent's listener accepts concurrently. A failed socket write is fatal to the engine (exit 1), so the agent's engine-exit/watchdog paths recover it exactly as for the Python plugin's sticky-dead connection.
 
 - `worker/engines/eventgen/` holds the vendored `splunk_eventgen` 7.2.1 tree: the API server, `splunk_app/`, controller/Redis paths and their imports deleted; upstream LICENSE and a `VENDOR.md` (exact tag, deletions, patches) kept.
 - Dependency pins patched to installable-on-py3.9 versions in `worker/requirements.txt` (single source; the Dockerfile installs it).

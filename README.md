@@ -51,7 +51,7 @@ The control plane never generates load itself. It owns state in Postgres (the so
 
 ## Features
 
-- **Three worker engines.** `eventgen` (vendored `splunk/eventgen` 7.2.1) templates events from samples. `rawreplay` / **Piston** replays a recorded dataset byte-for-byte, re-stamped to now, either at a chosen rate (dataset loops) or at the recorded cadence. `metrics` generates synthetic Splunk **metric** data points over a shaped time series. `STOKER_ENGINE` selects; default `eventgen`.
+- **Three worker engines.** `eventgen` templates events from samples; its default implementation is **[firebox](https://github.com/livehybrid/firebox)**, a multi-threaded Rust rewrite of `splunk_eventgen generate` compiled into the worker image (private submodule `worker/engines/firebox`), with the vendored `splunk/eventgen` 7.2.1 kept as the `STOKER_EVENTGEN_IMPL=python` fallback (see [docs/BENCHMARKS.md](docs/BENCHMARKS.md)). `rawreplay` / **Piston** replays a recorded dataset byte-for-byte, re-stamped to now, either at a chosen rate (dataset loops) or at the recorded cadence. `metrics` generates synthetic Splunk **metric** data points over a shaped time series. `STOKER_ENGINE` selects; default `eventgen`.
 - **Metric builder.** Author a matrix of Splunk metrics (dimensions × metrics) with day-shaped values (sine, business double-hump, ramp, random-walk, …) in the UI, with a live daily-curve preview; `gauge` / `count` / `counter` kinds and per-cell scaling. Runs on the `metrics` engine, sharding the series matrix across workers. See [docs/PACKS.md](docs/PACKS.md#metric-packs-metricgen).
 - **Exact-rate pacing.** A token bucket paces delivery against the wall clock to within ~+/-1% of the target aggregate rate, sharded across N workers by largest-remainder. Modes: EPS, GB/day, or count/interval. A submit-time guard rejects a per-worker slice above the engine's **configurable ceiling** (default 25 GB/day and 5000 EPS per worker) and suggests the fleet size that would fit; raise or disable it globally (`STOKER_MAX_GB_DAY_PER_WORKER` / `STOKER_MAX_EPS_PER_WORKER`, `0` = no limit, per-engine `_EVENTGEN`-style suffixes) or per fleet (`config_json.max_gb_day_per_worker` / `max_eps_per_worker` — a fleet of beefy nodes on the target's LAN can go much harder). The wizard's live estimate uses the same resolved values the guard enforces.
 - **Backfill.** Any run can prepend the last N hours or days of history: events are stamped at their historical time and delivered fast (up to a 5000-eps ceiling) before the run finishes. Metrics sweep the diurnal shape across the window; eventgen fills it at uniform density; the delivery rate honours the spec's own eps, clamped to the ceiling. Opt in per run in the wizard (with a live event/time/size estimate) or via `backfill_window_s` on the launch API.
@@ -316,7 +316,8 @@ Two Splunk conventions the console now follows deliberately:
   categorical palette.
 
 worker/    agent (control-plane protocol, token-bucket pacing, HEC client)
-           + engines: vendored eventgen 7.2.1 and rawreplay/Piston
+           + engines: firebox (submodule, Rust eventgen), vendored eventgen 7.2.1,
+             rawreplay/Piston, metrics
 server/    FastAPI control plane: routes (agent/operator/auth/users/tokens),
            lifecycle, drivers (swarm/k8s/fake), gitsync, bundles, crypto, models
 ui/        React / Vite / TanStack Router single-page app, built from Splunk's

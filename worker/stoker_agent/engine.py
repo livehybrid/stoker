@@ -1,12 +1,17 @@
 """Eventgen subprocess management.
 
-Builds the engine command (STOKER_ENGINE_CMD override, otherwise the
-contract fallback `python -m splunk_eventgen generate <conf>` with the
-vendored tree on PYTHONPATH), captures the last 50 output lines in a ring
-buffer for the final POST and stops with SIGTERM, 10 s grace, SIGKILL — applied
-to the engine's whole process GROUP (it is a session leader and eventgen forks
-worker processes into it), so a worker can never orphan onto the workdir the
-agent is about to delete.
+Builds the engine command, captures the last 50 output lines in a ring buffer
+for the final POST and stops with SIGTERM, 10 s grace, SIGKILL — applied to the
+engine's whole process GROUP (it is a session leader and eventgen forks worker
+processes into it), so a worker can never orphan onto the workdir the agent is
+about to delete.
+
+Two implementations of the eventgen engine speak the same conf and socket
+protocol: **firebox** (the Rust rewrite, `firebox generate <conf>`, the
+default when its binary is present) and the vendored Python
+`splunk_eventgen` (`python -m splunk_eventgen generate <conf>`).
+STOKER_EVENTGEN_IMPL selects (`auto` | `firebox` | `python`); STOKER_ENGINE_CMD
+still overrides the whole command.
 """
 
 from __future__ import annotations
@@ -15,11 +20,12 @@ import collections
 import logging
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
 import threading
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 log = logging.getLogger("stoker.engine")
 
@@ -63,11 +69,60 @@ class EngineError(Exception):
     pass
 
 
+EVENTGEN_IMPLS = ("auto", "firebox", "python")
+FIREBOX_BIN_NAME = "firebox"
+
+
+def resolve_firebox(env=None):
+    # type: (Optional[Dict[str, str]]) -> Optional[str]
+    """Path to an executable firebox binary, or None.
+
+    STOKER_FIREBOX_BIN names it explicitly (and must be executable); otherwise
+    `firebox` is looked up on the environment's PATH (the worker image installs
+    it at /usr/local/bin/firebox)."""
+    env = env if env is not None else os.environ
+    explicit = (env.get("STOKER_FIREBOX_BIN") or "").strip()
+    if explicit:
+        if os.path.isfile(explicit) and os.access(explicit, os.X_OK):
+            return explicit
+        return None
+    return shutil.which(FIREBOX_BIN_NAME, path=env.get("PATH", os.defpath))
+
+
+def eventgen_impl(env=None):
+    # type: (Optional[Dict[str, str]]) -> Tuple[str, Optional[str]]
+    """Which eventgen implementation this worker runs: ("firebox", <binary>)
+    or ("python", None).
+
+    STOKER_EVENTGEN_IMPL: `auto` (default: firebox when its binary is present,
+    else the vendored Python eventgen), `firebox` (required: a missing binary
+    is an EngineError so the run fails loudly instead of silently running the
+    slow engine), `python` (force the vendored eventgen)."""
+    env = env if env is not None else os.environ
+    want = (env.get("STOKER_EVENTGEN_IMPL") or "auto").strip().lower()
+    if want not in EVENTGEN_IMPLS:
+        raise EngineError("STOKER_EVENTGEN_IMPL must be one of %s, got %r"
+                          % ("/".join(EVENTGEN_IMPLS), want))
+    if want == "python":
+        return "python", None
+    binary = resolve_firebox(env)
+    if binary:
+        return "firebox", binary
+    if want == "firebox":
+        raise EngineError(
+            "STOKER_EVENTGEN_IMPL=firebox but no firebox binary was found "
+            "(set STOKER_FIREBOX_BIN or put `firebox` on PATH)")
+    return "python", None
+
+
 def build_command(conf_path, env=None):
     # type: (str, Optional[Dict[str, str]]) -> List[str]
     """Engine invocation. STOKER_ENGINE_CMD (shell-quoted, `{conf}`
     placeholder or conf appended) lets ENGINE-NOTES supply a different
-    launcher without a code change."""
+    launcher without a code change. Otherwise firebox when available
+    (`-v` so its start/summary lines land in the log tail; threads from
+    STOKER_FIREBOX_THREADS, default all cores), else the vendored Python
+    eventgen."""
     env = env if env is not None else os.environ
     override = env.get("STOKER_ENGINE_CMD")
     if override:
@@ -75,6 +130,13 @@ def build_command(conf_path, env=None):
         if "{conf}" in parts:
             return [conf_path if p == "{conf}" else p for p in parts]
         return parts + [conf_path]
+    impl, binary = eventgen_impl(env)
+    if impl == "firebox":
+        cmd = [binary, "-v", "generate", conf_path]
+        threads = (env.get("STOKER_FIREBOX_THREADS") or "").strip()
+        if threads:
+            cmd += ["--threads", threads]
+        return cmd
     return [sys.executable, "-m", "splunk_eventgen", "generate", conf_path]
 
 

@@ -70,9 +70,47 @@ jobs:
             echo "::warning title=Real-engine smoke skipped::vendored splunk_eventgen failed to import on py3.9; fix the vendored tree before Phase 0 exit"
           fi
 
-      - name: Standalone agent smoke (real engine, 5 s at 50 EPS)
+      - name: Standalone agent smoke (Python eventgen, 5 s at 50 EPS)
         if: matrix.python-version == '3.9' && steps.engine.outputs.ok == '1'
-        run: RATE=50 DURATION_S=5 TOLERANCE_PCT= tools/smoke.sh local
+        run: STOKER_EVENTGEN_IMPL=python RATE=50 DURATION_S=5 TOLERANCE_PCT= tools/smoke.sh local
+
+      # firebox (the default eventgen engine) lives in a private submodule; the
+      # read-only deploy key in FIREBOX_DEPLOY_KEY checks it out. Built once here
+      # on 3.12 and smoked through the same standalone path as the image uses.
+      - name: Check out the firebox submodule
+        if: matrix.python-version == '3.12'
+        env:
+          FIREBOX_DEPLOY_KEY: ${{ secrets.FIREBOX_DEPLOY_KEY }}
+        run: tools/firebox_submodule.sh
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: matrix.python-version == '3.12'
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+        if: matrix.python-version == '3.12'
+        with:
+          workspaces: worker/engines/firebox
+
+      - name: Build firebox
+        if: matrix.python-version == '3.12'
+        working-directory: worker/engines/firebox
+        run: cargo build --release --locked --target x86_64-unknown-linux-musl --no-default-features --features http
+
+      - name: Standalone agent smoke (firebox, 5 s at 500 EPS, within 10 percent)
+        if: matrix.python-version == '3.12'
+        env:
+          STOKER_EVENTGEN_IMPL: firebox
+          STOKER_FIREBOX_BIN: ${{ github.workspace }}/worker/engines/firebox/target/x86_64-unknown-linux-musl/release/firebox
+        run: RATE=500 DURATION_S=5 TOLERANCE_PCT=10 tools/smoke.sh local
+
+      - name: Engine parity (firebox vs the vendored Python eventgen)
+        if: matrix.python-version == '3.12'
+        env:
+          EVENTGEN_ROOT: ${{ github.workspace }}/worker/engines/eventgen
+          FIREBOX_BIN: ${{ github.workspace }}/worker/engines/firebox/target/x86_64-unknown-linux-musl/release/firebox
+        run: python -m pytest worker/engines/firebox/tests/parity -q
 
   server-test:
     runs-on: ubuntu-latest
@@ -224,6 +262,14 @@ jobs:
       digest: ${{ steps.push.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
+
+      # The firebox engine is compiled into the image from its private
+      # submodule (worker/Dockerfile's first stage). Without the checkout the
+      # image still builds, but with the Python eventgen only.
+      - name: Check out the firebox submodule
+        env:
+          FIREBOX_DEPLOY_KEY: ${{ secrets.FIREBOX_DEPLOY_KEY }}
+        run: tools/firebox_submodule.sh
 
       - uses: docker/setup-qemu-action@v3
 
