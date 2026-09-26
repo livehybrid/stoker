@@ -10,7 +10,9 @@ FROM --platform=$BUILDPLATFORM rust:1-bookworm AS firebox
 ARG TARGETPLATFORM
 WORKDIR /src
 COPY worker/engines/firebox/ /src/
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
+# sharing=locked: the amd64 and arm64 stages build in parallel and would
+# otherwise unpack the same crates into the shared registry at once.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target,id=firebox-target-$TARGETPLATFORM \
     set -eu; mkdir -p /out; \
     if [ ! -f /src/Cargo.toml ]; then \
