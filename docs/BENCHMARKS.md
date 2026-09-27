@@ -94,3 +94,34 @@ Consequences for operating Stoker:
   before, and every worker actually hits its share.
 - `STOKER_EVENTGEN_IMPL=python` restores the old engine per worker if a pack
   ever needs something firebox does not implement (see the firebox `COMPAT.md`).
+
+## Live soak (2026-09-27)
+
+`tools/soak_live.py` drives the live control plane (stack 107, image 1cf5384)
+through its operator API: swarm workers, firebox, the batched agent and the
+HEC client, into Splunk 10 on 192.168.0.222 (`index=loadtest`), pack
+`nginx-access` (~348 bytes/event on the wire), 120 s per step. "Indexed" is
+Splunk's count for the step's unique `source`.
+
+| target eps | workers | delivered eps | achieved | indexed | HEC 4xx/5xx/timeouts | sender queue max | worker CPU |
+|---|---|---|---|---|---|---|---|
+| 2,000 | 1 | 2,000 | 100% | 240,002 (all) | 0/0/0 | low | low |
+| 5,000 | 1 | 5,000 | 100% | 599,992 (all) | 0/0/0 | low | low |
+| 10,000 | 1 | 9,988 | 99.9% | 1,198,503 (all) | 0/0/0 | 4,954 | 46% |
+| 20,000 | 2 | 15,469 | 77.3% | 1,856,275 (all) | 0/0/0 | 5,000 (full) | 10-23% |
+
+Every delivered event was indexed and HEC never returned an error. The 20k
+step was bound by the **target**, not the workers: both senders' queues sat
+at their cap while CPU stayed low, i.e. the agents waited on HEC round-trips.
+This Splunk (a single instance sharing an 8-core host running at load ~24)
+absorbs about 15.5k eps (~5.4 MB/s) over HEC.
+
+Conclusions:
+- The eventgen default of **10,000 eps per worker** is validated end to end on
+  the real fleet; the fast-sink measurement (~31k eps/worker) is the agent's own
+  ceiling and needs a faster target to reach.
+- Past ~10k eps against one modest Splunk, add HEC capacity (more indexers /
+  HEC endpoints behind a load balancer), not workers.
+- A full sender queue with zero HEC errors is the signature of a slow target;
+  it is the signal the target-health backpressure in issue #2 should watch
+  (sustained full queue or rising lag), alongside 429/5xx.
