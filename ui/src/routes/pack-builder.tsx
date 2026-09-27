@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import TextArea from "@splunk/react-ui/TextArea";
 import Switch from "@splunk/react-ui/Switch";
 
 import { api, ApiError } from "../lib/api";
 import type {
+  BuilderAnalyseResponse,
+  BuilderBreakMode,
   BuilderConfig,
   BuilderHighlights,
   BuilderReplacement,
@@ -74,11 +76,17 @@ function escapeRegex(text: string): string {
 }
 
 function replacementKey(r: BuilderReplacement): string {
-  return r.kind === "list" ? `list:${r.list}` : r.kind;
+  if (r.kind === "list") return `list:${r.list}`;
+  if (r.kind === "linked") return `linked:${r.table}:${r.column}`;
+  return r.kind;
 }
 
 function defaultReplacement(key: string, examples: string[]): BuilderReplacement {
   if (key.startsWith("list:")) return { kind: "list", list: key.slice(5) };
+  if (key.startsWith("linked:")) {
+    const [, table, column] = key.split(":");
+    return { kind: "linked", table, column };
+  }
   switch (key as BuilderReplacementKind) {
     case "timestamp":
       return { kind: "timestamp", format: "%Y-%m-%dT%H:%M:%S" };
@@ -162,13 +170,25 @@ function ReplacementEditor({
   onChange: (r: BuilderReplacement) => void;
 }) {
   const key = replacementKey(value);
+  const plain = lists.filter((l) => l.kind !== "table");
+  const tables = lists.filter((l) => l.kind === "table");
+  const table = value.kind === "linked" ? tables.find((l) => l.name === value.table) : undefined;
   return (
     <Grid $min="180px">
       <Field label="Replace with">
-        <Select value={key} onChange={(_e, { value: v }) => onChange(defaultReplacement(String(v), examples))}>
-          {lists.map((l) => (
+        <Select
+          value={key}
+          filter
+          onChange={(_e, { value: v }) => onChange(defaultReplacement(String(v), examples))}
+        >
+          {plain.map((l) => (
             <Select.Option key={l.name} value={`list:${l.name}`} label={`Word list: ${l.title}`} />
           ))}
+          {tables.flatMap((t) =>
+            (t.columns ?? []).map((c) => (
+              <Select.Option key={`${t.name}:${c}`} value={`linked:${t.name}:${c}`} label={`Linked: ${t.title} → ${c}`} />
+            )),
+          )}
           {SIMPLE_KINDS.map(([k, label]) => (
             <Select.Option key={k} value={k} label={label} />
           ))}
@@ -185,6 +205,14 @@ function ReplacementEditor({
             {lists.find((l) => l.name === value.list)?.description ?? value.list}
             {" · e.g. "}
             {(lists.find((l) => l.name === value.list)?.sample ?? []).slice(0, 3).join(", ")}
+          </Muted>
+        </Field>
+      )}
+      {value.kind === "linked" && (
+        <Field label="Linked row">
+          <Muted $small>
+            Every field linked to {table?.title ?? value.table} takes the same row within an event, so they agree
+            {table?.sample[0] ? ` (e.g. ${table.sample[0]})` : ""}.
           </Muted>
         </Field>
       )}
@@ -247,6 +275,127 @@ function ReplacementEditor({
   );
 }
 
+/** Operator word lists: saved on the control plane and reusable in any pack. */
+function CustomLists({ lists }: { lists: WordlistInfo[] }) {
+  const toast = useToast();
+  const qc = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [listName, setListName] = useState("");
+  const [title, setTitle] = useState("");
+  const [columns, setColumns] = useState("");
+  const [values, setValues] = useState("");
+  const refresh = () => qc.invalidateQueries({ queryKey: ["pack-builder", "wordlists"] });
+  const saveList = useMutation({
+    mutationFn: () =>
+      api.packBuilder.saveWordlist({
+        name: listName.trim(),
+        title: title.trim(),
+        values: values.split("\n"),
+        columns: columns.trim()
+          ? columns
+              .split(",")
+              .map((c) => c.trim())
+              .filter(Boolean)
+          : null,
+      }),
+    onSuccess: (w) => {
+      toast.success(`Saved ${w.kind === "table" ? "table" : "list"} "${w.title}" (${w.count})`);
+      setListName("");
+      setTitle("");
+      setColumns("");
+      setValues("");
+      refresh();
+    },
+    onError: (err) => toast.error(apiMessage(err)),
+  });
+  const deleteList = useMutation({
+    mutationFn: (n: string) => api.packBuilder.deleteWordlist(n),
+    onSuccess: () => refresh(),
+    onError: (err) => toast.error(apiMessage(err)),
+  });
+  const mine = lists.filter((l) => l.custom);
+  return (
+    <Panel>
+      <Stack $gap="small">
+        <Between>
+          <Muted $small>
+            Your word lists ({mine.length}): saved on the server and offered in every pack. A pack keeps its own copy
+            of the values it uses.
+          </Muted>
+          <Button variant="ghost" onClick={() => setOpen(!open)}>
+            {open ? "Close" : "Manage lists"}
+          </Button>
+        </Between>
+        {open && (
+          <>
+            {mine.map((l) => (
+              <Between key={l.name}>
+                <Muted $small>
+                  <Strong>{l.title}</Strong> <Mono>{l.name}</Mono> · {l.count} {l.kind === "table" ? "rows" : "values"}
+                  {l.columns ? ` · columns ${l.columns.join(", ")}` : ""}
+                </Muted>
+                <Button variant="ghost" onClick={() => deleteList.mutate(l.name)} disabled={deleteList.isPending}>
+                  Delete
+                </Button>
+              </Between>
+            ))}
+            <Grid $min="200px">
+              <Field label="Name" hint="lower-case letters, digits and _">
+                <TextInput value={listName} onChange={(_e, { value }) => setListName(value)} placeholder="store_ids" />
+              </Field>
+              <Field label="Title">
+                <TextInput value={title} onChange={(_e, { value }) => setTitle(value)} placeholder="Store IDs" />
+              </Field>
+              <Field label="Columns" hint="optional: comma separated, makes a table for linked fields">
+                <TextInput value={columns} onChange={(_e, { value }) => setColumns(value)} placeholder="id, city" />
+              </Field>
+            </Grid>
+            <Field
+              label="Values"
+              hint="one per line; for a table, one comma-separated row per line (no quotes); repeat a line to weight it"
+            >
+              <TextArea rowsMin={3} rowsMax={10} value={values} onChange={(_e, { value }) => setValues(String(value))} />
+            </Field>
+            <Inline>
+              <Button
+                variant="secondary"
+                onClick={() => saveList.mutate()}
+                disabled={!listName.trim() || !values.trim() || saveList.isPending}
+              >
+                {saveList.isPending ? "Saving…" : "Save list"}
+              </Button>
+            </Inline>
+          </>
+        )}
+      </Stack>
+    </Panel>
+  );
+}
+
+const BREAK_MODES: Array<[BuilderBreakMode, string]> = [
+  ["auto", "Detect automatically"],
+  ["line", "One event per line"],
+  ["csv", "CSV with a header row"],
+  ["regex", "Multi-line, split by a regex"],
+];
+
+function describeSplit(res: Pick<BuilderAnalyseResponse, "format" | "breaker" | "header">): string {
+  switch (res.format) {
+    case "multiline":
+      return `Multi-line events: each starts where the breaker matches (${res.breaker}).`;
+    case "csv":
+      return `CSV with ${res.header?.length ?? 0} columns (${(res.header ?? []).join(", ")}); the header row is not an event.`;
+    case "splunk_csv":
+      return res.breaker
+        ? `Splunk export: the _raw column, multi-line events split by ${res.breaker}.`
+        : "Splunk export: the _raw column, one event per row.";
+    case "json":
+      return "JSON: one compact event per object.";
+    default:
+      return "One event per line.";
+  }
+}
+
 function PackBuilder() {
   const navigate = useNavigate();
   const toast = useToast();
@@ -267,6 +416,10 @@ function PackBuilder() {
   const [custom, setCustom] = useState("");
   const [customIsRegex, setCustomIsRegex] = useState(false);
   const [analyseError, setAnalyseError] = useState<string | null>(null);
+  const [mode, setMode] = useState<BuilderBreakMode>("auto");
+  const [breakerInput, setBreakerInput] = useState("");
+  const [breaker, setBreaker] = useState<string | null>(null);
+  const [splitNote, setSplitNote] = useState<string | null>(null);
 
   const listsQ = useQuery({ queryKey: ["pack-builder", "wordlists"], queryFn: api.packBuilder.wordlists });
   const lists = listsQ.data ?? [];
@@ -283,6 +436,12 @@ function PackBuilder() {
     const c = packQ.data.config;
     setEvents(c.events);
     setText(c.events.join("\n"));
+    setBreaker(c.breaker ?? null);
+    if (c.breaker) {
+      setMode("regex");
+      setBreakerInput(c.breaker);
+      setSplitNote(`Multi-line events: each starts where the breaker matches (${c.breaker}).`);
+    }
     setTokens(c.tokens.map((t) => ({ ...t, kind: "saved", why: "", examples: [], matches: 0 })));
     setName(c.name);
     setDescription(c.description ?? "");
@@ -295,10 +454,13 @@ function PackBuilder() {
   }, [editing, packQ.data]);
 
   const analyse = useMutation({
-    mutationFn: () => api.packBuilder.analyse(text),
+    mutationFn: () => api.packBuilder.analyse(text, mode, mode === "regex" ? breakerInput : null),
     onSuccess: (res) => {
       setAnalyseError(null);
       setEvents(res.event_list);
+      setBreaker(res.breaker ?? null);
+      setSplitNote(describeSplit(res));
+      if (res.breaker && mode !== "regex") setBreakerInput(res.breaker);
       setTokens(res.suggestions);
       setHighlights(res.highlights);
       if (!name) setName("");
@@ -326,6 +488,7 @@ function PackBuilder() {
         .map((t) => t.trim())
         .filter(Boolean),
       events,
+      breaker,
       tokens: tokens.map(({ id, field, pattern, enabled, replacement }) => ({
         id,
         field,
@@ -340,7 +503,7 @@ function PackBuilder() {
       interval: Math.max(1, Math.floor(num(interval, 1))),
       order,
     }),
-    [name, description, sourcetype, tags, events, tokens, count, interval, order],
+    [name, description, sourcetype, tags, events, breaker, tokens, count, interval, order],
   );
 
   // Debounced live preview whenever the config changes.
@@ -451,7 +614,7 @@ function PackBuilder() {
         <Stack>
           <Field
             label="Events"
-            hint="One event per line (an access log, syslog, key=value or JSON lines), or a JSON array of objects. A few dozen varied lines give the best suggestions."
+            hint="One event per line (an access log, syslog, key=value or JSON lines), a JSON array, a CSV with a header row, or multi-line events such as stack traces or XML. A few dozen varied events give the best suggestions."
           >
             <TextArea
               rowsMin={6}
@@ -460,6 +623,20 @@ function PackBuilder() {
               onChange={(_e, { value }) => setText(String(value))}
             />
           </Field>
+          <Grid $min="220px">
+            <Field label="Event breaking">
+              <Select value={mode} onChange={(_e, { value }) => setMode(value as BuilderBreakMode)}>
+                {BREAK_MODES.map(([m, label]) => (
+                  <Select.Option key={m} value={m} label={label} />
+                ))}
+              </Select>
+            </Field>
+            {mode === "regex" && (
+              <Field label="Breaker" hint="regex matching the start of each event, applied per line (e.g. ^\d{4}-\d{2}-\d{2})">
+                <TextInput value={breakerInput} onChange={(_e, { value }) => setBreakerInput(value)} placeholder="^\d{4}-\d{2}-\d{2}" />
+              </Field>
+            )}
+          </Grid>
           <Between>
             <Inline>
               <input
@@ -475,6 +652,7 @@ function PackBuilder() {
             </Button>
           </Between>
           {analyseError && <Callout $tone="error">{analyseError}</Callout>}
+          {splitNote && !analyseError && events.length > 0 && <Muted $small>{splitNote}</Muted>}
           {editing && events.length > 0 && !analyse.data && (
             <Muted $small>
               Re-analysing replaces the saved fields with fresh suggestions. Edit the fields below to keep them.
@@ -526,6 +704,7 @@ function PackBuilder() {
                           <Strong>{t.field}</Strong>
                         </Switch>
                         {t.why && <Badge tone="slate">{t.why}</Badge>}
+                        {t.replacement.kind === "linked" && <Badge tone="sky">linked</Badge>}
                         {t.kind !== "saved" && (
                           <Muted $small>
                             matches {t.matches} of {events.length}
@@ -578,6 +757,7 @@ function PackBuilder() {
                   </Field>
                 </Grid>
               </Panel>
+              <CustomLists lists={lists} />
             </Stack>
           </Card>
 

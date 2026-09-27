@@ -1,0 +1,200 @@
+web-dev-15,10.10.62.248,Ubuntu 22.04,SIN,web,dev
+log-stg-17,10.10.45.62,Debian 12,NYC,log,stg
+build-prd-11,10.20.252.154,Windows Server 2019,LDS,build,prd
+cache-prd-06,10.10.103.31,Ubuntu 24.04,SIN,cache,prd
+mon-dev-16,10.20.110.66,Amazon Linux 2023,LDS,mon,dev
+db-prd-24,10.10.103.170,Windows Server 2022,SIN,db,prd
+dns-dev-10,10.0.204.46,Ubuntu 22.04,NYC,dns,dev
+mq-prd-08,10.0.140.59,Amazon Linux 2023,MAN,mq,prd
+lb-prd-19,10.10.92.139,Windows Server 2019,SIN,lb,prd
+build-stg-17,10.10.91.101,RHEL 9,LDS,build,stg
+vpn-dev-04,10.0.221.157,Debian 12,NYC,vpn,dev
+lb-prd-05,10.20.27.23,Ubuntu 24.04,NYC,lb,prd
+api-stg-04,10.20.252.60,Amazon Linux 2023,LDS,api,stg
+files-prd-07,10.20.144.232,Ubuntu 24.04,FRA,files,prd
+app-dev-24,10.1.92.108,Ubuntu 22.04,FRA,app,dev
+vpn-stg-20,10.20.163.103,RHEL 9,FRA,vpn,stg
+worker-stg-10,10.0.22.179,Windows Server 2019,MAN,worker,stg
+dns-dev-16,10.20.144.172,Debian 12,NYC,dns,dev
+app-prd-15,10.10.49.51,Amazon Linux 2023,MAN,app,prd
+mon-prd-12,10.1.135.227,Windows Server 2019,LDS,mon,prd
+worker-stg-03,10.20.17.14,Amazon Linux 2023,SYD,worker,stg
+batch-dev-18,10.1.94.163,Amazon Linux 2023,FRA,batch,dev
+vpn-stg-18,10.10.149.233,Windows Server 2022,FRA,vpn,stg
+lb-prd-20,10.2.142.216,RHEL 9,SYD,lb,prd
+db-stg-13,10.2.115.162,Amazon Linux 2023,SIN,db,stg
+search-stg-12,10.20.192.181,RHEL 9,SYD,search,stg
+api-stg-13,10.0.24.161,Ubuntu 22.04,SYD,api,stg
+mail-prd-17,10.20.38.77,RHEL 9,NYC,mail,prd
+cache-stg-11,10.0.155.30,Ubuntu 24.04,MAN,cache,stg
+cache-prd-04,10.1.57.120,Amazon Linux 2023,LDS,cache,prd
+files-stg-06,10.10.81.34,Ubuntu 22.04,NYC,files,stg
+build-prd-07,10.1.78.82,Windows Server 2019,LON,build,prd
+dns-prd-02,10.1.242.179,Amazon Linux 2023,NYC,dns,prd
+search-dev-19,10.2.51.87,Amazon Linux 2023,NYC,search,dev
+mon-prd-04,10.20.18.132,Ubuntu 22.04,MAN,mon,prd
+cache-prd-15,10.2.205.118,Windows Server 2022,SIN,cache,prd
+mq-prd-22,10.0.50.146,Windows Server 2022,MAN,mq,prd
+dns-dev-09,10.1.27.242,Amazon Linux 2023,NYC,dns,dev
+files-dev-18,10.0.28.113,Amazon Linux 2023,LDS,files,dev
+app-prd-24,10.2.125.156,RHEL 9,SYD,app,prd
+db-prd-10,10.20.0.251,Ubuntu 22.04,LDS,db,prd
+cache-dev-09,10.1.206.205,RHEL 9,NYC,cache,dev
+db-stg-06,10.2.242.24,Ubuntu 22.04,LON,db,stg
+auth-prd-18,10.1.189.33,RHEL 9,SIN,auth,prd
+mail-prd-03,10.20.105.86,Windows Server 2022,MAN,mail,prd
+build-prd-19,10.1.9.17,RHEL 9,NYC,build,prd
+build-dev-14,10.1.7.8,Windows Server 2022,SIN,build,dev
+auth-stg-05,10.2.213.91,Windows Server 2022,LON,auth,stg
+auth-stg-16,10.10.167.177,Windows Server 2019,LDS,auth,stg
+proxy-prd-08,10.0.18.225,Debian 12,FRA,proxy,prd
+files-dev-01,10.20.85.150,Ubuntu 22.04,SIN,files,dev
+mq-prd-04,10.10.157.125,Windows Server 2019,MAN,mq,prd
+lb-stg-18,10.10.125.7,Windows Server 2022,SIN,lb,stg
+batch-prd-18,10.20.80.124,RHEL 9,LDS,batch,prd
+lb-prd-22,10.10.68.221,Debian 12,FRA,lb,prd
+lb-stg-11,10.2.230.97,Windows Server 2022,SYD,lb,stg
+mq-prd-14,10.1.111.5,Ubuntu 22.04,LON,mq,prd
+batch-dev-03,10.0.105.23,Windows Server 2022,MAN,batch,dev
+web-dev-17,10.2.17.153,RHEL 9,FRA,web,dev
+worker-prd-02,10.20.56.128,Windows Server 2022,LON,worker,prd
+app-prd-01,10.1.237.194,Debian 12,SYD,app,prd
+api-prd-12,10.10.87.112,Windows Server 2019,SIN,api,prd
+lb-prd-03,10.2.212.123,Windows Server 2022,MAN,lb,prd
+cache-prd-08,10.10.177.65,Amazon Linux 2023,SIN,cache,prd
+auth-prd-06,10.2.54.120,Ubuntu 22.04,LON,auth,prd
+build-prd-08,10.20.232.131,Windows Server 2019,LDS,build,prd
+cache-dev-02,10.0.95.1,Windows Server 2022,FRA,cache,dev
+mq-prd-18,10.0.50.186,Debian 12,SIN,mq,prd
+auth-prd-17,10.10.207.210,Ubuntu 22.04,LON,auth,prd
+mail-dev-03,10.2.99.139,Windows Server 2019,LDS,mail,dev
+build-stg-15,10.0.168.251,Ubuntu 24.04,LON,build,stg
+mq-stg-04,10.10.188.94,Windows Server 2022,FRA,mq,stg
+search-prd-06,10.20.153.167,RHEL 9,SIN,search,prd
+mq-dev-07,10.10.219.233,Ubuntu 22.04,LON,mq,dev
+api-dev-09,10.20.65.161,Windows Server 2022,MAN,api,dev
+proxy-stg-14,10.10.191.28,Ubuntu 24.04,SYD,proxy,stg
+app-prd-05,10.2.65.29,Debian 12,LON,app,prd
+cache-stg-09,10.20.69.172,Debian 12,SIN,cache,stg
+db-dev-13,10.1.132.82,Amazon Linux 2023,FRA,db,dev
+api-dev-08,10.10.4.149,Debian 12,SYD,api,dev
+api-prd-07,10.20.199.22,Debian 12,LDS,api,prd
+web-prd-23,10.10.25.52,Windows Server 2022,NYC,web,prd
+mon-prd-15,10.10.18.145,RHEL 9,MAN,mon,prd
+cache-prd-02,10.20.121.166,RHEL 9,LON,cache,prd
+log-prd-24,10.0.110.180,Ubuntu 24.04,FRA,log,prd
+web-stg-11,10.1.112.178,Amazon Linux 2023,NYC,web,stg
+cache-prd-09,10.20.187.49,Debian 12,SIN,cache,prd
+log-prd-15,10.0.171.72,Windows Server 2022,MAN,log,prd
+log-stg-05,10.2.104.140,RHEL 9,LDS,log,stg
+api-stg-10,10.20.31.33,Debian 12,LDS,api,stg
+build-prd-04,10.1.210.132,Amazon Linux 2023,LDS,build,prd
+proxy-prd-14,10.0.60.144,Debian 12,FRA,proxy,prd
+lb-prd-02,10.1.78.86,RHEL 9,SIN,lb,prd
+auth-dev-23,10.0.249.231,Ubuntu 24.04,LDS,auth,dev
+api-prd-15,10.0.205.215,RHEL 9,LDS,api,prd
+app-stg-12,10.1.51.31,Windows Server 2022,SYD,app,stg
+dns-dev-18,10.10.32.147,RHEL 9,SYD,dns,dev
+worker-prd-22,10.1.208.199,RHEL 9,MAN,worker,prd
+log-dev-13,10.0.234.129,Debian 12,SIN,log,dev
+cache-dev-18,10.20.239.31,Windows Server 2022,MAN,cache,dev
+search-stg-08,10.2.152.172,Windows Server 2019,MAN,search,stg
+log-dev-06,10.10.220.113,Windows Server 2019,NYC,log,dev
+proxy-dev-22,10.0.187.9,Debian 12,MAN,proxy,dev
+auth-dev-04,10.20.153.93,Ubuntu 24.04,LDS,auth,dev
+db-stg-15,10.0.170.39,Windows Server 2019,SYD,db,stg
+db-stg-11,10.0.187.219,Windows Server 2019,MAN,db,stg
+search-stg-11,10.20.145.156,Windows Server 2019,SYD,search,stg
+lb-prd-12,10.20.38.21,Amazon Linux 2023,LDS,lb,prd
+db-prd-15,10.20.227.178,Amazon Linux 2023,LDS,db,prd
+batch-prd-07,10.2.192.232,Amazon Linux 2023,SIN,batch,prd
+mon-prd-24,10.10.57.199,Ubuntu 22.04,LON,mon,prd
+batch-prd-02,10.2.235.246,Windows Server 2019,MAN,batch,prd
+mail-dev-07,10.20.24.136,Debian 12,LDS,mail,dev
+mon-prd-01,10.10.222.176,Ubuntu 22.04,SIN,mon,prd
+worker-stg-08,10.10.144.253,Windows Server 2019,FRA,worker,stg
+lb-prd-16,10.2.116.33,Ubuntu 22.04,SIN,lb,prd
+db-stg-02,10.10.4.106,Ubuntu 24.04,NYC,db,stg
+api-prd-04,10.0.37.226,Windows Server 2022,LDS,api,prd
+batch-prd-03,10.0.253.163,Windows Server 2019,FRA,batch,prd
+lb-prd-11,10.1.159.20,Ubuntu 24.04,LON,lb,prd
+proxy-stg-11,10.10.15.8,Amazon Linux 2023,FRA,proxy,stg
+lb-prd-06,10.20.81.237,RHEL 9,LDS,lb,prd
+search-stg-03,10.1.238.106,Debian 12,NYC,search,stg
+search-dev-22,10.2.33.90,Amazon Linux 2023,LON,search,dev
+dns-prd-06,10.10.248.48,Ubuntu 24.04,MAN,dns,prd
+web-dev-08,10.2.231.205,Amazon Linux 2023,SIN,web,dev
+web-dev-10,10.20.117.109,Ubuntu 24.04,NYC,web,dev
+batch-stg-19,10.20.173.148,Ubuntu 22.04,LON,batch,stg
+dns-stg-14,10.20.197.4,Windows Server 2022,SIN,dns,stg
+files-dev-19,10.2.73.241,Ubuntu 24.04,FRA,files,dev
+auth-stg-19,10.20.93.226,Ubuntu 22.04,MAN,auth,stg
+api-prd-03,10.0.31.110,Windows Server 2022,NYC,api,prd
+db-prd-20,10.2.41.177,Ubuntu 22.04,SYD,db,prd
+log-dev-04,10.0.197.97,Amazon Linux 2023,NYC,log,dev
+worker-dev-01,10.1.182.23,Ubuntu 24.04,SIN,worker,dev
+search-dev-05,10.0.115.203,Amazon Linux 2023,LON,search,dev
+worker-prd-18,10.10.123.33,Debian 12,SYD,worker,prd
+api-prd-20,10.2.118.150,Ubuntu 22.04,SIN,api,prd
+build-stg-12,10.20.172.244,Ubuntu 24.04,FRA,build,stg
+dns-prd-10,10.1.197.233,Windows Server 2022,MAN,dns,prd
+mq-stg-15,10.20.71.31,Ubuntu 22.04,SIN,mq,stg
+mail-prd-08,10.0.201.161,Ubuntu 24.04,SYD,mail,prd
+mail-prd-06,10.20.92.121,RHEL 9,LDS,mail,prd
+app-stg-09,10.20.35.31,Windows Server 2022,FRA,app,stg
+cache-dev-22,10.1.1.51,Debian 12,NYC,cache,dev
+mq-prd-15,10.1.156.23,Ubuntu 24.04,MAN,mq,prd
+proxy-stg-24,10.2.231.237,Debian 12,LDS,proxy,stg
+vpn-prd-12,10.2.228.235,Windows Server 2019,NYC,vpn,prd
+dns-stg-01,10.10.159.65,Ubuntu 22.04,NYC,dns,stg
+auth-prd-20,10.2.254.104,Windows Server 2019,SYD,auth,prd
+worker-prd-24,10.10.24.144,Windows Server 2019,NYC,worker,prd
+worker-dev-14,10.10.170.148,RHEL 9,FRA,worker,dev
+mail-stg-19,10.1.210.228,RHEL 9,LDS,mail,stg
+worker-prd-17,10.0.26.243,Debian 12,SIN,worker,prd
+batch-prd-10,10.10.198.101,Ubuntu 24.04,LDS,batch,prd
+db-dev-02,10.10.38.238,RHEL 9,NYC,db,dev
+build-dev-12,10.1.202.69,Ubuntu 22.04,NYC,build,dev
+vpn-dev-09,10.20.101.149,Amazon Linux 2023,MAN,vpn,dev
+api-stg-20,10.10.161.253,Windows Server 2022,SYD,api,stg
+vpn-stg-10,10.1.249.194,Debian 12,MAN,vpn,stg
+lb-prd-04,10.0.36.89,Amazon Linux 2023,LDS,lb,prd
+worker-prd-13,10.20.169.226,Amazon Linux 2023,SYD,worker,prd
+auth-prd-08,10.1.11.146,Ubuntu 24.04,NYC,auth,prd
+web-prd-12,10.20.195.228,RHEL 9,SYD,web,prd
+batch-prd-05,10.20.100.60,Windows Server 2022,NYC,batch,prd
+build-prd-23,10.0.174.22,Ubuntu 24.04,NYC,build,prd
+cache-prd-14,10.0.185.218,Windows Server 2022,LON,cache,prd
+mail-prd-19,10.1.171.152,Debian 12,SIN,mail,prd
+dns-stg-03,10.2.23.100,Debian 12,MAN,dns,stg
+files-prd-22,10.2.237.68,Debian 12,LDS,files,prd
+build-stg-22,10.1.159.4,Windows Server 2022,LON,build,stg
+dns-dev-02,10.0.184.53,Debian 12,LON,dns,dev
+mq-stg-08,10.20.56.2,Amazon Linux 2023,NYC,mq,stg
+web-dev-18,10.0.114.76,Ubuntu 24.04,NYC,web,dev
+files-dev-13,10.0.58.16,Ubuntu 24.04,SIN,files,dev
+dns-stg-22,10.1.247.167,Debian 12,LDS,dns,stg
+api-prd-02,10.0.63.123,Amazon Linux 2023,MAN,api,prd
+app-stg-20,10.0.73.38,RHEL 9,SIN,app,stg
+db-prd-07,10.20.162.37,Amazon Linux 2023,SYD,db,prd
+api-prd-23,10.10.231.157,Windows Server 2022,MAN,api,prd
+web-prd-04,10.20.162.167,Amazon Linux 2023,LON,web,prd
+mq-prd-06,10.20.215.43,Debian 12,MAN,mq,prd
+mon-prd-09,10.1.100.55,Debian 12,FRA,mon,prd
+mon-prd-11,10.2.127.135,Ubuntu 24.04,SYD,mon,prd
+web-dev-24,10.2.103.233,Windows Server 2022,LON,web,dev
+mon-stg-21,10.1.138.190,RHEL 9,SIN,mon,stg
+auth-prd-11,10.10.151.119,Debian 12,FRA,auth,prd
+mq-prd-21,10.1.76.124,Windows Server 2022,LON,mq,prd
+mon-stg-08,10.1.38.25,Ubuntu 24.04,SIN,mon,stg
+mon-dev-07,10.0.39.217,RHEL 9,NYC,mon,dev
+api-prd-24,10.20.131.27,Windows Server 2022,SIN,api,prd
+proxy-stg-07,10.10.108.194,Ubuntu 22.04,LDS,proxy,stg
+lb-prd-24,10.2.120.111,Ubuntu 24.04,MAN,lb,prd
+web-prd-24,10.10.179.38,RHEL 9,MAN,web,prd
+dns-prd-15,10.1.61.5,RHEL 9,FRA,dns,prd
+search-prd-01,10.20.255.90,Windows Server 2022,SYD,search,prd
+mq-stg-07,10.10.57.239,Windows Server 2022,FRA,mq,stg
+cache-prd-22,10.1.24.85,Debian 12,SIN,cache,prd
+proxy-stg-02,10.1.252.150,Amazon Linux 2023,FRA,proxy,stg
+search-stg-07,10.0.164.14,RHEL 9,LDS,search,stg

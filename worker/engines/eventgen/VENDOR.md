@@ -56,6 +56,7 @@ Generator plugins kept: `default`, `replay`, `jinja`, `windbag`, `counter`, `per
 | `lib/plugins/generator/jinja.py` | ujson try/except → plain `import json` | ujson removed from the dependency set |
 | `lib/plugins/generator/jinja.py` | `e.message` → `str(e)` | py3 exceptions have no `.message` |
 | `lib/plugins/generator/jinja.py` | `jinja_loaded_vars = None` → `{}` when `jinja_variables` is unset | upstream crash: the dict is subscripted unconditionally right after |
+| `lib/eventgentoken.py` | `file`/`mvfile` replacement path normalised with `os.path.abspath` as soon as it is parsed | upstream keyed the per-event `mvhash` by the absolute path on a token's first call and the raw path afterwards, so two `mvfile` columns of one file drew different rows in the first event a process generated (linked fields disagreed) |
 
 ## Additions
 

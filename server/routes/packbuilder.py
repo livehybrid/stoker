@@ -2,10 +2,14 @@
 
 ``/api/pack-builder``:
 
-* ``GET  /wordlists``            shipped word lists (title, size, sample values)
-* ``GET  /wordlists/{name}``     one list's distinct values
-* ``POST /analyse``              split pasted/uploaded text into events and
-                                 suggest the fields to abstract
+* ``GET  /wordlists``            shipped and custom word lists and tables
+                                 (title, size, sample values, columns)
+* ``GET  /wordlists/{name}``     one list's distinct values (a table's rows)
+* ``POST /wordlists``            create or replace a custom list or table
+* ``DELETE /wordlists/{name}``   delete a custom list
+* ``POST /analyse``              split pasted/uploaded text into events
+                                 (lines, JSON, CSV or multi-line with a
+                                 breaker) and suggest the fields to abstract
 * ``POST /preview``              render events from a builder config
 * ``POST /packs``                write + register a pack (201, ``PackOut``)
 * ``GET  /packs/{id}``           a builder pack's config, to reopen it
@@ -17,6 +21,11 @@ same path as ``POST /api/packs/upload``, and ``DELETE /api/packs/{id}`` removes
 it. Bundles are content-addressed, so rebuilding never changes a run already
 provisioned from the old contents. Every endpoint is POST/PUT or read-only, so
 the auth middleware's role gate applies unchanged (writes need operator).
+
+Custom word lists live in ``PACK_UPLOAD_DIR/.wordlists`` (the same persistent
+volume). A pack copies the values it uses into its own ``samples/lists``, so
+deleting a list never breaks a built pack; only rebuilding it in the builder
+needs the list again.
 """
 from __future__ import annotations
 
@@ -24,7 +33,7 @@ import logging
 import os
 import shutil
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -40,11 +49,28 @@ from ..schemas import PackOut
 
 log = logging.getLogger("stoker.routes.packbuilder")
 
-router = APIRouter(prefix="/api/pack-builder", tags=["pack-builder"])
+def _use_custom_lists():
+    # type: () -> None
+    packbuilder.set_custom_dir(os.path.join(get_settings().pack_upload_dir, ".wordlists"))
+
+
+router = APIRouter(prefix="/api/pack-builder", tags=["pack-builder"],
+                   dependencies=[Depends(_use_custom_lists)])
 
 
 class AnalyseRequest(BaseModel):
-    text: str = Field(..., description="Pasted or uploaded events: one per line, or a JSON array")
+    text: str = Field(..., description="Pasted or uploaded events: one per line, a JSON array, CSV, "
+                                       "or multi-line events")
+    mode: str = Field("auto", description="auto | line | csv | regex")
+    breaker: Optional[str] = Field(None, description="event breaker regex (mode=regex)")
+
+
+class WordlistRequest(BaseModel):
+    name: str
+    title: str = ""
+    description: str = ""
+    values: List[str] = Field(default_factory=list)
+    columns: Optional[List[str]] = None
 
 
 class PreviewRequest(BaseModel):
@@ -84,18 +110,44 @@ def get_wordlist(name: str):
     except packbuilder.BuilderError:
         raise HTTPException(status_code=404, detail="unknown word list")
     distinct = list(dict.fromkeys(values))
-    return {"name": name, "count": len(distinct), "values": distinct}
+    out = {"name": name, "count": len(distinct), "values": distinct}  # type: Dict[str, Any]
+    columns = packbuilder.table_columns().get(name)
+    if columns:
+        out["columns"] = columns
+    return out
+
+
+@router.post("/wordlists", status_code=201)
+def save_wordlist(body: WordlistRequest):
+    # type: (WordlistRequest) -> Any
+    try:
+        return packbuilder.save_custom_wordlist(body.name, body.values, body.title, body.description,
+                                                body.columns)
+    except packbuilder.BuilderError as exc:
+        raise _bad(exc)
+
+
+@router.delete("/wordlists/{name}", status_code=204)
+def delete_wordlist(name: str):
+    # type: (str) -> None
+    try:
+        packbuilder.delete_custom_wordlist(name)
+    except packbuilder.BuilderError as exc:
+        raise HTTPException(status_code=404 if "unknown" in str(exc) else 422, detail=str(exc))
 
 
 @router.post("/analyse")
 def analyse(body: AnalyseRequest):
     # type: (AnalyseRequest) -> Any
     try:
-        events = packbuilder.split_events(body.text)
+        split = packbuilder.split_input(body.text, body.mode, body.breaker)
     except packbuilder.BuilderError as exc:
         raise _bad(exc)
-    result = packbuilder.analyse(events)
-    result["event_list"] = events
+    result = packbuilder.analyse(split["events"], split["header"])
+    result["event_list"] = split["events"]
+    result["format"] = split["format"]
+    result["breaker"] = split["breaker"]
+    result["header"] = split["header"]
     return result
 
 

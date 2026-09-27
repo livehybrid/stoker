@@ -601,8 +601,10 @@ curl -H "Authorization: Bearer stk_..." \
 events into an eventgen pack without writing any `eventgen.conf` by hand.
 
 1. **Paste or upload events**: one per line (access logs, syslog, `key=value`,
-   JSON lines) or a JSON array of objects. Up to 5,000 events, 64 KB each, 2 MB
-   in total.
+   JSON lines), a JSON array or pretty-printed JSON objects, a CSV with a header
+   row, a Splunk CSV export (its `_raw` column), or multi-line events such as
+   stack traces and XML. Up to 5,000 events, 64 KB each, 2 MB in total. **Event
+   breaking** defaults to *Detect automatically*; see below for the other modes.
 2. **Review the suggested fields.** The analyser marks what it would vary and
    recommends a replacement for each. It finds timestamps in the common formats
    (ISO 8601, access log, syslog, `date time`, `%a %b %d %Y`, epoch seconds and
@@ -610,10 +612,11 @@ events into an eventgen pack without writing any `eventgen.conf` by hand.
    shape and key name), access-log method / path / status / bytes / user agent,
    GUIDs, emails, MACs and IPv4 addresses anchored on the text before them (so
    "from" and "to" addresses stay separate fields), `for USER from` / `port N`
-   phrases, `name[pid]` process ids, and city, country and first names found in
-   free text. Constants are suggested but switched off. Select any other text in
+   phrases, `name[pid]` process ids, city, country and first names found in
+   free text, and every column of a CSV (named from its header). Fields drawn
+   from one table are linked (below). Constants are suggested but switched off. Select any other text in
    an event to add it as a field, or add a regex.
-3. **Choose replacements**: a shipped word list, "values I list" (the values
+3. **Choose replacements**: a word list, a linked table column, "values I list" (the values
    seen, editable, one per line), random IPv4 / GUID / MAC / integer / decimal /
    hex, a sequence number, a fixed value, or the event timestamp in any strftime
    format.
@@ -631,8 +634,8 @@ What the builder writes:
   pack.yaml                    name, tags (pack-builder, ...), engine, description,
                                estimates.bytes_per_event, defaults.sourcetype
   default/eventgen.conf        one sample stanza, the tokens in apply order
-  samples/<slug>.sample        your events, one per line
-  samples/lists/<list>.sample  every word list and value list the tokens use
+  samples/<slug>.sample        your events, one per line (or split by `breaker`)
+  samples/lists/<list>.sample  every word list, table and value list the tokens use
   stoker-builder.json          the builder config, for reopening the pack
 ```
 
@@ -651,8 +654,62 @@ extensions. All values are authored synthetic data. A value repeated in a list i
 proportionally more likely, which is how the weighted lists (status codes,
 methods, ports) express their mix.
 
-API: `GET /api/pack-builder/wordlists[/{name}]`, `POST /api/pack-builder/analyse
-{text}`, `POST /api/pack-builder/preview {config, n, seed}`, `POST
+### Event breaking
+
+| Mode | What it does |
+|---|---|
+| Detect automatically | A JSON array or concatenated JSON objects become one compact event each. A simple CSV (header row, same column count on every row, no quoted cells) drops the header and names the columns. A Splunk export with a `_raw` column takes that column. Otherwise, if the first line starts with a timestamp (any shape the analyser knows, optionally after `[`), epoch seconds or `<Event`, or failing those with a non-blank character, and at least one later line does not, the text is multi-line and that start becomes the breaker. Anything else is one event per line. |
+| One event per line | Never breaks on anything but newlines (JSON arrays still split). |
+| CSV with a header row | As above, but an error when the text is not a simple CSV. |
+| Multi-line, split by a regex | Your breaker regex. |
+
+A multi-line pack writes `breaker = <regex>` into its stanza. eventgen applies
+it with `re.M` (so `^` is the start of any line) and each event runs from one
+match to the next; firebox does the same. The builder checks that the saved
+events re-split to exactly themselves under the breaker, and refuses a breaker
+that can match empty text (eventgen would loop forever on it).
+
+### Linked fields (tables)
+
+A *table* is a word list whose rows have several comma-separated columns. The
+shipped ones are **identities** (`first_name, last_name, full_name, username,
+email, department, city, country`, 300 people whose email and username derive
+from their name and whose city and country agree) and **hosts** (`hostname, ip,
+os, site, role, environment`, 200 servers). A field set to *Linked: Identities →
+email* is written as `replacementType = mvfile` with `replacement =
+samples/lists/identities.sample:5`. Every mvfile token naming the same file takes
+the same row within one event, so a generated username, its email and its
+department always belong to the same person.
+
+The analyser links automatically when two or more fields in the sample map to
+one table: usernames, emails, full, first and last names, departments, cities
+and countries to identities; keyed hostnames and private IPs (JSON, `key=value`
+or CSV, never bare addresses) to hosts. When several fields claim one column
+(`user`, `src_user`, `dest_user`), only the unqualified one is linked and the
+source/destination peers stay independent draws. The original list replacement
+is kept on the suggestion, and the *Replace with* menu switches either way.
+
+The vendored Python eventgen needed a patch for this (see
+`worker/engines/eventgen/VENDOR.md`): upstream keyed its per-event row cache by
+two spellings of the same path, so the first event a process generated could mix
+rows.
+
+### Your own word lists
+
+**Manage lists** under the fields saves a list, or a table when you give column
+names, on the control plane (`PACK_UPLOAD_DIR/.wordlists/`, the persistent
+volume). It is offered in every pack from then on. A pack copies the values it
+uses into its own `samples/lists/`, so deleting a list never breaks a built
+pack; only rebuilding that pack in the builder needs the list again. Names are
+lower-case letters, digits and `_` and cannot shadow a shipped list. Up to 200
+lists of 20,000 values; table rows must have one cell per column, without quotes
+or embedded commas.
+
+API: `GET /api/pack-builder/wordlists[/{name}]` (tables include `columns`),
+`POST /api/pack-builder/wordlists {name, title, description, values, columns?}`
+(201), `DELETE /api/pack-builder/wordlists/{name}` (204), `POST
+/api/pack-builder/analyse {text, mode?: auto|line|csv|regex, breaker?}` (returns
+`event_list`, `format`, `breaker`, `header` besides the suggestions), `POST /api/pack-builder/preview {config, n, seed}`, `POST
 /api/pack-builder/packs {config}` (201), `GET|PUT /api/pack-builder/packs/{id}`.
 
 ## Running more than one pack in a job

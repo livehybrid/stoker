@@ -19,7 +19,14 @@ Python ``re`` and the Rust ``regex`` crate (no lookaround), so they run on the
 vendored eventgen and on firebox alike.
 
 Pure module: no database, no settings. The routes in ``server.routes.packbuilder``
-own storage and registration.
+own storage and registration, and call :func:`set_custom_dir` so operator
+word lists persist beside the uploaded packs.
+
+Beyond one-token-one-value the builder writes two eventgen features: linked
+fields (``replacementType = mvfile``: every column drawn from one table row
+within an event, so a username, its email and its department agree) and
+multi-line events (``breaker``: each event runs from one breaker match to the
+next, with the regex applied per line exactly as eventgen's ``re.M``).
 """
 from __future__ import annotations
 
@@ -49,8 +56,13 @@ ANALYSE_EVENTS = 2000          # events examined for suggestions (the rest ride 
 HIGHLIGHT_EVENTS = 25          # events returned with highlight spans
 PREVIEW_MAX = 200
 
-REPLACEMENT_KINDS = ("timestamp", "list", "values", "ipv4", "guid", "mac",
+REPLACEMENT_KINDS = ("timestamp", "list", "linked", "values", "ipv4", "guid", "mac",
                      "integer", "float", "hex", "static", "sequence")
+BREAK_MODES = ("auto", "line", "csv", "regex")
+MAX_BREAKER_LEN = 200
+MAX_CUSTOM_LISTS = 200
+MAX_CUSTOM_VALUES = 20000
+MAX_TABLE_COLUMNS = 20
 
 
 class BuilderError(ValueError):
@@ -61,39 +73,113 @@ class BuilderError(ValueError):
 # Word lists
 # --------------------------------------------------------------------------- #
 
-_LIST_CACHE = {}  # type: Dict[str, List[str]]
+_LIST_CACHE = {}  # type: Dict[str, List[str]]   (shipped lists only)
+_INDEX_CACHE = []  # type: List[Dict[str, Any]]
+_CUSTOM_DIR = None  # type: Optional[str]
+_LIST_NAME_RE = re.compile(r"^[a-z0-9_]{1,40}$")
+_CELL_RE = re.compile(r'^[^,"\r\n]*$')
+
+
+def set_custom_dir(path):
+    # type: (Optional[str]) -> None
+    """Where operator word lists live (``<name>.txt`` + ``<name>.json``)."""
+    global _CUSTOM_DIR
+    _CUSTOM_DIR = path
+
+
+def _shipped_index():
+    # type: () -> List[Dict[str, Any]]
+    if not _INDEX_CACHE:
+        with open(os.path.join(WORDLIST_DIR, "index.json"), encoding="utf-8") as fh:
+            _INDEX_CACHE.extend(json.load(fh))
+    return _INDEX_CACHE
+
+
+def _shipped_names():
+    # type: () -> set
+    return {e["name"] for e in _shipped_index()}
+
+
+def _custom_index():
+    # type: () -> List[Dict[str, Any]]
+    if not _CUSTOM_DIR or not os.path.isdir(_CUSTOM_DIR):
+        return []
+    shipped = _shipped_names()
+    out = []
+    for fname in sorted(os.listdir(_CUSTOM_DIR)):
+        name = fname[:-5]
+        if not fname.endswith(".json") or not _LIST_NAME_RE.match(name) or name in shipped:
+            continue
+        if not os.path.isfile(os.path.join(_CUSTOM_DIR, name + ".txt")):
+            continue
+        try:
+            with open(os.path.join(_CUSTOM_DIR, fname), encoding="utf-8") as fh:
+                meta = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        entry = {"name": name, "title": str(meta.get("title") or name),
+                 "description": str(meta.get("description") or ""), "custom": True}
+        cols = meta.get("columns")
+        if isinstance(cols, list) and len(cols) >= 2:
+            entry["columns"] = [str(c) for c in cols]
+        out.append(entry)
+    return out
+
+
+def _entries():
+    # type: () -> List[Dict[str, Any]]
+    return [dict(e, custom=False) for e in _shipped_index()] + _custom_index()
 
 
 def wordlist_index():
     # type: () -> List[Dict[str, Any]]
-    """Shipped lists with title, description, size and a few sample values."""
-    with open(os.path.join(WORDLIST_DIR, "index.json"), encoding="utf-8") as fh:
-        index = json.load(fh)
+    """Shipped and custom lists with title, description, size and a few sample
+    values. ``kind`` is ``table`` (with ``columns``) for multi-column lists
+    whose rows feed linked fields, else ``list``."""
     out = []
-    for entry in index:
+    for entry in _entries():
         values = load_wordlist(entry["name"])
         distinct = list(dict.fromkeys(values))
-        out.append(dict(entry, count=len(distinct), sample=distinct[:6]))
+        kind = "table" if entry.get("columns") else "list"
+        out.append(dict(entry, kind=kind, count=len(distinct), sample=distinct[:6]))
     return out
 
 
 def wordlist_names():
     # type: () -> List[str]
-    return [e["name"] for e in wordlist_index()]
+    """Single-column lists (what a ``list`` replacement may name)."""
+    return [e["name"] for e in _entries() if not e.get("columns")]
+
+
+def table_columns():
+    # type: () -> Dict[str, List[str]]
+    """Multi-column tables and their column names (``linked`` replacements)."""
+    return {e["name"]: list(e["columns"]) for e in _entries() if e.get("columns")}
+
+
+def _read_lines(path):
+    # type: (str) -> List[str]
+    with open(path, encoding="utf-8") as fh:
+        return [line.rstrip("\r\n") for line in fh if line.strip()]
 
 
 def load_wordlist(name):
     # type: (str) -> List[str]
-    """Values of a shipped list (repeats kept: they are the weighting)."""
-    if not re.match(r"^[a-z0-9_]+$", name or ""):
+    """Values of a list, or rows of a table (repeats kept: they are the
+    weighting). Shipped lists are cached; custom lists are read each time."""
+    if not _LIST_NAME_RE.match(name or ""):
         raise BuilderError("unknown word list %r" % name)
-    if name not in _LIST_CACHE:
-        path = os.path.join(WORDLIST_DIR, name + ".txt")
-        if not os.path.isfile(path):
-            raise BuilderError("unknown word list %r" % name)
-        with open(path, encoding="utf-8") as fh:
-            _LIST_CACHE[name] = [line.rstrip("\n") for line in fh if line.strip()]
-    return _LIST_CACHE[name]
+    if name in _LIST_CACHE:
+        return _LIST_CACHE[name]
+    path = os.path.join(WORDLIST_DIR, name + ".txt")
+    if os.path.isfile(path):
+        _LIST_CACHE[name] = _read_lines(path)
+        return _LIST_CACHE[name]
+    if _CUSTOM_DIR:
+        path = os.path.join(_CUSTOM_DIR, name + ".txt")
+        if os.path.isfile(path) and os.path.isfile(os.path.join(_CUSTOM_DIR, name + ".json")):
+            return _read_lines(path)
+    raise BuilderError("unknown word list %r" % name)
 
 
 def _list_set(name):
@@ -101,34 +187,78 @@ def _list_set(name):
     return {v.lower() for v in load_wordlist(name)}
 
 
+def save_custom_wordlist(name, values, title="", description="", columns=None):
+    # type: (str, Sequence[Any], str, str, Optional[Sequence[Any]]) -> Dict[str, Any]
+    """Create or replace an operator word list. With ``columns`` it is a table:
+    every value is one comma-separated row with a cell per column (no quotes,
+    no commas inside a cell), usable for linked fields."""
+    if not _CUSTOM_DIR:
+        raise BuilderError("custom word lists are not configured")
+    name = str(name or "").strip()
+    if not _LIST_NAME_RE.match(name):
+        raise BuilderError("list names use lower-case letters, digits and '_' (max 40)")
+    if name in _shipped_names():
+        raise BuilderError("%r is a shipped list; choose another name" % name)
+    existing = {e["name"] for e in _custom_index()}
+    if name not in existing and len(existing) >= MAX_CUSTOM_LISTS:
+        raise BuilderError("at most %d custom lists" % MAX_CUSTOM_LISTS)
+    if not isinstance(values, (list, tuple)):
+        raise BuilderError("values must be a list")
+    clean = []
+    for v in values:
+        v = str(v).strip()
+        if not v:
+            continue
+        if "\n" in v or "\r" in v or len(v) > MAX_VALUE_LEN:
+            raise BuilderError("values must be single lines under %d characters" % MAX_VALUE_LEN)
+        clean.append(v)
+    if not clean:
+        raise BuilderError("give at least one value")
+    if len(clean) > MAX_CUSTOM_VALUES:
+        raise BuilderError("at most %d values" % MAX_CUSTOM_VALUES)
+    meta = {"title": str(title or "").strip()[:80] or name,
+            "description": str(description or "").strip()[:500]}  # type: Dict[str, Any]
+    if columns:
+        cols = [str(c).strip() for c in columns]
+        if not 2 <= len(cols) <= MAX_TABLE_COLUMNS:
+            raise BuilderError("a table needs 2 to %d columns" % MAX_TABLE_COLUMNS)
+        if any(not _LIST_NAME_RE.match(c) for c in cols) or len(set(cols)) != len(cols):
+            raise BuilderError("column names must be distinct and use lower-case letters, digits and '_'")
+        for i, row in enumerate(clean):
+            cells = row.split(",")
+            if len(cells) != len(cols) or not all(_CELL_RE.match(c) for c in cells):
+                raise BuilderError("row %d must have %d comma-separated cells without quotes" % (i + 1, len(cols)))
+        meta["columns"] = cols
+    os.makedirs(_CUSTOM_DIR, exist_ok=True)
+    for suffix, body in ((".txt", "\n".join(clean) + "\n"),
+                         (".json", json.dumps(meta, indent=1, ensure_ascii=False) + "\n")):
+        tmp = os.path.join(_CUSTOM_DIR, ".%s%s.tmp" % (name, suffix))
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        os.replace(tmp, os.path.join(_CUSTOM_DIR, name + suffix))
+    return next(e for e in wordlist_index() if e["name"] == name)
+
+
+def delete_custom_wordlist(name):
+    # type: (str) -> None
+    if name in _shipped_names():
+        raise BuilderError("shipped lists cannot be deleted")
+    if not _CUSTOM_DIR or not _LIST_NAME_RE.match(name or "") \
+            or not os.path.isfile(os.path.join(_CUSTOM_DIR, name + ".json")):
+        raise BuilderError("unknown word list %r" % name)
+    for suffix in (".json", ".txt"):
+        try:
+            os.remove(os.path.join(_CUSTOM_DIR, name + suffix))
+        except FileNotFoundError:
+            pass
+
+
 # --------------------------------------------------------------------------- #
 # Event input
 # --------------------------------------------------------------------------- #
 
-def split_events(text):
-    # type: (str) -> List[str]
-    """One event per non-blank line; a JSON array becomes one compact line per
-    element (objects serialised with their key order kept)."""
-    if text is None:
-        raise BuilderError("no events supplied")
-    if len(text.encode("utf-8", errors="replace")) > MAX_TOTAL_BYTES:
-        raise BuilderError("sample is larger than %d MB" % (MAX_TOTAL_BYTES // (1024 * 1024)))
-    text = text.lstrip("﻿")
-    stripped = text.strip()
-    events = []  # type: List[str]
-    if stripped.startswith("["):
-        try:
-            doc = json.loads(stripped)
-        except ValueError:
-            doc = None
-        if isinstance(doc, list):
-            for item in doc:
-                if isinstance(item, str):
-                    events.append(item)
-                else:
-                    events.append(json.dumps(item, separators=(",", ":"), ensure_ascii=False))
-    if not events:
-        events = [line.rstrip("\r") for line in text.split("\n") if line.strip()]
+def _check_events(events):
+    # type: (List[str]) -> List[str]
     if not events:
         raise BuilderError("no events found: paste one event per line")
     if len(events) > MAX_EVENTS:
@@ -137,6 +267,219 @@ def split_events(text):
         if len(ev.encode("utf-8", errors="replace")) > MAX_EVENT_BYTES:
             raise BuilderError("event %d is larger than %d KB" % (i + 1, MAX_EVENT_BYTES // 1024))
     return events
+
+
+def _json_array(stripped):
+    # type: (str) -> Optional[List[str]]
+    if not stripped.startswith("["):
+        return None
+    try:
+        doc = json.loads(stripped)
+    except ValueError:
+        return None
+    if not isinstance(doc, list):
+        return None
+    return [item if isinstance(item, str) else json.dumps(item, separators=(",", ":"), ensure_ascii=False)
+            for item in doc]
+
+
+def _json_stream(stripped):
+    # type: (str) -> Optional[List[str]]
+    """Concatenated (usually pretty-printed) JSON objects, one compact line each."""
+    if not stripped.startswith("{") or "\n" not in stripped:
+        return None
+    decoder = json.JSONDecoder()
+    pos, out = 0, []
+    while pos < len(stripped):
+        while pos < len(stripped) and stripped[pos] in " \t\r\n,":
+            pos += 1
+        if pos >= len(stripped):
+            break
+        try:
+            doc, pos = decoder.raw_decode(stripped, pos)
+        except ValueError:
+            return None
+        if not isinstance(doc, dict):
+            return None
+        out.append(json.dumps(doc, separators=(",", ":"), ensure_ascii=False))
+    return out or None
+
+
+def check_breaker(breaker):
+    # type: (Any) -> str
+    if not isinstance(breaker, str) or not breaker.strip():
+        raise BuilderError("the event breaker must be a regular expression")
+    if len(breaker) > MAX_BREAKER_LEN or "\n" in breaker or "\r" in breaker:
+        raise BuilderError("the event breaker must be one line of at most %d characters" % MAX_BREAKER_LEN)
+    try:
+        rx = re.compile(breaker, re.M)
+    except re.error as exc:
+        raise BuilderError("the event breaker is not a valid regular expression (%s)" % exc)
+    if rx.match("") is not None:
+        raise BuilderError("the event breaker must not match empty text")
+    return breaker
+
+
+def break_events(text, breaker):
+    # type: (str, str) -> List[str]
+    """Split text exactly as eventgen does with ``breaker``: each event runs
+    from one breaker match (``re.M``) to the next; a match at offset 0 does not
+    open an empty event. Trailing newlines are dropped and blank pieces skipped."""
+    rx = re.compile(check_breaker(breaker), re.M)
+    text = text.replace("\r\n", "\n")
+    pieces, extract = [], 0
+    for m in rx.finditer(text):
+        if m.end() == m.start():
+            raise BuilderError("the event breaker must not match empty text")
+        if m.start() != 0:
+            pieces.append(text[extract:m.start()])
+            extract = m.start()
+    pieces.append(text[extract:])
+    return [p.rstrip("\r\n") for p in pieces if p.strip()]
+
+
+_BREAKER_CANDIDATES = None  # type: Optional[List[str]]
+
+
+def _breaker_candidates():
+    # type: () -> List[str]
+    global _BREAKER_CANDIDATES
+    if _BREAKER_CANDIDATES is None:
+        _BREAKER_CANDIDATES = ([r"^\[?" + ts for ts, _, _ in _TIMESTAMPS]
+                               + [r"^\d{10}(?:\.\d+)?\b", r"^<Event[\s>]", r"^\S"])
+    return _BREAKER_CANDIDATES
+
+
+_CLOSER_RE = re.compile(r"^[\]\)}>]+[,;]?\s*$")
+
+
+def detect_breaker(text):
+    # type: (str) -> Optional[str]
+    """A breaker for multi-line text, or None when it is one event per line.
+
+    Tries each timestamp shape, epoch seconds, ``<Event`` and finally "a line
+    that does not start with whitespace" (stack traces, indented
+    continuations). A candidate fits when the first line matches it and at
+    least one later line does not (a continuation line); the first fitting
+    candidate wins."""
+    lines = [l for l in text.replace("\r\n", "\n").split("\n") if l.strip()]
+    if len(lines) < 2:
+        return None
+    for cand in _breaker_candidates():
+        rx = re.compile(cand)
+        starts = [bool(rx.match(l)) for l in lines]
+        if not starts[0] or all(starts):
+            continue
+        if cand == r"^\S" and any(_CLOSER_RE.match(l) for l, st in zip(lines, starts) if st):
+            continue  # pretty-printed structures, not events
+        return cand
+    return None
+
+
+_HEADER_CELL_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_ .-]{0,63}$")
+
+
+def _detect_csv(lines):
+    # type: (List[str]) -> Optional[List[str]]
+    """The header of a simple CSV (no quoting), or None."""
+    if len(lines) < 3 or any('"' in l for l in lines):
+        return None
+    header = [c.strip() for c in lines[0].split(",")]
+    if len(header) < 2 or len(set(header)) != len(header):
+        return None
+    if not all(_HEADER_CELL_RE.match(c) for c in header):
+        return None
+    commas = lines[0].count(",")
+    if any(l.count(",") != commas for l in lines[1:]):
+        return None
+    return header
+
+
+def _splunk_csv(text):
+    # type: (str) -> Optional[List[str]]
+    """``_raw`` values from a Splunk CSV export (exporttool, outputcsv)."""
+    first = text.split("\n", 1)[0]
+    if "_raw" not in first:
+        return None
+    import csv
+    import io
+    try:
+        rows = list(csv.reader(io.StringIO(text)))
+    except csv.Error:
+        return None
+    if not rows or "_raw" not in rows[0]:
+        return None
+    col = rows[0].index("_raw")
+    return [r[col] for r in rows[1:] if len(r) > col and r[col].strip()]
+
+
+def split_input(text, mode="auto", breaker=None):
+    # type: (str, str, Optional[str]) -> Dict[str, Any]
+    """Split pasted or uploaded text into events.
+
+    Returns ``{"events", "format", "breaker", "header"}``. ``format`` is one of
+    ``lines``, ``json`` (a JSON array or concatenated objects), ``csv`` (a
+    simple CSV: the header row is dropped and names the columns),
+    ``splunk_csv`` (the ``_raw`` column of a Splunk export) or ``multiline``
+    (split by ``breaker``). ``mode`` forces one: ``line`` (never breaks on
+    anything but newlines), ``csv`` or ``regex`` (with ``breaker``)."""
+    if text is None:
+        raise BuilderError("no events supplied")
+    if mode not in BREAK_MODES:
+        raise BuilderError("mode must be one of %s" % ", ".join(BREAK_MODES))
+    if len(text.encode("utf-8", errors="replace")) > MAX_TOTAL_BYTES:
+        raise BuilderError("sample is larger than %d MB" % (MAX_TOTAL_BYTES // (1024 * 1024)))
+    text = text.lstrip("﻿").replace("\r\n", "\n")
+    stripped = text.strip()
+    result = {"events": [], "format": "lines", "breaker": None, "header": None}  # type: Dict[str, Any]
+
+    if mode == "regex":
+        result.update(events=_check_events(break_events(stripped, breaker)), format="multiline",
+                      breaker=breaker)
+        return result
+
+    lines = [l for l in text.split("\n") if l.strip()]
+    if mode in ("auto", "csv"):
+        raw = _splunk_csv(stripped)
+        if raw is not None:
+            result.update(events=raw, format="splunk_csv")
+            if any("\n" in e for e in raw):
+                found = detect_breaker("\n".join(raw))
+                if not found or break_events("\n".join(raw), found) != [e.rstrip("\r\n") for e in raw]:
+                    raise BuilderError("the export has multi-line events that no breaker splits cleanly; "
+                                       "paste the _raw text and choose a breaker")
+                result.update(events=[e.rstrip("\r\n") for e in raw], breaker=found)
+            _check_events(result["events"])
+            return result
+        header = _detect_csv(lines)
+        if header:
+            result.update(events=_check_events(lines[1:]), format="csv", header=header)
+            return result
+        if mode == "csv":
+            raise BuilderError("not a simple CSV: it needs a header row, the same number of columns "
+                               "on every row and no quoted cells")
+
+    for parse in (_json_array, _json_stream):
+        events = parse(stripped)
+        if events:
+            result.update(events=_check_events(events), format="json")
+            return result
+
+    if mode == "auto":
+        found = detect_breaker(stripped)
+        if found:
+            result.update(events=_check_events(break_events(stripped, found)), format="multiline",
+                          breaker=found)
+            return result
+    result["events"] = _check_events(lines)
+    return result
+
+
+def split_events(text):
+    # type: (str) -> List[str]
+    """One event per non-blank line; a JSON array becomes one compact line per
+    element (objects serialised with their key order kept)."""
+    return split_input(text, "line")["events"]
 
 
 # --------------------------------------------------------------------------- #
@@ -344,6 +687,9 @@ def recommend(key, values):
         return {"kind": "hex", "length": length}, not constant, "hex strings"
     # strings
     listed = _membership_list(distinct)
+    if listed in ("first_names", "last_names") and _key_list(key) == "usernames":
+        # user=alice: a first name used as a login, still a username field
+        listed = None
     if listed:
         return {"kind": "list", "list": listed}, True, "values found in the %s list" % listed
     hinted = _key_list(key)
@@ -452,8 +798,8 @@ def _anchor(event, start):
     return regex, "after '%s'" % tail.strip()
 
 
-def analyse(events):
-    # type: (List[str]) -> Dict[str, Any]
+def analyse(events, header=None):
+    # type: (List[str], Optional[List[str]]) -> Dict[str, Any]
     """Suggest the fields to abstract. Returns ``{"suggestions": [...],
     "highlights": [...], "events": n}``; every suggestion is a ready-to-use
     builder token (``pattern`` + ``replacement``) plus ``examples``,
@@ -491,6 +837,19 @@ def analyse(events):
         compiled = re.compile(regex)
         if any(_free_match(compiled, ev, claims, i) for i, ev in enumerate(sample)):
             add(label, "timestamp", regex, {"kind": "timestamp", "format": fmt}, True, "timestamp")
+
+    # 1b. CSV columns, named from the header row.
+    for k, col in enumerate(header or []):
+        pattern = r"^(?:[^,\n]*,){%d}([^,\n]*)" % k if k else r"^([^,\n]*)"
+        compiled = re.compile(pattern)
+        values = []  # type: List[str]
+        for i, ev in enumerate(sample):
+            m = compiled.match(ev)
+            if m and m.end(1) > m.start(1) and claims.free(i, m.start(1), m.end(1)):
+                values.append(m.group(1))
+        if values:
+            replacement, enabled, why = recommend(col, values)
+            add(col, "csv", pattern, replacement, enabled, why)
 
     # 2. JSON key/values, then key=value pairs: grouped by key across events.
     for kind_name, rx in (("json", _JSON_KV), ("kv", _KV)):
@@ -602,8 +961,59 @@ def analyse(events):
             add("%s names" % label, "wordlist", pattern, {"kind": "list", "list": list_name}, default_on,
                 "found in the %s list" % list_name)
 
+    _auto_link(found)
     return {"events": len(events), "suggestions": found,
             "highlights": highlight(events[:HIGHLIGHT_EVENTS], found)}
+
+
+# list -> column of the shipped tables. A field is linked when at least two
+# fields of an event draw from the same table, so they come from one row.
+_LINKS = [
+    ("identities", {"usernames": "username", "emails": "email", "full_names": "full_name",
+                    "first_names": "first_name", "last_names": "last_name",
+                    "departments": "department", "cities": "city", "countries": "country"},
+     None),
+    # hostnames and private IPs are only linked when both are named keys: a
+    # bare IP anywhere in the text is as likely a peer as the host itself.
+    ("hosts", {"hostnames": "hostname", "internal_ips": "ip"}, ("json", "kv", "csv")),
+]
+
+
+_PEER_RE = re.compile(r"(?:^|_)(?:src|source|dst|dest|destination|target|remote|peer|from|to|orig|origin|"
+                      r"sender|recipient|client|server)(?:_|$)|^(?:src|dst|dest|source|target)")
+
+
+def _auto_link(found):
+    # type: (List[Dict[str, Any]]) -> None
+    """Turn list suggestions into linked fields where two or more share a
+    table. Where several fields claim one column (user, src_user and
+    dest_user), only the unqualified one is linked; the rest stay independent
+    (one row would make them always equal), and none is linked when that is
+    ambiguous. Bare (unkeyed) values are
+    never linked. The original replacement is kept as ``alternative``."""
+    for table, colmap, kinds in _LINKS:
+        by_col = {}  # type: Dict[str, List[Dict[str, Any]]]
+        for f in found:
+            rep = f["replacement"]
+            if not f["enabled"] or rep.get("kind") != "list" or rep.get("list") not in colmap:
+                continue
+            if f["kind"] == "bare" or (kinds and f["kind"] not in kinds):
+                continue
+            by_col.setdefault(colmap[rep["list"]], []).append(f)
+        single = {}  # type: Dict[str, Dict[str, Any]]
+        for col, fs in by_col.items():
+            if len(fs) > 1:
+                # user + src_user + dest_user: the unqualified one is the event's
+                # subject; the peers stay independent draws.
+                fs = [f for f in fs if not _PEER_RE.search(_norm_key(f["field"]))]
+            if len(fs) == 1:
+                single[col] = fs[0]
+        if len(single) < 2:
+            continue
+        for col, f in single.items():
+            f["alternative"] = f["replacement"]
+            f["replacement"] = {"kind": "linked", "table": table, "column": col}
+            f["why"] = "%s; linked to one %s row per event" % (f["why"], table)
 
 
 def _free_match(compiled, ev, claims, i):
@@ -657,13 +1067,18 @@ def validate_config(cfg):
         raise BuilderError("at least one event is required")
     if len(events) > MAX_EVENTS:
         raise BuilderError("too many events (%d, max %d)" % (len(events), MAX_EVENTS))
+    breaker = cfg.get("breaker") or None
+    if breaker is not None:
+        check_breaker(breaker)
     total = 0
     clean_events = []
     for i, ev in enumerate(events):
         if not isinstance(ev, str) or not ev.strip():
             raise BuilderError("event %d is empty" % (i + 1))
-        if "\n" in ev or "\r" in ev:
-            raise BuilderError("event %d spans several lines; the builder takes one event per line" % (i + 1))
+        ev = ev.replace("\r\n", "\n").rstrip("\n")
+        if "\r" in ev or ("\n" in ev and breaker is None):
+            raise BuilderError("event %d spans several lines; set an event breaker for multi-line events"
+                               % (i + 1))
         size = len(ev.encode("utf-8"))
         if size > MAX_EVENT_BYTES:
             raise BuilderError("event %d is larger than %d KB" % (i + 1, MAX_EVENT_BYTES // 1024))
@@ -671,10 +1086,18 @@ def validate_config(cfg):
         clean_events.append(ev)
     if total > MAX_TOTAL_BYTES:
         raise BuilderError("events exceed %d MB in total" % (MAX_TOTAL_BYTES // (1024 * 1024)))
+    if breaker is not None:
+        resplit = break_events("\n".join(clean_events), breaker)
+        if resplit != clean_events:
+            bad = next((i for i, (a, b) in enumerate(zip(resplit, clean_events)) if a != b),
+                       min(len(resplit), len(clean_events)))
+            raise BuilderError("event %d does not survive the event breaker: every event must start "
+                               "with a breaker match and no later line may match it" % (bad + 1))
     tokens = cfg.get("tokens") or []
     if len(tokens) > MAX_TOKENS:
         raise BuilderError("too many fields (%d, max %d)" % (len(tokens), MAX_TOKENS))
     known_lists = set(wordlist_names())
+    tables = table_columns()
     clean_tokens = []
     for i, t in enumerate(tokens):
         label = str(t.get("field") or "field %d" % (i + 1))
@@ -689,7 +1112,7 @@ def validate_config(cfg):
             re.compile(pattern)
         except re.error as exc:
             raise BuilderError("%s: invalid regular expression (%s)" % (label, exc))
-        rep = _validate_replacement(label, t.get("replacement") or {}, known_lists)
+        rep = _validate_replacement(label, t.get("replacement") or {}, known_lists, tables)
         clean_tokens.append({"id": t.get("id") or "t%d" % (i + 1), "field": label[:80],
                              "pattern": pattern, "enabled": bool(t.get("enabled", True)),
                              "replacement": rep})
@@ -705,6 +1128,7 @@ def validate_config(cfg):
         "sourcetype": (str(cfg.get("sourcetype") or "").strip()[:128] or None),
         "tags": tags,
         "events": clean_events,
+        "breaker": breaker,
         "tokens": clean_tokens,
         "count": count,
         "interval": interval,
@@ -723,8 +1147,8 @@ def _int_in(v, lo, hi, what):
     return n
 
 
-def _validate_replacement(label, rep, known_lists):
-    # type: (str, Dict[str, Any], set) -> Dict[str, Any]
+def _validate_replacement(label, rep, known_lists, tables=None):
+    # type: (str, Dict[str, Any], set, Optional[Dict[str, List[str]]]) -> Dict[str, Any]
     kind = rep.get("kind")
     if kind not in REPLACEMENT_KINDS:
         raise BuilderError("%s: unknown replacement %r" % (label, kind))
@@ -738,6 +1162,14 @@ def _validate_replacement(label, rep, known_lists):
         if name not in known_lists:
             raise BuilderError("%s: unknown word list %r" % (label, name))
         return {"kind": kind, "list": name}
+    if kind == "linked":
+        table, column = rep.get("table"), rep.get("column")
+        cols = (tables if tables is not None else table_columns()).get(table)
+        if cols is None:
+            raise BuilderError("%s: unknown table %r" % (label, table))
+        if column not in cols:
+            raise BuilderError("%s: table %s has no column %r" % (label, table, column))
+        return {"kind": kind, "table": table, "column": column}
     if kind == "values":
         values = rep.get("values") or []
         if not isinstance(values, list) or not values:
@@ -786,7 +1218,7 @@ def _validate_replacement(label, rep, known_lists):
 # --------------------------------------------------------------------------- #
 
 _ORDER = {"timestamp": 0, "ipv4": 1, "guid": 1, "mac": 1, "integer": 1, "float": 1,
-          "hex": 1, "sequence": 1, "list": 2, "values": 2, "static": 2}
+          "hex": 1, "sequence": 1, "list": 2, "linked": 2, "values": 2, "static": 2}
 
 
 def ordered_tokens(cfg):
@@ -831,6 +1263,7 @@ def eventgen_tokens(cfg):
     out = []  # type: List[Tuple[str, str, str]]
     files = {}  # type: Dict[str, List[str]]
     used = set()  # type: set
+    tables = None  # type: Optional[Dict[str, List[str]]]
     for t in ordered_tokens(cfg):
         rep = t["replacement"]
         kind = rep["kind"]
@@ -841,6 +1274,13 @@ def eventgen_tokens(cfg):
             files[rep["list"]] = load_wordlist(rep["list"])
             used.add(rep["list"])
             out.append((pattern, "file", "samples/lists/%s.sample" % rep["list"]))
+        elif kind == "linked":
+            if tables is None:
+                tables = table_columns()
+            files[rep["table"]] = load_wordlist(rep["table"])
+            used.add(rep["table"])
+            column = tables[rep["table"]].index(rep["column"]) + 1
+            out.append((pattern, "mvfile", "samples/lists/%s.sample:%d" % (rep["table"], column)))
         elif kind == "values":
             fname = _values_file(t, used)
             files[fname] = rep["values"]
@@ -900,6 +1340,8 @@ def write_pack(cfg, dest):
     ]
     if cfg["order"] == "random":
         lines.append("randomizeEvents = true")
+    if cfg.get("breaker"):
+        lines.append("breaker = %s" % _conf_value(cfg["breaker"]))
     for i, (pattern, rtype, replacement) in enumerate(tokens):
         lines += ["",
                   "token.%d.token = %s" % (i, pattern),
@@ -958,9 +1400,17 @@ def _strftime(fmt, epoch):
         return fmt
 
 
-def _value(rep, rng, epoch, state):
-    # type: (Dict[str, Any], random.Random, float, Dict[str, int]) -> str
+def _value(rep, rng, epoch, state, rows=None):
+    # type: (Dict[str, Any], random.Random, float, Dict[str, int], Optional[Dict[str, List[str]]]) -> str
     kind = rep["kind"]
+    if kind == "linked":
+        rows = {} if rows is None else rows
+        if rep["table"] not in rows:
+            rows[rep["table"]] = rng.choice(load_wordlist(rep["table"])).split(",")
+        cols = table_columns()[rep["table"]]
+        row = rows[rep["table"]]
+        idx = cols.index(rep["column"])
+        return row[idx] if idx < len(row) else ""
     if kind == "timestamp":
         return _strftime(rep["format"], epoch)
     if kind == "list":
@@ -1015,12 +1465,13 @@ def render_preview(cfg, n=20, seed=None):
     for i in range(n):
         base = rng.choice(events) if cfg.get("order") == "random" else events[i % len(events)]
         epoch = now - rng.uniform(0, cfg.get("interval", 1))
+        rows = {}  # type: Dict[str, List[str]]   one table row per event (mvfile)
         text = base
         for t, rx in compiled:
             matches = list(rx.finditer(text))
             if not matches:
                 continue
-            value = _value(t["replacement"], rng, epoch, state.setdefault(t["id"], {}))
+            value = _value(t["replacement"], rng, epoch, state.setdefault(t["id"], {}), rows)
             pieces, pos = [], 0
             for m in matches:
                 s, e = _target(m)
@@ -1037,8 +1488,9 @@ def render_preview(cfg, n=20, seed=None):
 
 
 __all__ = [
-    "BuilderError", "BUILDER_FILE", "BUILDER_TAG", "analyse", "classify", "highlight",
-    "load_wordlist", "ordered_tokens", "eventgen_tokens", "read_builder_config",
-    "recommend", "render_preview", "split_events", "validate_config", "wordlist_index",
-    "wordlist_names", "write_pack",
+    "BuilderError", "BUILDER_FILE", "BUILDER_TAG", "analyse", "break_events", "check_breaker",
+    "classify", "delete_custom_wordlist", "detect_breaker", "highlight", "load_wordlist",
+    "ordered_tokens", "eventgen_tokens", "read_builder_config", "recommend", "render_preview",
+    "save_custom_wordlist", "set_custom_dir", "split_events", "split_input", "table_columns",
+    "validate_config", "wordlist_index", "wordlist_names", "write_pack",
 ]

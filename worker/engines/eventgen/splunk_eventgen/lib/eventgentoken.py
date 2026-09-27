@@ -453,6 +453,11 @@ class Token(object):
                         replacementFile = s.pathParser(":".join(paths[0:-1]))
                     else:
                         replacementFile = s.pathParser(self.replacement)
+                    # Stoker patch: normalise once, here, so the mvhash key is the
+                    # same on every call (upstream keyed it by the absolute path on
+                    # a token's first call and the raw path afterwards, so linked
+                    # mvfile columns disagreed in the first event of a process).
+                    replacementFile = os.path.abspath(replacementFile)
                 except ValueError:
                     logger.error(
                         "Replacement string '%s' improperly formatted. Should be /path/to/file or /path/to/file:column"

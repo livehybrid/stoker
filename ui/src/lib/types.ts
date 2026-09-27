@@ -532,6 +532,7 @@ export interface AuthStatus {
 export type BuilderReplacementKind =
   | "timestamp"
   | "list"
+  | "linked"
   | "values"
   | "ipv4"
   | "guid"
@@ -545,7 +546,9 @@ export type BuilderReplacementKind =
 export interface BuilderReplacement {
   kind: BuilderReplacementKind;
   format?: string; // timestamp: strftime
-  list?: string; // list: shipped word list name
+  list?: string; // list: word list name
+  table?: string; // linked: table name (one row per event across its fields)
+  column?: string; // linked: column of that table
   values?: string[]; // values: custom / observed values
   min?: number; // integer, float
   max?: number;
@@ -564,8 +567,9 @@ export interface BuilderToken {
 }
 
 export interface BuilderSuggestion extends BuilderToken {
-  kind: string; // timestamp | json | kv | access | bare | phrase | wordlist
+  kind: string; // timestamp | csv | json | kv | access | bare | phrase | wordlist
   why: string;
+  alternative?: BuilderReplacement; // the unlinked replacement, when auto-linked
   examples: string[];
   matches: number; // sample events the pattern matched
 }
@@ -573,9 +577,14 @@ export interface BuilderSuggestion extends BuilderToken {
 // [start, end, token id] spans each token rewrites, per event.
 export type BuilderHighlights = Array<Array<[number, number, string]>>;
 
+export type BuilderBreakMode = "auto" | "line" | "csv" | "regex";
+
 export interface BuilderAnalyseResponse {
   events: number;
   event_list: string[];
+  format: "lines" | "json" | "csv" | "splunk_csv" | "multiline";
+  breaker: string | null;
+  header: string[] | null;
   suggestions: BuilderSuggestion[];
   highlights: BuilderHighlights;
 }
@@ -586,6 +595,7 @@ export interface BuilderConfig {
   sourcetype?: string | null;
   tags?: string[];
   events: string[];
+  breaker?: string | null; // multi-line events: eventgen breaker regex
   tokens: BuilderToken[];
   count: number;
   interval: number;
@@ -603,6 +613,9 @@ export interface WordlistInfo {
   name: string;
   title: string;
   description: string;
+  kind: "list" | "table";
+  columns?: string[]; // tables only
+  custom: boolean; // saved by an operator (deletable)
   count: number;
   sample: string[];
 }

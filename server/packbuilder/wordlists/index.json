@@ -1,5 +1,33 @@
 [
   {
+    "name": "identities",
+    "title": "Identities",
+    "description": "One consistent person per event: names, username, email, department and location",
+    "columns": [
+      "first_name",
+      "last_name",
+      "full_name",
+      "username",
+      "email",
+      "department",
+      "city",
+      "country"
+    ]
+  },
+  {
+    "name": "hosts",
+    "title": "Hosts",
+    "description": "One consistent machine per event: hostname, IP, OS, site, role and environment",
+    "columns": [
+      "hostname",
+      "ip",
+      "os",
+      "site",
+      "role",
+      "environment"
+    ]
+  },
+  {
     "name": "cities",
     "title": "Cities",
     "description": "World cities (spaces kept, e.g. \"New York\")"

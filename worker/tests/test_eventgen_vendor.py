@@ -267,3 +267,55 @@ def test_jinja_generate_smoke(tmp_path):
         l for l in result.stdout.decode().splitlines() if "jinja event" in l
     ]
     assert len(lines) == 3, result.stdout.decode()
+
+
+def test_mvfile_columns_share_one_row_from_the_first_event(tmp_path):
+    # Regression for the Stoker patch in eventgentoken.py: two mvfile tokens on
+    # the same file must read the same row in EVERY event. Upstream keyed the
+    # per-event row cache by the absolute path on a token's first call and by
+    # the raw path afterwards, so the first event of a process mixed rows.
+    pytest.importorskip("dateutil")
+    rows = ["u%02d,u%02d@example.com" % (i, i) for i in range(50)]
+    conf = _write_pack(
+        tmp_path,
+        "[id.sample]\n"
+        "generator = default\n"
+        "count = 40\n"
+        "interval = 1\n"
+        "end = 1\n"
+        "outputMode = stdout\n"
+        "token.0.token = user=(\\S+)\n"
+        "token.0.replacementType = mvfile\n"
+        "token.0.replacement = pack/samples/people.sample:1\n"
+        "token.1.token = email=(\\S+)\n"
+        "token.1.replacementType = mvfile\n"
+        "token.1.replacement = pack/samples/people.sample:2\n",
+        samples={
+            "id.sample": "login user=x email=y\n",
+            "people.sample": "\n".join(rows) + "\n",
+        },
+    )
+    result = _run_generate(conf, tmp_path)
+    assert result.returncode == 0, result.stderr.decode()
+    pairs = re.findall(r"user=(\S+) email=(\S+)", result.stdout.decode())
+    assert len(pairs) == 40
+    assert all(email == user + "@example.com" for user, email in pairs), pairs[:3]
+
+
+def test_anchored_breaker_splits_multiline_events(tmp_path):
+    pytest.importorskip("dateutil")
+    conf = _write_pack(
+        tmp_path,
+        "[trace.sample]\n"
+        "generator = default\n"
+        "count = 4\n"
+        "interval = 1\n"
+        "end = 1\n"
+        "outputMode = stdout\n"
+        "breaker = ^\\d{4}-\\d{2}-\\d{2}\n",
+        samples={"trace.sample": "2026-01-01 boom\n  at a\n  at b\n2026-01-02 ok\n"},
+    )
+    result = _run_generate(conf, tmp_path)
+    assert result.returncode == 0, result.stderr.decode()
+    out = result.stdout.decode()
+    assert out.count("boom\n  at a\n  at b") == 2 and out.count("ok") == 2

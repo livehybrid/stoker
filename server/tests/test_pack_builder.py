@@ -100,10 +100,12 @@ def test_detects_json_fields_and_word_lists():
     f = _by_field(pb.analyse(pb.split_events(JSON_EVENTS)))
     assert f["ISO 8601 timestamp"]["replacement"]["format"] == "%Y-%m-%dT%H:%M:%S"
     assert f["sourceIPAddress"]["replacement"] == {"kind": "ipv4"}  # documentation ranges are not RFC 1918
-    assert f["userName"]["replacement"] == {"kind": "list", "list": "usernames"}
+    # userName and city both come from the identities table: linked to one row
+    assert f["userName"]["replacement"] == {"kind": "linked", "table": "identities", "column": "username"}
+    assert f["userName"]["alternative"] == {"kind": "list", "list": "usernames"}
     assert f["awsRegion"]["replacement"] == {"kind": "list", "list": "aws_regions"}
     assert f["eventID"]["replacement"] == {"kind": "guid"}
-    assert f["city"]["replacement"] == {"kind": "list", "list": "cities"}
+    assert f["city"]["replacement"] == {"kind": "linked", "table": "identities", "column": "city"}
     assert f["bytes"]["replacement"]["kind"] == "integer"
     assert f["city"]["pattern"] == '"city"\\s*:\\s*"([^"]*)"'
 
@@ -156,7 +158,14 @@ def test_highlights_mark_the_rewritten_spans():
 @pytest.mark.parametrize("patch,msg", [
     ({"name": "../evil"}, "name"),
     ({"events": []}, "event"),
-    ({"events": ["a\nb"]}, "one event per line"),
+    ({"events": ["a\nb"]}, "set an event breaker"),
+    ({"events": ["a\nb"], "breaker": "^"}, "must not match empty"),
+    ({"events": ["x1 a\nx2 b"], "breaker": r"^x\d"}, "does not survive the event breaker"),
+    ({"tokens": [{"pattern": "a", "replacement": {"kind": "linked", "table": "nope", "column": "x"}}]},
+     "unknown table"),
+    ({"tokens": [{"pattern": "a", "replacement": {"kind": "linked", "table": "identities", "column": "x"}}]},
+     "has no column"),
+    ({"tokens": [{"pattern": "a", "replacement": {"kind": "list", "list": "identities"}}]}, "unknown word list"),
     ({"tokens": [{"pattern": "(", "replacement": {"kind": "static", "value": "x"}}]}, "invalid regular expression"),
     ({"tokens": [{"pattern": "a", "replacement": {"kind": "list", "list": "nope"}}]}, "unknown word list"),
     ({"tokens": [{"pattern": "a", "replacement": {"kind": "integer", "min": 5, "max": 1}}]}, "below the minimum"),
@@ -206,8 +215,10 @@ def test_written_pack_lints_bundles_and_matches(tmp_path, text):
         assert any(re.search(pattern, ev) for ev in sample), pattern
         if rtype == "file":
             assert os.path.isfile(os.path.join(dest, replacement)), replacement
+        if rtype == "mvfile":
+            assert os.path.isfile(os.path.join(dest, replacement.rsplit(":", 1)[0])), replacement
     # timestamps first, then generated values, then list/value text
-    group = {"timestamp": 0, "random": 1, "integerid": 1, "file": 2, "static": 2}
+    group = {"timestamp": 0, "random": 1, "integerid": 1, "file": 2, "mvfile": 2, "static": 2}
     order = [group[rtype] for _, rtype, _ in tokens]
     assert order == sorted(order) and order[0] == 0
     yaml = open(os.path.join(dest, "pack.yaml")).read()
@@ -318,3 +329,219 @@ def test_api_rejects_bad_input_and_foreign_packs(client, upload_dir, db_session)
     assert client.put("/api/pack-builder/packs/%d" % other.id,
                       json={"config": {"name": "elsewhere", "events": ["a"]}}).status_code == 404
     assert client.get("/api/pack-builder/packs/999999").status_code == 404
+
+
+
+# ---- tables and linked fields ----
+
+def test_shipped_tables_are_well_formed():
+    tables = pb.table_columns()
+    assert tables["identities"][:5] == ["first_name", "last_name", "full_name", "username", "email"]
+    assert "hostname" in tables["hosts"] and "ip" in tables["hosts"]
+    for name, cols in tables.items():
+        for row in pb.load_wordlist(name):
+            cells = row.split(",")
+            assert len(cells) == len(cols) and all(c and '"' not in c for c in cells), (name, row)
+    kinds = {e["name"]: e["kind"] for e in pb.wordlist_index()}
+    assert kinds["identities"] == "table" and kinds["cities"] == "list"
+    assert "identities" not in pb.wordlist_names()
+
+
+LINKED_JSON = json.dumps([
+    {"user": "ada.smith", "email": "ada.smith@example.com", "department": "Finance",
+     "src_user": "bob.jones", "dest_user": "carol.white", "host": "web-prd-01", "src_ip": "10.0.0.5"},
+    {"user": "bob.jones", "email": "bob.jones@example.com", "department": "Legal",
+     "src_user": "ada.smith", "dest_user": "dan.brown", "host": "db-prd-02", "src_ip": "10.0.0.6"},
+])
+
+
+def test_analyse_links_identity_and_host_fields():
+    fields = _by_field(pb.analyse(pb.split_events(LINKED_JSON)))
+    for key, col in (("user", "username"), ("email", "email"), ("department", "department")):
+        assert fields[key]["replacement"] == {"kind": "linked", "table": "identities", "column": col}, key
+        assert fields[key]["alternative"]["kind"] == "list"
+    # two fields on one column would always be equal: they stay independent
+    assert fields["src_user"]["replacement"] == {"kind": "list", "list": "usernames"}
+    assert fields["dest_user"]["replacement"] == {"kind": "list", "list": "usernames"}
+    assert fields["host"]["replacement"] == {"kind": "linked", "table": "hosts", "column": "hostname"}
+    assert fields["src_ip"]["replacement"] == {"kind": "linked", "table": "hosts", "column": "ip"}
+
+
+def test_a_single_identity_field_is_not_linked():
+    fields = _by_field(pb.analyse(['{"user":"ada.smith","n":1}', '{"user":"bob.jones","n":2}']))
+    assert fields["user"]["replacement"] == {"kind": "list", "list": "usernames"}
+
+
+def test_linked_fields_share_a_row_in_preview_and_pack(tmp_path):
+    cfg = _config(LINKED_JSON, name="linked")
+    rows = {tuple(r.split(",")) for r in pb.load_wordlist("identities")}
+    by_user = {r[3]: r for r in rows}
+    for ev in pb.render_preview(cfg, n=30, seed=5)["events"]:
+        doc = json.loads(ev)
+        row = by_user[doc["user"]]
+        assert (doc["email"], doc["department"]) == (row[4], row[5])
+    dest = str(tmp_path / "pack")
+    pb.write_pack(cfg, dest)
+    assert bundles.lint_pack(dest).ok
+    _, _, tokens = _conf_tokens(dest)
+    mv = [t for t in tokens if t[1] == "mvfile"]
+    assert {t[2] for t in mv} >= {"samples/lists/identities.sample:4", "samples/lists/identities.sample:5",
+                                  "samples/lists/hosts.sample:1", "samples/lists/hosts.sample:2"}
+    assert os.path.isfile(os.path.join(dest, "samples", "lists", "identities.sample"))
+    # the wizard preview (server.preview) keeps one row per event too
+    for ev in preview_pack(dest, n=20):
+        doc = json.loads(ev)
+        assert by_user[doc["user"]][4] == doc["email"]
+
+
+# ---- event breaking ----
+
+TRACE = (
+    "2026-09-27 10:00:01 ERROR request failed user=alice\n"
+    "java.lang.IllegalStateException: boom\n"
+    "    at com.example.Service.call(Service.java:42)\n"
+    "    at com.example.Api.handle(Api.java:7)\n"
+    "2026-09-27 10:00:02 INFO request ok user=bob\n"
+    "2026-09-27 10:00:03 WARN slow user=carol\n"
+    "\tat com.example.Db.query(Db.java:9)\n"
+)
+XML = (
+    "<Event xmlns='x'>\n  <System><EventID>4624</EventID></System>\n</Event>\n"
+    "<Event xmlns='x'>\n  <System><EventID>4625</EventID></System>\n</Event>\n"
+)
+
+
+def test_split_detects_multiline_events():
+    r = pb.split_input(TRACE)
+    assert r["format"] == "multiline" and r["breaker"].startswith("^")
+    assert len(r["events"]) == 3 and r["events"][0].count("\n") == 3
+    assert r["events"][2].endswith("Db.java:9)")
+    x = pb.split_input(XML)
+    assert x["breaker"] == r"^<Event[\s>]" and len(x["events"]) == 2
+    # line mode never breaks on anything but newlines
+    assert len(pb.split_input(TRACE, "line")["events"]) == 7
+    # plain one-per-line text is not multi-line
+    assert pb.split_input(SYSLOG)["breaker"] is None
+    # pretty-printed JSON objects become one compact event each
+    j = pb.split_input('{\n  "a": 1\n}\n{\n  "a": 2\n}\n')
+    assert j["format"] == "json" and j["events"] == ['{"a":1}', '{"a":2}']
+
+
+def test_regex_mode_and_eventgen_split_semantics():
+    r = pb.split_input("A1\nx\nA2\ny\n", "regex", r"^A\d")
+    assert r["events"] == ["A1\nx", "A2\ny"]
+    with pytest.raises(pb.BuilderError):
+        pb.split_input("a", "regex", "(")
+    with pytest.raises(pb.BuilderError):
+        pb.split_input("a", "regex", "^")
+
+
+def test_multiline_pack_round_trips(tmp_path):
+    r = pb.split_input(TRACE)
+    cfg = pb.validate_config({"name": "trace", "events": r["events"], "breaker": r["breaker"],
+                              "tokens": pb.analyse(r["events"])["suggestions"]})
+    dest = str(tmp_path / "pack")
+    pb.write_pack(cfg, dest)
+    assert bundles.lint_pack(dest).ok
+    section, parser, _ = _conf_tokens(dest)
+    breaker = parser.get(section, "breaker")
+    text = open(os.path.join(dest, "samples", "trace.sample")).read()
+    assert pb.break_events(text, breaker) == cfg["events"]
+    out = preview_pack(dest, n=3)
+    assert len(out) == 3 and out[0].count("\n") == 3 and "Service.java:42" in out[0]
+
+
+# ---- CSV ----
+
+CSV = (
+    "time,user,email,department,src_ip,bytes\n"
+    "2026-09-27 10:00:00,ada.smith,ada.smith@example.com,Finance,10.0.0.1,512\n"
+    "2026-09-27 10:00:01,bob.jones,bob.jones@example.com,Legal,10.0.0.2,2048\n"
+)
+
+
+def test_csv_columns_become_fields():
+    r = pb.split_input(CSV)
+    assert r["format"] == "csv" and r["header"][0] == "time" and len(r["events"]) == 2
+    fields = _by_field(pb.analyse(r["events"], r["header"]))
+    assert "date-time" in fields  # the timestamp column is claimed as a timestamp first
+    assert fields["user"]["kind"] == "csv"
+    assert fields["user"]["replacement"]["kind"] == "linked"
+    assert fields["bytes"]["replacement"]["kind"] == "integer"
+    assert re.match(fields["bytes"]["pattern"], r["events"][0]).group(1) == "512"
+    cfg = pb.validate_config({"name": "csv", "events": r["events"],
+                              "tokens": list(fields.values())})
+    for ev in pb.render_preview(cfg, n=10, seed=2)["events"]:
+        assert ev.count(",") == 5
+
+
+def test_csv_detection_and_splunk_exports():
+    with pytest.raises(pb.BuilderError):
+        pb.split_input("a b\nc d\n", "csv")
+    assert pb.split_input("a,b\n1,2\n", "auto")["format"] == "lines"  # too short to call
+    export = '_time,host,_raw\n1,h,"a,b ""q"""\n2,h,plain\n'
+    r = pb.split_input(export)
+    assert r["format"] == "splunk_csv" and r["events"] == ['a,b "q"', "plain"]
+
+
+# ---- custom word lists ----
+
+def test_custom_wordlists(tmp_path):
+    pb.set_custom_dir(str(tmp_path / ".wordlists"))
+    try:
+        entry = pb.save_custom_wordlist("store_ids", ["S-001", "S-002", " ", "S-003"], title="Stores")
+        assert entry["custom"] and entry["count"] == 3 and entry["kind"] == "list"
+        assert "store_ids" in pb.wordlist_names()
+        table = pb.save_custom_wordlist("stores", ["S-001,Leeds", "S-002,York"], columns=["id", "city"])
+        assert table["kind"] == "table" and pb.table_columns()["stores"] == ["id", "city"]
+        for name, values, cols, msg in (
+                ("cities", ["x"], None, "shipped"),
+                ("Bad-Name", ["x"], None, "lower-case"),
+                ("t", ["a,b,c"], ["x", "y"], "row 1"),
+                ("t", ['a,"b"'], ["x", "y"], "row 1"),
+                ("t", [], None, "at least one")):
+            with pytest.raises(pb.BuilderError) as exc:
+                pb.save_custom_wordlist(name, values, columns=cols)
+            assert msg in str(exc.value)
+        cfg = pb.validate_config({"name": "c", "events": ["store=S-009 city=Leeds"], "tokens": [
+            {"field": "store", "pattern": r"store=(\S+)", "replacement": {"kind": "linked", "table": "stores",
+                                                                         "column": "id"}},
+            {"field": "city", "pattern": r"city=(\S+)", "replacement": {"kind": "linked", "table": "stores",
+                                                                       "column": "city"}}]})
+        for ev in pb.render_preview(cfg, n=10)["events"]:
+            assert ev in ("store=S-001 city=Leeds", "store=S-002 city=York")
+        dest = str(tmp_path / "pack")
+        pb.write_pack(cfg, dest)
+        pb.delete_custom_wordlist("stores")
+        assert "stores" not in pb.table_columns()
+        # the built pack carries its own copy
+        assert open(os.path.join(dest, "samples", "lists", "stores.sample")).read() == "S-001,Leeds\nS-002,York\n"
+        with pytest.raises(pb.BuilderError):
+            pb.delete_custom_wordlist("cities")
+        with pytest.raises(pb.BuilderError):
+            pb.delete_custom_wordlist("stores")
+    finally:
+        pb.set_custom_dir(None)
+
+
+def test_api_custom_lists_and_break_modes(client, upload_dir):
+    r = client.post("/api/pack-builder/wordlists", json={"name": "teams", "values": ["red", "blue"]})
+    assert r.status_code == 201, r.text
+    assert os.path.isfile(os.path.join(upload_dir, ".wordlists", "teams.txt"))
+    names = {w["name"]: w for w in client.get("/api/pack-builder/wordlists").json()}
+    assert names["teams"]["custom"] and names["identities"]["kind"] == "table"
+    assert client.get("/api/pack-builder/wordlists/identities").json()["columns"][0] == "first_name"
+    assert client.post("/api/pack-builder/wordlists", json={"name": "cities", "values": ["x"]}).status_code == 422
+    assert client.delete("/api/pack-builder/wordlists/teams").status_code == 204
+    assert client.delete("/api/pack-builder/wordlists/teams").status_code == 404
+    r = client.post("/api/pack-builder/analyse", json={"text": TRACE})
+    body = r.json()
+    assert body["format"] == "multiline" and len(body["event_list"]) == 3 and body["breaker"]
+    r = client.post("/api/pack-builder/analyse", json={"text": CSV, "mode": "csv"})
+    assert r.json()["header"][1] == "user"
+    r = client.post("/api/pack-builder/analyse", json={"text": "x", "mode": "regex", "breaker": "("})
+    assert r.status_code == 422
+    r = client.post("/api/pack-builder/packs", json={"config": {
+        "name": "Trace pack", "events": body["event_list"], "breaker": body["breaker"],
+        "tokens": body["suggestions"]}})
+    assert r.status_code == 201, r.text

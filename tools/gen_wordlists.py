@@ -186,14 +186,67 @@ def main():
         ("auth_results", "Auth results", "success/failure/locked_out/mfa_required", AUTH_RESULTS),
         ("file_extensions", "File extensions", "Documents, archives, binaries, scripts", FILE_EXTENSIONS),
     ]
+    # Multi-column tables for linked fields: one row is picked per event and
+    # every field linked to the table reads its own column from that row, so a
+    # user's name, email and department agree. Written as comma-separated rows
+    # (no header; eventgen mvfile columns are 1-based), so no value may
+    # contain a comma.
+    city_country = [
+        ("London", "United Kingdom"), ("Manchester", "United Kingdom"), ("Leeds", "United Kingdom"),
+        ("Edinburgh", "United Kingdom"), ("Dublin", "Ireland"), ("Paris", "France"), ("Lyon", "France"),
+        ("Berlin", "Germany"), ("Munich", "Germany"), ("Amsterdam", "Netherlands"), ("Brussels", "Belgium"),
+        ("Madrid", "Spain"), ("Barcelona", "Spain"), ("Lisbon", "Portugal"), ("Milan", "Italy"),
+        ("Rome", "Italy"), ("Zurich", "Switzerland"), ("Stockholm", "Sweden"), ("Oslo", "Norway"),
+        ("Copenhagen", "Denmark"), ("Warsaw", "Poland"), ("Prague", "Czechia"), ("New York", "United States"),
+        ("Chicago", "United States"), ("Austin", "United States"), ("Seattle", "United States"),
+        ("Boston", "United States"), ("Toronto", "Canada"), ("Vancouver", "Canada"), ("Mexico City", "Mexico"),
+        ("Sao Paulo", "Brazil"), ("Tokyo", "Japan"), ("Seoul", "South Korea"), ("Singapore", "Singapore"),
+        ("Sydney", "Australia"), ("Melbourne", "Australia"), ("Auckland", "New Zealand"),
+        ("Bengaluru", "India"), ("Mumbai", "India"), ("Dubai", "United Arab Emirates"),
+        ("Johannesburg", "South Africa"), ("Nairobi", "Kenya"),
+    ]
+    identity_rows, seen_users = [], set()
+    while len(identity_rows) < 300:
+        f, l = rng.choice(first), rng.choice(last)
+        user = ("%s.%s" % (f, l)).lower().replace("'", "").replace(" ", "")
+        if user in seen_users:
+            continue
+        seen_users.add(user)
+        city, country = rng.choice(city_country)
+        identity_rows.append(",".join([f, l, "%s %s" % (f, l), user,
+                                       "%s@%s" % (user, rng.choice(EMAIL_DOMAINS)),
+                                       rng.choice(_clean(DEPARTMENTS)), city, country]))
+    oses = ["Ubuntu 22.04", "Ubuntu 24.04", "RHEL 9", "Debian 12", "Windows Server 2022",
+            "Windows Server 2019", "Amazon Linux 2023"]
+    sites = ["LON", "MAN", "LDS", "NYC", "SIN", "SYD", "FRA"]
+    host_rows, seen_hosts = [], set()
+    while len(host_rows) < 200:
+        role = rng.choice(HOST_ROLES)
+        env = rng.choice(["prd", "prd", "stg", "dev"])
+        name = "%s-%s-%02d" % (role, env, rng.randint(1, 24))
+        if name in seen_hosts:
+            continue
+        seen_hosts.add(name)
+        ip = "10.%d.%d.%d" % (rng.choice([0, 1, 2, 10, 20]), rng.randint(0, 255), rng.randint(1, 254))
+        host_rows.append(",".join([name, ip, rng.choice(oses), rng.choice(sites), role, env]))
+    tables = [
+        ("identities", "Identities", "One consistent person per event: names, username, email, department and location",
+         ["first_name", "last_name", "full_name", "username", "email", "department", "city", "country"], identity_rows),
+        ("hosts", "Hosts", "One consistent machine per event: hostname, IP, OS, site, role and environment",
+         ["hostname", "ip", "os", "site", "role", "environment"], host_rows),
+    ]
+
     index = []
+    for name, title, description, columns, rows in tables:
+        _write(name, rows)
+        index.append({"name": name, "title": title, "description": description, "columns": columns})
     for name, title, description, values in lists:
         _write(name, values)
         index.append({"name": name, "title": title, "description": description})
     with open(os.path.join(OUT, "index.json"), "w", encoding="utf-8") as fh:
         json.dump(index, fh, indent=2)
         fh.write("\n")
-    print("wrote %d lists to %s" % (len(lists), os.path.normpath(OUT)))
+    print("wrote %d lists and %d tables to %s" % (len(lists), len(tables), os.path.normpath(OUT)))
 
 
 if __name__ == "__main__":

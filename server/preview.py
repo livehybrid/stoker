@@ -22,6 +22,10 @@ Supported token replacements (mirroring the vendored eventgen's semantics —
   mvfile column) from the named file, read only when it resolves inside the pack.
 * ``replacementType = static`` — the literal replacement.
 
+A stanza's ``breaker`` splits the sample into multi-line events as eventgen
+does (``re.M``, each event from one match to the next), and every ``mvfile``
+token in one event reads the same row of its file, so linked columns agree.
+
 Any other replacement type is left as-is (the token's matched text is kept), so
 an unsupported token never corrupts the preview; it simply is not substituted.
 
@@ -120,7 +124,7 @@ def preview_pack(pack_dir, n=PREVIEW_N_DEFAULT):
     out = []  # type: List[str]
     for i in range(n):
         base = lines[i % len(lines)]
-        out.append(_render_line(base, tokens, now))
+        out.append(_render_line(base, tokens, now, {}))
     return out
 
 
@@ -218,12 +222,43 @@ def _sample_pool(parser, section, pack_root):
     never read an arbitrary host file.
     """
     sample_name = parser.get(section, "sampleFile", fallback=None) or section
+    breaker = parser.get(section, "breaker", fallback=None)
     samples_dir = os.path.join(pack_root, "samples")
     for base in (samples_dir, pack_root):
         path = _safe_join(pack_root, base, sample_name)
         if path is not None and os.path.isfile(path):
+            if breaker and breaker != _DEFAULT_BREAKER:
+                events = _read_broken(path, breaker)
+                if events is not None:
+                    return events
             return _read_lines(path)
     return []
+
+
+_DEFAULT_BREAKER = r"[^\r\n\s]+"
+_MAX_SAMPLE_BYTES = 4 * 1024 * 1024
+
+
+def _read_broken(path, breaker):
+    # type: (str, str) -> Optional[List[str]]
+    """Events split by ``breaker`` exactly as eventgen does, or None when the
+    breaker does not compile or matches empty text (eventgen then falls back
+    to lines; the second case would loop forever there)."""
+    try:
+        rx = re.compile(breaker, re.M)
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read(_MAX_SAMPLE_BYTES).replace("\r\n", "\n")
+    except (re.error, OSError):
+        return None
+    pieces, extract = [], 0
+    for m in rx.finditer(text):
+        if m.end() == m.start():
+            return None
+        if m.start() != 0:
+            pieces.append(text[extract:m.start()])
+            extract = m.start()
+    pieces.append(text[extract:])
+    return [p.rstrip("\r\n") for p in pieces if p.strip()][:_MAX_SAMPLE_LINES]
 
 
 def _safe_join(pack_root, base, name):
@@ -267,16 +302,24 @@ def _read_lines(path, limit=_MAX_SAMPLE_LINES):
 # Token rendering (pure per token; matches vendored eventgen closely enough).
 # --------------------------------------------------------------------------- #
 
-def _render_line(line, tokens, now):
-    # type: (str, List[Tuple[re.Pattern, str, str]], datetime.datetime) -> str
-    """Apply each token replacement to a single sample line, in order."""
+def _render_line(line, tokens, now, rows=None):
+    # type: (str, List[Tuple[re.Pattern, str, Any]], datetime.datetime, Optional[Dict[str, List[str]]]) -> str
+    """Apply each token replacement to a single sample event, in order.
+    ``rows`` holds the mvfile row picked for this event, per file."""
+    rows = {} if rows is None else rows
     for compiled, rtype, replacement in tokens:
+        if rtype == "__mvfile__":
+            path, column, table = replacement
+            if path not in rows:
+                rows[path] = random.choice(table)
+            row = rows[path]
+            rtype, replacement = ("static", row[column - 1]) if len(row) >= column else ("__none__", "")
         line = _apply_token(line, compiled, rtype, replacement, now)
     return line
 
 
 def _apply_token(line, compiled, rtype, replacement, now):
-    # type: (str, re.Pattern, str, str, datetime.datetime) -> str
+    # type: (str, re.Pattern, str, Any, datetime.datetime) -> str
     """Substitute every match of one token in ``line``.
 
     A fresh replacement value is drawn per match for random tokens (ipv4 /
@@ -376,6 +419,9 @@ def _resolve_file_token(token, pack_root):
     if path is None or not os.path.isfile(path):
         return (compiled, "__unsupported__", "")
     values = _read_lines(path)
+    if column and (rtype or "").lower() == "mvfile":
+        table = [line.split(",") for line in values if line.strip()]
+        return (compiled, "__mvfile__", (path, column, table)) if table else (compiled, "__unsupported__", "")
     if column:
         cols = [line.split(",") for line in values]
         values = [c[column - 1] for c in cols if len(c) >= column]

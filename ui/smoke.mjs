@@ -152,12 +152,18 @@ const ROUTES = {
     '/runs/7/metrics': { samples: SAMPLES },
     '/runs/7/events': { events: [] },
     '/pack-builder/wordlists': [
-        { name: 'cities', title: 'Cities', description: 'World cities', count: 150, sample: ['London', 'Paris'] },
-        { name: 'usernames', title: 'Usernames', description: 'Accounts', count: 300, sample: ['ada.smith'] },
+        { name: 'identities', title: 'Identities', description: 'People', kind: 'table', custom: false,
+          columns: ['username', 'email', 'city'], count: 300, sample: ['ada.smith,ada.smith@example.com,Leeds'] },
+        { name: 'cities', title: 'Cities', description: 'World cities', kind: 'list', custom: false, count: 150, sample: ['London', 'Paris'] },
+        { name: 'usernames', title: 'Usernames', description: 'Accounts', kind: 'list', custom: false, count: 300, sample: ['ada.smith'] },
+        { name: 'store_ids', title: 'Store IDs', description: '', kind: 'list', custom: true, count: 3, sample: ['S-001'] },
     ],
     '/pack-builder/analyse': {
         events: 2,
         event_list: ['user=alice city=London', 'user=bob city=Paris'],
+        format: 'lines',
+        breaker: null,
+        header: null,
         suggestions: [
             {
                 id: 'f1_user', field: 'user', kind: 'kv', pattern: '\\buser=([^\\s]+)', enabled: true,
@@ -166,7 +172,8 @@ const ROUTES = {
             },
             {
                 id: 'f2_city', field: 'city', kind: 'kv', pattern: '\\bcity=([^\\s]+)', enabled: true,
-                replacement: { kind: 'values', values: ['London', 'Paris'] }, why: '2 distinct values',
+                replacement: { kind: 'linked', table: 'identities', column: 'city' },
+                alternative: { kind: 'list', list: 'cities' }, why: 'found in the cities list; linked to one identities row per event',
                 examples: ['London', 'Paris'], matches: 2,
             },
         ],
@@ -409,6 +416,9 @@ const go = async (pathname) => {
             analyseButton.click();
             await check('pack builder: fields listed', 'Fields to vary (2 of 2 on)');
             await check('pack builder: word list offered', 'Word list: Usernames');
+            await check('pack builder: linked field', 'Linked: Identities');
+            await check('pack builder: split described', 'One event per line.');
+            await check('pack builder: custom lists', 'Your word lists (1)');
             await waitFor('pack builder: highlights', () => window.document.querySelectorAll('mark').length >= 2);
             await check('pack builder: live preview', 'city=Leeds-preview', 5000);
         }

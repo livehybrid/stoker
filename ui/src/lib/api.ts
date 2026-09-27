@@ -23,6 +23,7 @@ import type {
   MetricsOut,
   PackOut,
   BuilderAnalyseResponse,
+  BuilderBreakMode,
   BuilderConfig,
   BuilderPreviewResponse,
   WordlistInfo,
@@ -293,8 +294,14 @@ export const packBuilder = {
       "GET",
       `/pack-builder/wordlists/${encodeURIComponent(name)}`,
     ),
-  analyse: (text: string) =>
-    request<BuilderAnalyseResponse>("POST", "/pack-builder/analyse", { body: { text } }),
+  analyse: (text: string, mode: BuilderBreakMode = "auto", breaker?: string | null) =>
+    request<BuilderAnalyseResponse>("POST", "/pack-builder/analyse", {
+      body: { text, mode, breaker: breaker || null },
+    }),
+  saveWordlist: (body: { name: string; title?: string; description?: string; values: string[]; columns?: string[] | null }) =>
+    request<WordlistInfo>("POST", "/pack-builder/wordlists", { body }),
+  deleteWordlist: (name: string) =>
+    request<void>("DELETE", `/pack-builder/wordlists/${encodeURIComponent(name)}`),
   preview: (config: BuilderConfig, n = 20, seed?: number) =>
     request<BuilderPreviewResponse>("POST", "/pack-builder/preview", {
       body: { config, n, seed },
