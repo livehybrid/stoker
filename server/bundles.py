@@ -1168,7 +1168,45 @@ def _fetch_dataset_url(url, max_bytes, timeout_s, expected_sha256=None):
             "rawreplay dataset %s sha256 mismatch: expected %s got %s"
             % (url, expected_sha256, digest.hexdigest()))
     log.info("fetched rawreplay dataset %s (%d bytes)", url, total)
-    return b"".join(chunks)
+    return _maybe_gunzip(b"".join(chunks), max_bytes, url)
+
+
+def _maybe_gunzip(data, max_bytes, url):
+    # type: (bytes, int, str) -> bytes
+    """Decompress a gzip dataset (``*.log.gz`` archives are common, e.g. the
+    NASA HTTP traces); other bytes pass through. The DECOMPRESSED size is held
+    to the same cap as the download, so a small gzip bomb cannot exhaust the
+    control plane. Concatenated gzip members are all read, as ``zcat`` does.
+    The declared sha256, if any, was already checked against the bytes served."""
+    import zlib
+
+    if data[:2] != b"\x1f\x8b":
+        return data
+    out = []  # type: List[bytes]
+    total = 0
+    rest = data
+    try:
+        while rest:
+            d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+            buf = rest
+            while True:
+                # max_length stays >= 1: total never exceeds max_bytes here
+                piece = d.decompress(buf, max_bytes + 1 - total)
+                total += len(piece)
+                if total > max_bytes:
+                    raise BundleError(
+                        "rawreplay dataset %s decompresses past the %d-byte cap" % (url, max_bytes))
+                out.append(piece)
+                if d.eof:
+                    break
+                if not d.unconsumed_tail:
+                    raise BundleError("rawreplay dataset %s: truncated gzip" % url)
+                buf = d.unconsumed_tail
+            rest = d.unused_data.lstrip(b"\x00")
+    except zlib.error as exc:
+        raise BundleError("rawreplay dataset %s: invalid gzip (%s)" % (url, exc))
+    log.info("decompressed rawreplay dataset %s to %d bytes", url, total)
+    return b"".join(out)
 
 
 def build_from_pack(pack_dir, bundle_dir=None, settings=None):

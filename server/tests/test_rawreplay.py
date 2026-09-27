@@ -769,3 +769,26 @@ def test_spec_create_rejects_unknown_engine(client, db_session, settings, make_p
         "engine": "nonsense", "rate_mode": "eps", "rate_value": 100.0, "workers": 1,
     })
     assert resp.status_code == 422, resp.text
+
+
+# ---- gzip datasets (e.g. the NASA HTTP traces ship as .log.gz) ----
+
+def test_gzip_dataset_is_decompressed_within_the_cap():
+    import gzip as _gz
+
+    raw = b"".join(b"line %d\n" % i for i in range(50000))
+    assert bundles._maybe_gunzip(_gz.compress(raw), 10 ** 8, "u") == raw
+    # concatenated members are all read, as zcat does
+    assert bundles._maybe_gunzip(_gz.compress(raw[:999]) + _gz.compress(raw[999:]), 10 ** 8, "u") == raw
+    assert bundles._maybe_gunzip(b"plain text", 5, "u") == b"plain text"
+
+
+@pytest.mark.parametrize("blob,cap,msg", [
+    (__import__("gzip").compress(b"\0" * 5_000_000), 1_000_000, "past the"),   # a gzip bomb
+    (__import__("gzip").compress(b"x" * 100_000)[:-20], 10 ** 8, "truncated"),
+    (b"\x1f\x8bnot gzip", 10 ** 8, "invalid gzip"),
+])
+def test_gzip_dataset_refusals(blob, cap, msg):
+    with pytest.raises(bundles.BundleError) as exc:
+        bundles._maybe_gunzip(blob, cap, "u")
+    assert msg in str(exc.value)

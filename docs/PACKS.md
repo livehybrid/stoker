@@ -358,6 +358,14 @@ wired an untrusted repo plus a rawreplay pack.
 > at the `media.githubusercontent.com/media/...` raw URL (or vendor the file and
 > use a local `dataset:`), **not** the GitHub HTML `/tree/` or `/blob/` page.
 
+
+**Compressed datasets.** A dataset served as gzip (magic bytes `1f 8b`, e.g.
+`*.log.gz`) is decompressed at build time, concatenated members included, and
+the bundle carries the plain text. The decompressed size is held to the same
+`RAWREPLAY_MAX_DATASET_BYTES` cap as the download, so a small gzip bomb is
+refused. A declared `dataset_sha256` is checked against the bytes served (the
+compressed file).
+
 ### Materialising packs from `splunk/security_content`
 
 `tools/security_content_packs.py` turns a **security_content checkout** into

@@ -90,8 +90,9 @@ def test_detects_access_log_fields():
     assert f["user agent"]["replacement"] == {"kind": "list", "list": "user_agents"}
     assert f["URI path"]["replacement"]["kind"] == "values"
     assert f["response bytes"]["replacement"]["kind"] == "integer"
-    ip = f["IPv4 address at line start"]
+    ip = f["client"]  # the NCSA client field, an IP or a hostname
     assert ip["pattern"].startswith("^(") and ip["matches"] == 2
+    assert ip["replacement"] == {"kind": "ipv4"}
     # the version number inside the user agent is not mistaken for an address
     assert not any("Chrome" in s["pattern"] for s in res["suggestions"])
 

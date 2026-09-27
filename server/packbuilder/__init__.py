@@ -776,6 +776,8 @@ _BARE = [
     ("ipv4", _IPV4, "IPv4 address"),
 ]
 _ACCESS = [
+    # NCSA client: an IP or a resolved hostname, before "ident user [time]"
+    ("client", r'^(\S+) \S+ \S+ \[\d', "client", None),
     ("http_method", r'"(GET|POST|PUT|DELETE|HEAD|PATCH|OPTIONS) ', "HTTP method",
      {"kind": "list", "list": "http_methods"}),
     ("uri_path", r'"(?:GET|POST|PUT|DELETE|HEAD|PATCH|OPTIONS) (\S+) HTTP', "URI path",
