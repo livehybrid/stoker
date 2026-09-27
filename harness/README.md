@@ -79,3 +79,22 @@ pytest harness -k end_to_end   # just the live runs
 Provide `STOKER_URL` + `STOKER_TOKEN` (and optionally the HEC/Splunk secrets) as
 CI secrets and run `pytest harness`. With only the first two it runs as an
 API-contract smoke; add the HEC target + Splunk to make it a full end-to-end gate.
+
+## Nightly
+
+`harness/nightly.sh <env file> [python]` runs the suite, keeps the last 30 logs
+under `~/stoker-harness-logs` and, when the HEC settings are present, posts one
+summary event (`sourcetype=stoker:harness`, `status=pass|fail`, per-outcome
+counts) to `STOKER_TEST_INDEX`, so a failed night is searchable:
+
+```
+index=loadtest sourcetype=stoker:harness status=fail
+```
+
+The home lab runs it from the aios crontab on macdev (02:40 daily) against the
+live stack, with an operator token named `aios-harness` (90-day expiry) and the
+env file in `~/.config/stoker-harness.env` (mode 0600):
+
+```
+40 2 * * * /bin/sh /mnt/aios/workspace/apps/stoker/harness/nightly.sh $HOME/.config/stoker-harness.env /usr/bin/python3 >/dev/null 2>&1
+```
