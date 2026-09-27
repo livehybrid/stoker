@@ -51,6 +51,7 @@ MAX_TOTAL_BYTES = 2 * 1024 * 1024
 MAX_TOKENS = 100
 MAX_PATTERN_LEN = 1000
 MAX_VALUES = 10000
+MAX_INT = 10 ** 18             # integer bounds (both engines draw in 64 bits)
 MAX_VALUE_LEN = 4096
 ANALYSE_EVENTS = 2000          # events examined for suggestions (the rest ride along)
 HIGHLIGHT_EVENTS = 25          # events returned with highlight spans
@@ -617,6 +618,37 @@ def _membership_list(values):
     return best if best_score >= 0.6 else None
 
 
+# Shapes that are never a list value: a Windows SID, a 0x number, a %%1234
+# message placeholder, a {GUID}.
+_NOT_A_WORD_RE = re.compile(r"^(?:S-1-\d[\d-]*|0x[0-9A-Fa-f]+|%%\d+|\{[0-9A-Fa-f-]{36}\})$")
+# Lists whose single observed value is strong evidence on its own.
+_TYPED_LISTS = ("aws_regions", "http_methods", "country_codes")
+
+_WORD_LISTS = ("usernames", "hostnames", "workstations", "emails", "http_methods", "log_levels",
+               "severities", "actions", "aws_regions", "protocols", "auth_results", "file_extensions")
+
+
+def _fits(list_name, values, key=""):
+    # type: (str, Sequence[str], str) -> bool
+    """Whether values of this shape could plausibly come from the list: a URL
+    is never a username, "No" is not Norway unless the key says country."""
+    vals = [v for v in values if v]
+    if not vals:
+        return False
+    if any("://" in v for v in vals) and list_name != "uri_paths":
+        return False
+    if any(_NOT_A_WORD_RE.match(v) for v in vals):
+        return False
+    if list_name in _WORD_LISTS and any(re.search(r"\s", v) or len(v) > 64 for v in vals):
+        return False
+    if list_name == "country_codes":
+        k = _norm_key(key)
+        return all(re.match(r"^[A-Z]{2}$", v) for v in vals) and ("country" in k or k.endswith("cc"))
+    if list_name == "uri_paths":
+        return all(v.startswith("/") or "://" in v for v in vals)
+    return all(len(v) <= 80 for v in vals)
+
+
 _RFC1918 = [ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")]
 
 
@@ -639,6 +671,9 @@ def recommend(key, values):
     # type: (str, Sequence[str]) -> Tuple[Dict[str, Any], bool, str]
     """(replacement, enabled, why) for a field named ``key`` with these values."""
     distinct = list(dict.fromkeys(v for v in values))
+    if any(len(v) > MAX_VALUE_LEN for v in distinct):
+        # a blob (certificate, SAML document, encoded payload): not a field to vary
+        return {"kind": "static", "value": distinct[0]}, False, "a long value"
     shape = classify(distinct)
     k = _norm_key(key)
     constant = len(distinct) <= 1
@@ -660,6 +695,9 @@ def recommend(key, values):
         return {"kind": "timestamp", "format": "%s000"}, True, "epoch milliseconds"
     if shape == "bool":
         return {"kind": "values", "values": ["true", "false"]}, False, "booleans"
+    if shape == "int" and any(len(v.lstrip("-")) > 18 for v in distinct):
+        # a digit string too long for a 64-bit draw (an id, a digest): keep the seen values
+        return {"kind": "values", "values": distinct}, not constant, "long numeric ids"
     if shape == "int":
         nums = [int(v) for v in distinct]
         lo, hi = min(nums), max(nums)
@@ -667,6 +705,8 @@ def recommend(key, values):
             return {"kind": "integer", "min": 1024, "max": 65535}, True, "source ports"
         if "port" in k:
             return {"kind": "list", "list": "ports"}, True, "ports"
+        if k in ("serial", "seq", "sequence", "record_id", "eventrecordid") or k.endswith("_seq"):
+            return {"kind": "sequence", "start": max(0, lo)}, True, "a counter"
         if k in ("pid", "ppid") or k.endswith("_pid") or "processid" in k.replace("_", ""):
             return {"kind": "integer", "min": 1000, "max": 65000}, True, "process ids"
         if any(s in k for s in ("status", "code", "response")) and all(100 <= n <= 599 for n in nums):
@@ -674,12 +714,12 @@ def recommend(key, values):
         if constant:
             return {"kind": "integer", "min": lo, "max": hi}, False, "a constant number"
         span = hi - lo
-        return ({"kind": "integer", "min": max(0, lo - span // 2) if lo >= 0 else lo - span // 2,
-                 "max": hi + span // 2}, True, "numbers %d to %d" % (lo, hi))
+        return ({"kind": "integer", "min": max(-MAX_INT, max(0, lo - span // 2) if lo >= 0 else lo - span // 2),
+                 "max": min(MAX_INT, hi + span // 2)}, True, "numbers %d to %d" % (lo, hi))
     if shape == "float":
         nums = [float(v) for v in distinct]
         lo, hi = min(nums), max(nums)
-        d = _decimals(distinct) or 1
+        d = min(9, _decimals(distinct) or 1)
         return ({"kind": "float", "min": lo, "max": hi, "decimals": d}, not constant,
                 "decimals %s to %s" % (lo, hi))
     if shape == "hex":
@@ -687,12 +727,19 @@ def recommend(key, values):
         return {"kind": "hex", "length": length}, not constant, "hex strings"
     # strings
     listed = _membership_list(distinct)
+    if listed and not _fits(listed, distinct, key):
+        listed = None
+    if listed and len(distinct) == 1 and listed not in _TYPED_LISTS and _key_list(key) != listed:
+        # one value that happens to be in a list ("Security" is a department)
+        listed = None
     if listed in ("first_names", "last_names") and _key_list(key) == "usernames":
         # user=alice: a first name used as a login, still a username field
         listed = None
     if listed:
         return {"kind": "list", "list": listed}, True, "values found in the %s list" % listed
     hinted = _key_list(key)
+    if hinted and not _fits(hinted, distinct, key):
+        hinted = None
     if hinted:
         if hinted == "hostnames" and all(v.upper().startswith("WS") for v in distinct):
             hinted = "workstations"
@@ -718,6 +765,8 @@ _TIMESTAMPS = [
     (r"\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2}", "%m/%d/%Y %H:%M:%S", "US date-time"),
 ]
 
+_XML_DATA = re.compile(r"<Data Name=(?P<q>['\"])(?P<k>[A-Za-z0-9_.-]{1,64})(?P=q)>(?P<v>[^<]*)</Data>")
+_XML_LEAF = re.compile(r"<(?P<k>[A-Za-z][A-Za-z0-9_.-]{0,63})>(?P<v>[^<>]+)</(?P=k)>")
 _JSON_KV = re.compile(r'"([A-Za-z0-9_.@$-]{1,64})"\s*:\s*("(?:[^"\\]|\\.)*"|-?\d+(?:\.\d+)?)')
 _KV = re.compile(r'(?:^|(?<=[\s,;|&?\[(]))([A-Za-z_][A-Za-z0-9_.-]{0,40})=("[^"]*"|\'[^\']*\'|[^\s,;&"\'\])]+)')
 _BARE = [
@@ -742,6 +791,12 @@ _PHRASES = [
      r"^(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) {1,2}\d{1,2} \d{2}:\d{2}:\d{2} (\S+)", "hostname"),
     ("user (for ... from)", r"\bfor (?:invalid user )?([A-Za-z0-9_.@-]+) from\b", "user"),
     ("port", r"\bport (\d{1,5})\b", "src_port"),
+]
+# Phrases claimed straight after timestamps, before key=value can swallow them.
+_EARLY_PHRASES = [
+    # Linux auditd: msg=audit(<epoch>.<ms>:<serial>)
+    ("audit time", r"\baudit\((\d{10})\.\d+:\d+\)", "epoch"),
+    ("audit serial", r"\baudit\(\d{10}\.\d+:(\d+)\)", "serial"),
 ]
 
 
@@ -798,6 +853,21 @@ def _anchor(event, start):
     return regex, "after '%s'" % tail.strip()
 
 
+def _phrases(phrases, sample, claims, add):
+    # type: (Sequence[Tuple[str, str, str]], List[str], _Claims, Any) -> None
+    for field, regex, hint in phrases:
+        compiled = re.compile(regex)
+        values = []  # type: List[str]
+        for i, ev in enumerate(sample):
+            for m in compiled.finditer(ev):
+                s, e = _target(m)
+                if claims.free(i, s, e):
+                    values.append(ev[s:e])
+        if values:
+            replacement, enabled, why = recommend(hint, values)
+            add(field, "phrase", regex, replacement, enabled, why)
+
+
 def analyse(events, header=None):
     # type: (List[str], Optional[List[str]]) -> Dict[str, Any]
     """Suggest the fields to abstract. Returns ``{"suggestions": [...],
@@ -838,6 +908,9 @@ def analyse(events, header=None):
         if any(_free_match(compiled, ev, claims, i) for i, ev in enumerate(sample)):
             add(label, "timestamp", regex, {"kind": "timestamp", "format": fmt}, True, "timestamp")
 
+    # 1a. Timestamps and counters embedded in a known wrapper (auditd).
+    _phrases(_EARLY_PHRASES, sample, claims, add)
+
     # 1b. CSV columns, named from the header row.
     for k, col in enumerate(header or []):
         pattern = r"^(?:[^,\n]*,){%d}([^,\n]*)" % k if k else r"^([^,\n]*)"
@@ -851,11 +924,38 @@ def analyse(events, header=None):
             replacement, enabled, why = recommend(col, values)
             add(col, "csv", pattern, replacement, enabled, why)
 
+    # 1c. XML: Windows <Data Name='Key'>value</Data>, then leaf elements
+    # <Tag>value</Tag>, grouped by name. Claimed before key=value so the
+    # attribute that NAMES a field (Name='Key') is never mistaken for one.
+    for kind_name, rx in (("xml", _XML_DATA), ("xml", _XML_LEAF)):
+        groups = {}  # type: Dict[Tuple[str, str], List[str]]
+        order = []  # type: List[Tuple[str, str]]
+        for i, ev in enumerate(sample):
+            for m in rx.finditer(ev):
+                vs, ve = m.start("v"), m.end("v")
+                if ve <= vs or not claims.free(i, vs, ve):
+                    continue
+                ident = (m.group("k"), m.groupdict().get("q") or "")
+                if ident not in groups:
+                    groups[ident] = []
+                    order.append(ident)
+                groups[ident].append(m.group("v"))
+        for key, quote in order:
+            replacement, enabled, why = recommend(key, groups[(key, quote)])
+            ek = re.escape(key)
+            if rx is _XML_DATA:
+                pattern = "<Data Name=%s%s%s>([^<]*)</Data>" % (quote, ek, quote)
+            else:
+                pattern = "<%s>([^<]*)</%s>" % (ek, ek)
+            add(key, kind_name, pattern, replacement, enabled, why)
+
     # 2. JSON key/values, then key=value pairs: grouped by key across events.
     for kind_name, rx in (("json", _JSON_KV), ("kv", _KV)):
         by_key = {}  # type: Dict[Tuple[str, str], List[str]]
         order = []  # type: List[Tuple[str, str]]
+        structural = set()  # type: set
         for i, ev in enumerate(sample):
+            seen_here = {}  # type: Dict[Tuple[str, str], str]
             for m in rx.finditer(ev):
                 key, raw = m.group(1), m.group(2)
                 quote = raw[0] if raw[:1] in ('"', "'") else ""
@@ -863,11 +963,18 @@ def analyse(events, header=None):
                 if ve <= vs or not claims.free(i, vs, ve):
                     continue
                 ident = (key, quote)
+                # One token writes one value into every match: a key that
+                # repeats with different values inside one event (an XML
+                # Name='...' attribute, a nested JSON "name") is structure.
+                if seen_here.setdefault(ident, ev[vs:ve]) != ev[vs:ve]:
+                    structural.add(ident)
                 if ident not in by_key:
                     by_key[ident] = []
                     order.append(ident)
                 by_key[ident].append(ev[vs:ve])
         for key, quote in order:
+            if (key, quote) in structural:
+                continue
             values = by_key[(key, quote)]
             replacement, enabled, why = recommend(key, values)
             ek = re.escape(key)
@@ -928,17 +1035,7 @@ def analyse(events, header=None):
             add(field, "bare", pattern, replacement, enabled, why)
 
     # 5. Common free-text phrases.
-    for field, regex, hint in _PHRASES:
-        compiled = re.compile(regex)
-        values = []  # type: List[str]
-        for i, ev in enumerate(sample):
-            for m in compiled.finditer(ev):
-                s, e = _target(m)
-                if claims.free(i, s, e):
-                    values.append(ev[s:e])
-        if values:
-            replacement, enabled, why = recommend(hint, values)
-            add(field, "phrase", regex, replacement, enabled, why)
+    _phrases(_PHRASES, sample, claims, add)
 
     # 6. Process ids like sshd[1234].
     pid_rx = re.compile(_PID)
@@ -962,6 +1059,16 @@ def analyse(events, header=None):
                 "found in the %s list" % list_name)
 
     _auto_link(found)
+    # Never hand the UI a suggestion its own validation would refuse.
+    known, tables = set(wordlist_names()), table_columns()
+    kept = []
+    for f in found:
+        try:
+            f["replacement"] = _validate_replacement(f["field"], f["replacement"], known, tables)
+        except BuilderError:
+            continue
+        kept.append(f)
+    found = kept
     return {"events": len(events), "suggestions": found,
             "highlights": highlight(events[:HIGHLIGHT_EVENTS], found)}
 
@@ -1187,8 +1294,8 @@ def _validate_replacement(label, rep, known_lists, tables=None):
             raise BuilderError("%s: give at least one non-blank value" % label)
         return {"kind": kind, "values": clean}
     if kind == "integer":
-        lo = _int_in(rep.get("min", 0), -10 ** 15, 10 ** 15, "%s minimum" % label)
-        hi = _int_in(rep.get("max", 100), -10 ** 15, 10 ** 15, "%s maximum" % label)
+        lo = _int_in(rep.get("min", 0), -MAX_INT, MAX_INT, "%s minimum" % label)
+        hi = _int_in(rep.get("max", 100), -MAX_INT, MAX_INT, "%s maximum" % label)
         if hi < lo:
             raise BuilderError("%s: maximum is below the minimum" % label)
         return {"kind": kind, "min": lo, "max": hi}
@@ -1209,7 +1316,7 @@ def _validate_replacement(label, rep, known_lists, tables=None):
             raise BuilderError("%s: the static value must be one line" % label)
         return {"kind": kind, "value": value}
     if kind == "sequence":
-        return {"kind": kind, "start": _int_in(rep.get("start", 1), 0, 10 ** 15, "%s start" % label)}
+        return {"kind": kind, "start": _int_in(rep.get("start", 1), 0, MAX_INT, "%s start" % label)}
     return {"kind": kind}
 
 

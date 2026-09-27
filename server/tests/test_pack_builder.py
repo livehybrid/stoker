@@ -545,3 +545,61 @@ def test_api_custom_lists_and_break_modes(client, upload_dir):
         "name": "Trace pack", "events": body["event_list"], "breaker": body["breaker"],
         "tokens": body["suggestions"]}})
     assert r.status_code == 201, r.text
+
+
+# ---- analyser robustness (found importing security_content data sources) ----
+
+WINXML = ("<Event><System><Provider Name='Microsoft-Windows-Security-Auditing'/><EventID>4624</EventID>"
+          "<Computer>DC01.corp.local</Computer></System><EventData>"
+          "<Data Name='TargetUserName'>alice</Data><Data Name='IpAddress'>10.0.0.5</Data>"
+          "<Data Name='LogonType'>3</Data></EventData></Event>")
+
+
+def test_windows_xml_data_elements_are_fields_and_name_attributes_are_not():
+    fields = _by_field(pb.analyse([WINXML]))
+    assert fields["TargetUserName"]["pattern"] == "<Data Name='TargetUserName'>([^<]*)</Data>"
+    assert fields["TargetUserName"]["replacement"] == {"kind": "list", "list": "usernames"}
+    assert fields["IpAddress"]["replacement"] == {"kind": "list", "list": "internal_ips"}
+    assert fields["Computer"]["replacement"] == {"kind": "list", "list": "hostnames"}
+    assert not fields["EventID"]["enabled"]
+    # Name='...' repeats with different values in one event: structure, not a field
+    assert "Name" not in fields
+    cfg = pb.validate_config({"name": "x", "events": [WINXML], "tokens": list(fields.values())})
+    out = pb.render_preview(cfg, n=5, seed=1)["events"]
+    assert all("<Data Name='TargetUserName'>" in e and "<Data Name='IpAddress'>" in e for e in out)
+
+
+def test_lists_must_fit_the_values():
+    ev = ('{"LoginTo":"https://console.aws.amazon.com/","MFAUsed":"No","countryCode":"GB",'
+          '"login":"ada.smith","id":12345678901234567,"big":123456789012345678901234,"lat":51.50735095123456}')
+    fields = _by_field(pb.analyse([ev]))
+    assert fields["LoginTo"]["replacement"]["kind"] == "values"       # a URL is not a username
+    assert fields["MFAUsed"]["replacement"]["kind"] == "values"       # "No" is not Norway
+    assert fields["countryCode"]["replacement"] == {"kind": "list", "list": "country_codes"}
+    assert fields["login"]["replacement"] == {"kind": "list", "list": "usernames"}
+    assert fields["id"]["replacement"]["kind"] == "integer"           # 17 digits: a 64-bit draw
+    assert fields["big"]["replacement"]["kind"] == "values"           # 24 digits: kept as seen
+    assert fields["lat"]["replacement"]["decimals"] == 9
+    blob = '{"cert":"%s","user":"ada.smith"}' % ("A" * 5000)
+    f = _by_field(pb.analyse([blob]))
+    assert f["cert"]["replacement"]["kind"] == "static" and not f["cert"]["enabled"]
+    # every suggestion validates
+    pb.validate_config({"name": "x", "events": [ev], "tokens": list(fields.values())})
+
+
+def test_windows_value_shapes_and_single_values_do_not_match_lists():
+    ev = ("<Event><System><Channel>Security</Channel></System><EventData>"
+          "<Data Name='TargetUserSid'>S-1-5-21-1111-2222-3333-1001</Data>"
+          "<Data Name='ProcessId'>0x3e4</Data><Data Name='VirtualAccount'>%%1843</Data>"
+          "<Data Name='department'>Finance</Data></EventData></Event>")
+    f = _by_field(pb.analyse([ev]))
+    for key in ("TargetUserSid", "ProcessId", "VirtualAccount", "Channel"):
+        assert f[key]["replacement"]["kind"] == "values", key
+    assert f["department"]["replacement"] == {"kind": "list", "list": "departments"}
+
+
+def test_auditd_epoch_and_serial():
+    ev = 'type=EXECVE msg=audit(1723044684.257:15795): argc=3 a0="sudo"'
+    f = _by_field(pb.analyse([ev, ev.replace("15795", "15801")]))
+    assert f["audit time"]["replacement"] == {"kind": "timestamp", "format": "%s"}
+    assert f["audit serial"]["replacement"] == {"kind": "sequence", "start": 15795}

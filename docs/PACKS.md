@@ -392,6 +392,30 @@ rate. The pack's declared `mode` is advisory.
 deterministic (packs are named `sc-<detection>` and sorted), so re-materialising
 overwrites in place and a git diff shows exactly which detections changed.
 
+### Packs from security_content data sources (`sc-ds-*`)
+
+`tools/sc_datasource_packs.py` covers the other half of security_content: its
+`data_sources/*.yml` describe every Splunk data source the detections use, and
+most carry an `example_log`. The tool runs each example through the pack
+builder's analyser and writes an ordinary eventgen pack (`sc-ds-<data source>`)
+with the data source's sourcetype and source as the pack defaults, its MITRE
+components as tags, and the source file named in the description.
+
+```bash
+git clone --depth 1 --filter=blob:none --sparse https://github.com/splunk/security_content
+git -C security_content sparse-checkout set data_sources
+python tools/sc_datasource_packs.py --checkout ./security_content --out ./packs \
+    --report sc-ds-report.json      # --subset sysmon,cloudtrail to narrow
+```
+
+A pack is kept only when the example fits the builder limits, the analyser
+finds at least one field to vary besides the timestamp, the preview renders
+without warnings and changes the event, and the pack passes lint. The report
+records why every other data source was skipped or rejected (most often: no
+example, or an example truncated to a bare timestamp upstream). The published
+set lives in [livehybrid/stoker-sample-packs](https://github.com/livehybrid/stoker-sample-packs)
+under `packs/sc-ds-*`.
+
 ---
 
 ## Metric packs (metricgen)
