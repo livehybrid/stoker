@@ -375,8 +375,25 @@ python tools/security_content_packs.py \
     # --limit 25   --index attack   --mode cadence   --dry-run
 ```
 
+**Curating a set.** All of security_content is about 2,000 datasets. To pick a
+representative, bounded set, pass ATT&CK technique ids (a parent id matches its
+sub-techniques):
+
+```bash
+python tools/security_content_packs.py --checkout ./security_content --out ./packs \
+    --techniques T1003.001,T1110.003,T1021.002,T1078.004,T1486 \
+    --per-technique 2 --max-bytes 52428800
+```
+
+Each dataset is used once; within a technique, sourcetypes not yet picked come
+first; `--max-bytes` skips datasets whose HEAD `Content-Length` is larger (or
+unknown).
+
 Each pack carries the detection's name, id, description and MITRE ids (as tags),
-plus the dataset's `source` / `sourcetype`. Register the output like any pack
+plus the dataset's `source` / `sourcetype`, and a `default/eventgen.conf` with
+one `mode = replay` stanza over `dataset/replay.dat` (where the bundle build
+embeds the fetched dataset). The worker agent refuses a bundle without that
+file, so packs from earlier versions of the tool never ran; re-materialise them. Register the output like any pack
 directory: git-sync a repo of them, `POST /api/packs` with the path, or drop it
 under `STOKER_BUILTIN_PACKS_DIR`. Requires PyYAML (`pip install pyyaml`) for the
 checkout parse.

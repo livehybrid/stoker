@@ -190,6 +190,31 @@ def build_pack_yaml(spec, name, mode="cadence", time_multiple=1.0, index="main")
     return "\n".join(lines) + "\n"
 
 
+# Where the bundle build embeds a fetched dataset_url (server.bundles
+# _FETCHED_DATASET_RELPATH); the fallback stanza reads the same file.
+FETCHED_DATASET = "dataset/replay.dat"
+
+
+def build_fallback_conf(name, time_multiple=1.0):
+    # type: (str, float) -> str
+    """The pack's default/eventgen.conf: one ``mode = replay`` stanza over the
+    embedded dataset. The worker agent requires the file in every bundle;
+    Piston never reads it (engine == rawreplay skips the conf-rewrite), and it
+    is a faithful eventgen fallback if a run is ever forced onto eventgen."""
+    return "\n".join([
+        "# Materialised by tools/security_content_packs.py. Piston (engine: rawreplay)",
+        "# replays the dataset from pack.yaml's replay: section and never reads this",
+        "# file; it keeps the pack a well-formed eventgen pack (the agent requires",
+        "# default/eventgen.conf) and is a mode = replay fallback over the same data.",
+        "",
+        "[%s]" % name,
+        "mode = replay",
+        "sampleFile = %s" % FETCHED_DATASET,
+        "timeMultiple = %s" % _fmt_float(time_multiple),
+        "",
+    ])
+
+
 def pack_name(spec, taken):
     # type: (Dict[str, Any], set) -> str
     """A unique, filesystem-safe pack name for a spec (``sc-<detection>``,
@@ -229,6 +254,9 @@ def materialise(specs, out_dir, mode="cadence", time_multiple=1.0, index="main")
         with open(os.path.join(pack_dir, "pack.yaml"), "w", encoding="utf-8") as fh:
             fh.write(build_pack_yaml(spec, name, mode=mode,
                                      time_multiple=time_multiple, index=index))
+        os.makedirs(os.path.join(pack_dir, "default"), exist_ok=True)
+        with open(os.path.join(pack_dir, "default", "eventgen.conf"), "w", encoding="utf-8") as fh:
+            fh.write(build_fallback_conf(name, time_multiple=time_multiple))
         written.append({"name": name, "detection": spec["detection"],
                         "dataset_url": spec["dataset_url"]})
     return {"written": written, "skipped": skipped}
@@ -258,6 +286,59 @@ def _fmt_float(value):
     return ("%g" % float(value))
 
 
+# --------------------------------------------------------------------------- #
+# Curation: a representative, bounded set instead of all ~2,000 datasets.
+# --------------------------------------------------------------------------- #
+
+_TECHNIQUE_RE = re.compile(r"T\d{4}(?:\.\d{3})?")
+
+
+def techniques_of(spec):
+    # type: (Dict[str, Any]) -> List[str]
+    return _TECHNIQUE_RE.findall(str(spec.get("mitre") or ""))
+
+
+def curate(specs, techniques, per_technique=2):
+    # type: (Sequence[Dict[str, Any]], Sequence[str], int) -> List[Dict[str, Any]]
+    """Up to ``per_technique`` datasets for each ATT&CK technique id, in the
+    given order. A technique id matches itself and its sub-techniques (T1021
+    matches T1021.002). Each dataset is used once, and within a technique the
+    sourcetypes not yet picked anywhere come first, so the set spans as many
+    data sources as it can."""
+    used_urls = set()  # type: set
+    seen_st = {}  # type: Dict[str, int]
+    out = []  # type: List[Dict[str, Any]]
+    for tech in techniques:
+        cands = [sp for sp in specs
+                 if sp.get("dataset_url") not in used_urls
+                 and any(t == tech or t.startswith(tech + ".") for t in techniques_of(sp))]
+        picked = 0
+        while cands and picked < per_technique:
+            cands.sort(key=lambda sp: (seen_st.get(sp.get("sourcetype") or "", 0), sp["detection"]))
+            sp = cands.pop(0)
+            if sp.get("dataset_url") in used_urls:
+                continue
+            used_urls.add(sp["dataset_url"])
+            st = sp.get("sourcetype") or ""
+            seen_st[st] = seen_st.get(st, 0) + 1
+            out.append(dict(sp, curated_for=tech))
+            picked += 1
+    return out
+
+
+def dataset_size(url, timeout=20.0):
+    # type: (str, float) -> Optional[int]
+    """Content-Length from a HEAD request (redirects followed), or None."""
+    import urllib.request
+    req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "stoker-curate"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            length = resp.headers.get("Content-Length")
+            return int(length) if length is not None else None
+    except Exception:  # noqa: BLE001 - any failure means "unknown"
+        return None
+
+
 def _slug(text):
     # type: (str) -> str
     s = re.sub(r"[^a-z0-9]+", "-", str(text).lower()).strip("-")
@@ -281,6 +362,14 @@ def main(argv=None):
     p.add_argument("--time-multiple", type=float, default=1.0,
                    help="cadence gap multiplier (1.0 = real time)")
     p.add_argument("--index", default="main", help="default index in each pack")
+    p.add_argument("--techniques", default=None,
+                   help="comma-separated ATT&CK technique ids to curate a representative set "
+                        "(sub-techniques match their parent); see --per-technique")
+    p.add_argument("--per-technique", type=int, default=2,
+                   help="datasets per technique with --techniques (distinct datasets, "
+                        "new sourcetypes first)")
+    p.add_argument("--max-bytes", type=int, default=None,
+                   help="skip datasets whose HEAD Content-Length exceeds this (network)")
     p.add_argument("--dry-run", action="store_true",
                    help="print what would be written, write nothing")
     args = p.parse_args(argv)
@@ -291,6 +380,29 @@ def main(argv=None):
     except ValueError as exc:
         print("error: %s" % exc, file=sys.stderr)
         return 2
+    if args.techniques:
+        techs = [t.strip().upper() for t in args.techniques.split(",") if t.strip()]
+        if args.max_bytes:
+            sizes = {}  # type: Dict[str, Optional[int]]
+
+            def small(sp):
+                url = sp["dataset_url"]
+                if url not in sizes:
+                    sizes[url] = dataset_size(url)
+                return sizes[url] is not None and sizes[url] <= args.max_bytes
+
+            # curate first on the cheap, then replace any oversized pick
+            pool = list(specs)
+            chosen = []  # type: List[Dict[str, Any]]
+            for tech in techs:
+                for sp in curate(pool, [tech], args.per_technique * 4):
+                    if len([c for c in chosen if c["curated_for"] == tech]) >= args.per_technique:
+                        break
+                    if small(sp) and sp["dataset_url"] not in {c["dataset_url"] for c in chosen}:
+                        chosen.append(dict(sp, dataset_bytes=sizes[sp["dataset_url"]]))
+            specs = chosen
+        else:
+            specs = curate(specs, techs, args.per_technique)
     if args.limit is not None:
         specs = specs[:max(0, args.limit)]
 

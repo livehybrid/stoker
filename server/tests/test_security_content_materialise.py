@@ -62,3 +62,15 @@ def test_materialised_pack_is_detected_as_rawreplay(tmp_path):
     pack_dir.mkdir()
     (pack_dir / "pack.yaml").write_text(scp.build_pack_yaml(_SPEC, "sc-x"))
     assert bundles.is_rawreplay_pack(str(pack_dir))
+
+
+def test_materialised_pack_ships_the_fallback_conf_the_agent_requires(tmp_path):
+    # The worker agent refuses a bundle without default/eventgen.conf, even for
+    # engine: rawreplay. The fallback stanza must read the file the bundle
+    # build embeds a fetched dataset_url at.
+    manifest = scp.materialise([_SPEC], str(tmp_path))
+    (row,) = manifest["written"]
+    conf = (tmp_path / row["name"] / "default" / "eventgen.conf").read_text()
+    assert "mode = replay" in conf
+    assert "sampleFile = %s" % bundles._FETCHED_DATASET_RELPATH.replace(os.sep, "/") in conf
+    assert bundles.lint_pack(str(tmp_path / row["name"])).ok
