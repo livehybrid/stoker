@@ -188,3 +188,50 @@ class TestBlockingAcquire:
         elapsed = time.monotonic() - start
         # 20 events at 100 eps is 0.2 s of quota
         assert 0.1 <= elapsed <= 1.0
+
+
+
+# ---- acquire_many: batched grants never run ahead of owed(t) ----
+
+class _Clock(object):
+    def __init__(self, t=1000.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+
+def test_acquire_many_grants_only_what_is_owed():
+    clock = _Clock()
+    b = TokenBucket(100.0, catchup_s=5.0, clock=clock)
+    b.anchor_at(clock.t)
+    clock.t += 0.5                      # 50 events owed
+    assert b.acquire_many(500) == 50
+    assert b.acquire_many(10, timeout=0.01) == 0   # nothing owed yet
+    clock.t += 0.1                      # 10 more owed
+    assert b.acquire_many(3) == 3
+    assert b.acquire_many(100) == 7
+    assert b.released == 60
+
+
+def test_acquire_many_respects_catchup_cap_and_close():
+    clock = _Clock()
+    b = TokenBucket(100.0, catchup_s=1.0, clock=clock)
+    b.anchor_at(clock.t)
+    clock.t += 30.0                     # 3000 owed, but catch-up caps at 100
+    assert b.acquire_many(10000) == 100
+    assert b.discarded_s > 28.0
+    b.close()
+    assert b.acquire_many(5) == 0
+    assert b.acquire_many(0) == 0
+
+
+def test_acquire_many_matches_acquire_rate_over_time():
+    b = TokenBucket(2000.0, catchup_s=5.0)
+    import time as _time
+    b.anchor_at(_time.time())
+    got, start = 0, _time.time()
+    while _time.time() - start < 0.5:
+        got += b.acquire_many(64, timeout=0.2)
+    elapsed = _time.time() - start
+    assert abs(got - 2000.0 * elapsed) <= 2000.0 * 0.02 + 64

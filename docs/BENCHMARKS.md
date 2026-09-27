@@ -62,6 +62,30 @@ wall is the agent's per-line token bucket and queue hand-off (~65 us per event
 on one core) plus its HEC senders; the fix for that is batching inside the
 agent.
 
+## Batched agent (2026-09-27)
+
+The HEC-line path now paces and hands off each socket read as one batch: one
+token-bucket grant (`acquire_many`, never more than the wall clock already
+owes), one queue item and one counter update per chunk instead of per event.
+Micro-benchmarks put the per-event costs it removes at about 10 us (bucket),
+18 us (queue) and 4 us (counter lock). Measured A/B with the count-only
+`tools/fast_sink.py` (the validating `hec_sink.py` parses every event in
+Python and became the bottleneck above ~12k eps), same pack, host load
+average 20 to 26 on 8 threads, so absolute numbers are pessimistic:
+
+| agent | target eps | delivered eps | achieved | CPU per event |
+|---|---|---|---|---|
+| before batching | 20,000 | 9,264 | 46% | 117 us |
+| before batching | 100,000 | 9,509 | 10% | 116 us |
+| batched | 10,000 | 10,000 | 100% | 112 us |
+| batched | 20,000 | 19,166 | 96% | 66 us |
+| batched | 50,000 | 24,360 | 49% | 56 us |
+| batched | 100,000 | 31,332 | 31% | 55 us |
+
+About 3.3 times the per-worker ceiling and half the CPU per event. Pacing
+accuracy is unchanged (tests assert the delivered rate against the bucket).
+`tools/bench_engines.py --sink fast` is now the default.
+
 Consequences for operating Stoker:
 
 - The 5,000 eps default per-worker ceiling (`STOKER_MAX_EPS_PER_WORKER`) is

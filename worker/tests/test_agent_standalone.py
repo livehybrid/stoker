@@ -70,6 +70,12 @@ class FakeHec(object):
         with self._lock:
             self.events.append(envelope)
 
+    def put_lines(self, lines):
+        if self.stopped:
+            raise RuntimeError("stopped")
+        with self._lock:
+            self.events.extend(lines)
+
     def snapshot(self):
         with self._lock:
             n = len(self.events)

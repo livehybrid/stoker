@@ -18,7 +18,7 @@ import queue
 import random
 import threading
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -105,6 +105,13 @@ class HecClient(object):
         self.ack = bool(ack)  # parsed but inactive in Phase 0
 
         self._queue = queue.Queue(maxsize=int(queue_max))
+        # Batched items (put_lines) carry many events in one queue slot, so
+        # they are bounded by an event count instead of the slot count: a
+        # producer blocks while this many events are already waiting.
+        self._queue_max_events = int(queue_max)
+        self._line_events = 0          # events inside queued line batches
+        self._line_items = 0           # queued line-batch items
+        self._space = threading.Condition(threading.Lock())
         self._lock = threading.Lock()
         self._counters = dict.fromkeys(_COUNTER_KEYS, 0)
         self.auth_failed_event = threading.Event()
@@ -133,6 +140,42 @@ class HecClient(object):
                 return
             except queue.Full:
                 continue
+
+    def put_lines(self, lines):
+        # type: (List[bytes]) -> None
+        """Enqueue already-serialised HEC objects (the HEC-line envelope) as
+        ONE queue item: one lock round-trip for the whole chunk instead of one
+        per event. Blocks while the queue already holds ``queue_max`` events
+        (backpressure, same bound as :meth:`put`); a chunk larger than the
+        bound is still accepted into an empty queue so it can never wedge."""
+        if not lines:
+            return
+        n = len(lines)
+        with self._space:
+            while True:
+                if self._stopping.is_set():
+                    raise RuntimeError("HecClient is stopped; put_lines() rejected")
+                if self._line_events == 0 or self._line_events + n <= self._queue_max_events:
+                    break
+                self._space.wait(0.1)
+            self._line_events += n
+            self._line_items += 1
+        while True:
+            if self._stopping.is_set():
+                self._release_lines(n)
+                raise RuntimeError("HecClient is stopped; put_lines() rejected")
+            try:
+                self._queue.put(lines, timeout=0.1)
+                return
+            except queue.Full:
+                continue
+
+    def _release_lines(self, n):
+        # type: (int) -> None
+        with self._space:
+            self._line_events -= n
+            self._line_items -= 1
+            self._space.notify_all()
 
     def begin_stop(self):
         # type: () -> None
@@ -173,7 +216,13 @@ class HecClient(object):
     @property
     def queue_depth(self):
         # type: () -> int
-        return self._queue.qsize()
+        return self._depth()
+
+    def _depth(self):
+        # type: () -> int
+        """Events waiting (a line batch counts its events, not one slot)."""
+        with self._space:
+            return max(0, self._queue.qsize() - self._line_items) + self._line_events
 
     @property
     def auth_failed(self):
@@ -191,7 +240,7 @@ class HecClient(object):
         # type: () -> Dict[str, Any]
         with self._lock:
             snap = dict(self._counters)
-        snap["queue_depth"] = self._queue.qsize()
+        snap["queue_depth"] = self._depth()
         snap["auth_failed"] = self.auth_failed_event.is_set()
         return snap
 
@@ -218,18 +267,17 @@ class HecClient(object):
         """Block for the first event, then fill until batch_bytes of NDJSON
         or batch_ms after the first event. Returns None when stopped and
         drained."""
-        first = None
-        while first is None:
+        lines = []  # type: List[bytes]
+        size = 0
+        while not lines:
             try:
                 item = self._queue.get(timeout=0.05)
             except queue.Empty:
                 if self._stopping.is_set():
                     return None
                 continue
-            first = self._serialise_or_count(item)
+            size += self._absorb(item, lines)
 
-        lines = [first]
-        size = len(first)
         deadline = time.monotonic() + self._batch_s
         while size < self._batch_bytes and not self._abort.is_set():
             remaining = deadline - time.monotonic()
@@ -241,12 +289,22 @@ class HecClient(object):
                 if self._stopping.is_set():
                     break  # flush the partial batch immediately on drain
                 continue
-            line = self._serialise_or_count(item)
-            if line is None:
-                continue
-            lines.append(line)
-            size += len(line) + 1
+            size += self._absorb(item, lines)
         return len(lines), b"\n".join(lines)
+
+    def _absorb(self, item, lines):
+        # type: (Any, List[bytes]) -> int
+        """Append one queue item's serialised line(s) to ``lines``; returns the
+        bytes added. A line batch (from :meth:`put_lines`) frees its space."""
+        if isinstance(item, list):
+            self._release_lines(len(item))
+            lines.extend(item)
+            return sum(len(x) for x in item) + len(item)
+        line = self._serialise_or_count(item)
+        if line is None:
+            return 0
+        lines.append(line)
+        return len(line) + 1
 
     def _serialise_or_count(self, item):
         # type: (Any) -> Optional[bytes]
@@ -341,5 +399,5 @@ class HecClient(object):
 
     def __repr__(self):
         return "<HecClient endpoint=%r queue_depth=%d senders=%d>" % (
-            self._endpoint, self._queue.qsize(), len(self._threads),
+            self._endpoint, self._depth(), len(self._threads),
         )

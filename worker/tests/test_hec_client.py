@@ -341,3 +341,45 @@ def test_pre_serialised_bytes_pass_through_untouched():
     count, body = client._collect_batch()
     assert count == 2
     assert body == b'{"time":1,"event":"raw"}\n{"index":"i","event":"dict"}'
+
+
+
+def test_put_lines_batches_are_bounded_by_events_and_counted():
+    """Line batches count their events against queue_max (not one slot each),
+    report their events in queue_depth, and join the batch verbatim."""
+    import threading as _th
+    from stoker_agent.hec_client import HecClient
+    client = HecClient("http://127.0.0.1:9", "tok", senders=0, queue_max=10)
+    client.put_lines([b'{"event":"a"}', b'{"event":"b"}', b'{"event":"c"}'])
+    client.put({"event": "d"})
+    assert client.queue_depth == 4
+    client.put_lines([b'{"event":"e"}'] * 7)          # 3 + 7 = 10: fits
+    assert client.queue_depth == 11
+    blocked = _th.Event()
+
+    def producer():
+        client.put_lines([b'{"event":"x"}'])            # 11th line event: must wait
+        blocked.set()
+
+    t = _th.Thread(target=producer, daemon=True)
+    t.start()
+    assert not blocked.wait(0.3)
+    count, body = client._collect_batch()            # drains everything queued
+    assert blocked.wait(2.0)
+    assert body.startswith(b'{"event":"a"}\n{"event":"b"}\n{"event":"c"}\n{"event":"d"}')
+    client._stopping.set()
+    assert client.queue_depth <= 1
+
+
+def test_put_lines_oversized_chunk_enters_an_empty_queue():
+    from stoker_agent.hec_client import HecClient
+    client = HecClient("http://127.0.0.1:9", "tok", senders=0, queue_max=2)
+    client.put_lines([b"{}"] * 50)                    # bigger than the bound, queue empty
+    assert client.queue_depth == 50
+    client._stopping.set()
+    try:
+        client.put_lines([b"{}"])
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("expected RuntimeError after stop")

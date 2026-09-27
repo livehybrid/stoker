@@ -22,7 +22,7 @@ import os
 import socket
 import threading
 import time
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from .pacing import TokenBucket
 from .slice import SpecSlice
@@ -222,6 +222,10 @@ class SocketServer(object):
                 chunk = buf + chunk
             parts = chunk.split(b"\n")
             buf = parts.pop()  # unterminated remainder, if any
+            if self._envelope == "hec":
+                if not self._handle_hec_lines(parts):
+                    return  # bucket closed: draining
+                continue
             for line in parts:
                 if not self._handle_line(line):
                     return  # bucket closed: draining
@@ -229,6 +233,43 @@ class SocketServer(object):
                 log.warning("discarding %d bytes of unterminated data", len(buf))
                 self._inc_malformed()
                 buf = b""
+
+    def _handle_hec_lines(self, parts):
+        # type: (List[bytes]) -> bool
+        """HEC-line envelope, batched: every line of one socket read is shape
+        checked, paced with ONE bucket call per grant (``acquire_many``) and
+        handed to the HEC client as ONE queue item, instead of a bucket call,
+        a queue put and a counter update per event. Pacing is unchanged: a
+        grant never exceeds what the wall clock already owes. Returns False
+        only when draining."""
+        good = []  # type: List[bytes]
+        bad = 0
+        for raw in parts:
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith(b"{") and line.endswith(b"}"):
+                good.append(line)
+            else:
+                bad += 1
+        if bad:
+            self._inc_malformed(bad)
+        while good:
+            if self._gated:
+                granted = self._bucket.acquire_many(len(good))
+                if granted == 0:
+                    return False  # closed for drain
+            else:
+                if self._bucket.closed:
+                    return False
+                granted = len(good)
+            batch, good = good[:granted], good[granted:]
+            try:
+                self._hec.put_lines(batch)
+            except RuntimeError:
+                return False  # hec stopped during drain
+            self._inc_received(len(batch))
+        return True
 
     def _handle_hec_line(self, line):
         # type: (bytes) -> bool

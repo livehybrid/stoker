@@ -19,6 +19,10 @@ class FakeHec(object):
         with self._lock:
             self.events.append(envelope)
 
+    def put_lines(self, lines):
+        with self._lock:
+            self.events.extend(lines)
+
     def __len__(self):
         with self._lock:
             return len(self.events)
@@ -323,3 +327,26 @@ def test_unknown_envelope_rejected(sock_path):
     with pytest.raises(ValueError):
         SocketServer(sock_path, FakeHec(), open_bucket(), make_filler(make_slice()),
                      envelope="csv")
+
+
+
+def test_hec_envelope_paces_batches_to_the_bucket_rate(sock_path):
+    """Batched HEC-line reads still deliver the bucket's rate, not the socket's."""
+    hec = FakeHec()
+    bucket = TokenBucket(500.0, catchup_s=5.0)
+    bucket.anchor_at(time.time())
+    server = SocketServer(sock_path, hec, bucket, make_filler(make_slice()),
+                          gated=True, envelope="hec")
+    server.start()
+    try:
+        client = connect(sock_path)
+        payload = b'{"event":"x"}\n' * 5000
+        sender = threading.Thread(target=lambda: client.sendall(payload), daemon=True)
+        sender.start()
+        time.sleep(1.0)
+        n = len(hec)
+        assert 400 <= n <= 620, n          # ~500 eps for 1 s (+ small startup slack)
+        client.close()
+    finally:
+        bucket.close()
+        server.stop()

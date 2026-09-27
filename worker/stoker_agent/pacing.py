@@ -130,6 +130,44 @@ class TokenBucket(object):
                     wait = min(wait, remaining)
                 self._cond.wait(wait)
 
+    def acquire_many(self, n, timeout=None):
+        # type: (int, Optional[float]) -> int
+        """Block until at least one event may be released, then release as
+        many of ``n`` as the quota allows right now, in one lock round-trip.
+
+        Returns the number released (``1..n``), or ``0`` when closed or the
+        timeout elapses. The same owed(t) accounting as :meth:`acquire`, so a
+        batch never runs ahead of the wall clock: it releases only what is
+        already owed, and the caller comes back for the remainder.
+        """
+        if n <= 0:
+            return 0
+        deadline = None
+        if timeout is not None:
+            deadline = time.monotonic() + timeout
+        with self._cond:
+            while True:
+                if self._closed:
+                    return 0
+                if not self._paused:
+                    now = self._clock()
+                    self._cap_backlog(now)
+                    available = int(self._owed(now) - self._released)
+                    if available >= 1:
+                        granted = min(n, available)
+                        self._released += granted
+                        return granted
+                    next_in = (self._released + 1 - self._owed(now)) / self._rate
+                else:
+                    next_in = self._WAIT_SLICE_S
+                wait = min(max(next_in, 0.0), self._WAIT_SLICE_S)
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return 0
+                    wait = min(wait, remaining)
+                self._cond.wait(wait)
+
     # -- observability ---------------------------------------------------------
 
     def lag_s(self):

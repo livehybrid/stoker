@@ -35,9 +35,10 @@ def sink_stats(port):
         return json.loads(r.read().decode())
 
 
-def start_sink(port, token):
+def start_sink(port, token, kind="fast"):
+    script = "fast_sink.py" if kind == "fast" else "hec_sink.py"
     proc = subprocess.Popen(
-        [sys.executable, str(REPO / "tools" / "hec_sink.py"), "--port", str(port), "--token", token],
+        [sys.executable, str(REPO / "tools" / script), "--port", str(port), "--token", token],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     for _ in range(100):
@@ -126,6 +127,8 @@ def main(argv=None):
     ap.add_argument("--threads", type=int, default=0, help="STOKER_FIREBOX_THREADS (0 = all cores)")
     ap.add_argument("--port", type=int, default=18089)
     ap.add_argument("--skip-raw", action="store_true")
+    ap.add_argument("--sink", choices=("fast", "validating"), default="fast",
+                    help="fast = count-only sink (never the bottleneck); validating = tools/hec_sink.py")
     ap.add_argument("--out", help="write JSON results here")
     args = ap.parse_args(argv)
 
@@ -136,7 +139,7 @@ def main(argv=None):
         raise SystemExit("firebox binary not found: set FIREBOX_BIN or put it on PATH")
     rates = [int(r) for r in args.rates.split(",") if r.strip()]
     token = "bench-token"
-    sink = start_sink(args.port, token)
+    sink = start_sink(args.port, token, args.sink)
     results = {"pack": str(pack), "host": os.uname().nodename, "cpus": os.cpu_count(), "runs": [], "firebox_raw": []}
     try:
         for engine in engines:
