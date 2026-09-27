@@ -271,9 +271,9 @@ defaults:
 mode = replay
 sampleFile = dataset/events.log
 timeMultiple = 1.0
-token.0.token = SystemTime='(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z)'
+token.0.token = SystemTime='(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6})
 token.0.replacementType = replaytimestamp
-token.0.replacement = %Y-%m-%dT%H:%M:%S.%f000Z
+token.0.replacement = %Y-%m-%dT%H:%M:%S.%f
 ```
 
 Layout:

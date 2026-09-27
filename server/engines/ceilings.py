@@ -53,9 +53,12 @@ from typing import Any, Dict, Mapping, Optional
 # engine -> built-in default ceilings (the lowest layer of resolve_ceilings).
 # Extend as engines are added.
 CEILINGS = {
+    # eventgen as the image runs it by default: firebox with the HEC-line
+    # envelope. Measured 2026-09-26 (docs/BENCHMARKS.md): exact delivery to
+    # 10,000 eps per worker at ~313 bytes/event, i.e. ~270 GB/day.
     "eventgen": {
-        "max_gb_day_per_worker": 25.0,
-        "max_eps_per_worker": 5000.0,
+        "max_gb_day_per_worker": 250.0,
+        "max_eps_per_worker": 10000.0,
     },
     # rawreplay reuses eventgen's per-worker bounds (documented in the module
     # docstring): in RATE mode the same token bucket paces it, and a replay run
@@ -64,6 +67,15 @@ CEILINGS = {
         "max_gb_day_per_worker": 25.0,
         "max_eps_per_worker": 5000.0,
     },
+}
+
+# A spec pinned to the vendored Python eventgen (``eventgen_impl = python``)
+# keeps the historical bounds: that engine never reaches them on commodity
+# hardware, so these are an upper limit rather than a promise. Not an engine of
+# its own (it has no entry in CEILINGS, so fleets/env address it as eventgen).
+PYTHON_EVENTGEN_CEILINGS = {
+    "max_gb_day_per_worker": 25.0,
+    "max_eps_per_worker": 5000.0,
 }
 
 # The two bound keys, shared by the built-in table, the Settings fields and the
@@ -119,8 +131,8 @@ def _normalise_bound(value):
     return value if value > 0 else None
 
 
-def resolve_ceilings(engine="eventgen", settings=None, fleet_config=None):
-    # type: (str, Optional[Any], Optional[Mapping[str, Any]]) -> Optional[Dict[str, Optional[float]]]
+def resolve_ceilings(engine="eventgen", settings=None, fleet_config=None, impl=None):
+    # type: (str, Optional[Any], Optional[Mapping[str, Any]], Optional[str]) -> Optional[Dict[str, Optional[float]]]
     """Resolve the effective per-worker ceilings for ``engine``.
 
     Layers, most specific wins: the fleet row's ``config_json`` override, then
@@ -134,8 +146,14 @@ def resolve_ceilings(engine="eventgen", settings=None, fleet_config=None):
     and ``per_engine_ceilings`` attributes, all optional) so this module stays a
     pure function with no import of :mod:`server.config`; the API passes the
     real :class:`~server.config.Settings`.
+
+    ``impl`` is the spec's eventgen implementation; ``python`` swaps the
+    built-in layer for :data:`PYTHON_EVENTGEN_CEILINGS` (env and fleet
+    overrides still apply on top).
     """
     table = CEILINGS.get(engine)
+    if engine == "eventgen" and (impl or "").strip().lower() == "python":
+        table = PYTHON_EVENTGEN_CEILINGS
     if table is None:
         return None
     resolved = {key: table.get(key) for key in CEILING_KEYS}  # type: Dict[str, Optional[float]]

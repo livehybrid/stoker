@@ -27,7 +27,7 @@ export interface EffectiveCeiling {
 // FleetOut.ceilings is available it always wins, so these constants can only
 // disagree with the server for the moment the fleets query is in flight.
 export const CEILINGS: Record<string, EffectiveCeiling> = {
-  eventgen: { max_gb_day_per_worker: 25.0, max_eps_per_worker: 5000.0 },
+  eventgen: { max_gb_day_per_worker: 250.0, max_eps_per_worker: 10000.0 },
 };
 
 /**

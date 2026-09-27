@@ -900,7 +900,8 @@ def estimate_spec(spec_id: int, db: Session = Depends(get_db)):
         select(Fleet).where(Fleet.name == spec.fleet)).scalars().first()
     resolved = ceilings.resolve_ceilings(
         spec.engine, settings=get_settings(),
-        fleet_config=fleet_row.config_json if fleet_row is not None else None)
+        fleet_config=fleet_row.config_json if fleet_row is not None else None,
+        impl=spec.eventgen_impl)
     return _estimate(spec, bytes_per_event, resolved)
 
 
@@ -1200,7 +1201,8 @@ def run_spec(spec_id: int, body: RunLaunch, request: Request, db: Session = Depe
     per_worker = _per_worker_share(spec.rate_mode, spec.rate_value, spec.workers)
     resolved_ceilings = ceilings.resolve_ceilings(
         spec.engine, settings=get_settings(),
-        fleet_config=fleet_row.config_json if fleet_row is not None else None)
+        fleet_config=fleet_row.config_json if fleet_row is not None else None,
+        impl=spec.eventgen_impl)
     check = ceilings.check_slice(
         spec.rate_mode, per_worker, bytes_per_event=bytes_per_event,
         engine=spec.engine, ceilings=resolved_ceilings)
@@ -1682,7 +1684,8 @@ def _guard_run_ceiling(db, run, rate_mode, rate_value, workers):
         rate_mode, per_worker, bytes_per_event=bytes_per_event, engine=engine,
         ceilings=ceilings.resolve_ceilings(
             engine, settings=get_settings(),
-            fleet_config=fleet_row.config_json if fleet_row is not None else None))
+            fleet_config=fleet_row.config_json if fleet_row is not None else None,
+            impl=snap.get("eventgen_impl") or (spec.eventgen_impl if spec is not None else None)))
     if not check.ok:
         raise HTTPException(
             status_code=422,
@@ -1729,7 +1732,7 @@ def _estimate(spec, bytes_per_event, resolved_ceilings=None):
     bound (``None`` inside the table) yields no limit and no percentage.
     """
     if resolved_ceilings is None:
-        resolved_ceilings = ceilings.resolve_ceilings(spec.engine)
+        resolved_ceilings = ceilings.resolve_ceilings(spec.engine, impl=spec.eventgen_impl)
     workers = lifecycle.effective_workers(spec.engine, max(1, int(spec.workers)))
     per_worker = _per_worker_share(spec.rate_mode, spec.rate_value, workers)
     check = ceilings.check_slice(

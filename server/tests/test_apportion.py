@@ -30,6 +30,24 @@ from server.engines.ceilings import (
 )
 
 
+# These tests exercise the ceiling MECHANICS with numbers chosen around the
+# historical 25 GB/day / 5000 EPS table; pin it so a change to the shipped
+# defaults (raised 2026-09-27 for firebox) does not rewrite every scenario.
+# Tests about the real defaults opt out by name.
+_REAL_DEFAULT_TESTS = {"test_estimate_reports_default_effective_ceilings",
+                       "test_python_pinned_spec_keeps_the_historical_ceilings"}
+
+
+@pytest.fixture(autouse=True)
+def _legacy_ceiling_table(request, monkeypatch):
+    if request.node.name in _REAL_DEFAULT_TESTS:
+        return
+    from server.engines import ceilings as _ceilings
+    monkeypatch.setitem(_ceilings.CEILINGS, "eventgen",
+                        {"max_gb_day_per_worker": 25.0, "max_eps_per_worker": 5000.0})
+
+
+
 # --------------------------------------------------------------------------- #
 # largest_remainder: sums exactly, length preserved, non-negative.
 # --------------------------------------------------------------------------- #

@@ -15,10 +15,28 @@ from __future__ import annotations
 
 import dataclasses
 
+import pytest
 from sqlalchemy import select
 
 from server import config as config_mod
 from server.models import Fleet
+
+
+# These tests exercise the ceiling MECHANICS with numbers chosen around the
+# historical 25 GB/day / 5000 EPS table; pin it so a change to the shipped
+# defaults (raised 2026-09-27 for firebox) does not rewrite every scenario.
+# Tests about the real defaults opt out by name.
+_REAL_DEFAULT_TESTS = {"test_estimate_reports_default_effective_ceilings",
+                       "test_python_pinned_spec_keeps_the_historical_ceilings"}
+
+
+@pytest.fixture(autouse=True)
+def _legacy_ceiling_table(request, monkeypatch):
+    if request.node.name in _REAL_DEFAULT_TESTS:
+        return
+    from server.engines import ceilings as _ceilings
+    monkeypatch.setitem(_ceilings.CEILINGS, "eventgen",
+                        {"max_gb_day_per_worker": 25.0, "max_eps_per_worker": 5000.0})
 
 from . import _helpers
 
@@ -62,9 +80,20 @@ def test_estimate_reports_default_effective_ceilings(client, db_session, setting
     assert est.status_code == 200
     body = est.json()
     assert body["ok"] is True
-    assert body["ceilings"] == {"max_gb_day_per_worker": 25.0,
-                                "max_eps_per_worker": 5000.0}
-    assert body["ceiling_limit"] == 5000.0
+    assert body["ceilings"] == {"max_gb_day_per_worker": 250.0,
+                                "max_eps_per_worker": 10000.0}
+    assert body["ceiling_limit"] == 10000.0
+
+
+def test_python_pinned_spec_keeps_the_historical_ceilings():
+    from server.engines import ceilings
+    assert ceilings.resolve_ceilings("eventgen", impl="python") == {
+        "max_gb_day_per_worker": 25.0, "max_eps_per_worker": 5000.0}
+    assert ceilings.resolve_ceilings("eventgen", impl="firebox")["max_eps_per_worker"] == 10000.0
+    assert ceilings.resolve_ceilings("eventgen", impl=None)["max_gb_day_per_worker"] == 250.0
+    # overrides still layer on top of the python table
+    assert ceilings.resolve_ceilings("eventgen", impl="python",
+                                     fleet_config={"max_eps_per_worker": 800})["max_eps_per_worker"] == 800.0
 
 
 # --------------------------------------------------------------------------- #
