@@ -159,3 +159,41 @@ def test_retarget_carries_the_engine_report():
     assert lease.share_json["_engine_impl"] == "firebox"
     assert lease.share_json["_envelope"] == "hec"
     assert lease.share_json["eps"] == 300.0
+
+
+
+# ---- rate_shape (time-of-day shaping) ----
+
+def test_rate_shape_round_trips_and_reaches_the_slice(client, db_session, settings, make_pack):
+    target = _helpers.make_target(db_session, settings=settings)
+    pack = _helpers.make_pack(db_session, make_pack())
+    db_session.commit()
+    r = client.post("/api/specs", json=_spec_body(pack.id, target.id, rate_shape="PACK"))
+    assert r.status_code == 201, r.text
+    spec = r.json()
+    assert spec["rate_shape"] == "pack"
+    assert client.put("/api/specs/%d" % spec["id"], json={"rate_shape": "flat"}).json()["rate_shape"] is None
+    assert client.post("/api/specs", json=_spec_body(pack.id, target.id, rate_shape="sine")).status_code == 422
+
+    from server.models import Spec
+    s = db_session.get(Spec, spec["id"])
+    s.rate_shape = "pack"
+    db_session.flush()
+    snap = lifecycle.build_spec_snapshot(s, target)
+    assert snap["rate_shape"] == "pack"
+    run = Run(spec_id=s.id, jwt_kid=crypto.new_kid(), spec_snapshot_json=snap)
+    db_session.add(run)
+    db_session.flush()
+    lifecycle.seed_leases(db_session, run, lifecycle.build_share_list("eps", 100.0, 1))
+    db_session.flush()
+    lease = lifecycle.get_run_leases(db_session, run)[0]
+    doc = lifecycle.build_slice(run, lease, settings=settings)
+    assert doc["rate_shape"] == "pack"
+    from server.schemas import SpecSliceOut
+    wire = dict(doc, bundle={"url": "https://cp.example/bundle.tgz", "sha256": "0" * 64})  # no bundle built here
+    assert SpecSliceOut.model_validate(wire).model_dump()["rate_shape"] == "pack"   # survives the response_model
+
+    s.rate_shape = None
+    db_session.flush()
+    run.spec_snapshot_json = lifecycle.build_spec_snapshot(s, target)
+    assert "rate_shape" not in lifecycle.build_slice(run, lease, settings=settings)

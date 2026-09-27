@@ -494,3 +494,46 @@ def test_engine_report_rides_the_heartbeat(tmp_path, monkeypatch):
     agent = Agent(load_config(env))
     assert agent._eventgen_envelope(load_config(env), sl, True)[0] == "stoker"
     assert "engine_impl" not in agent._heartbeat_payload(sl)
+
+
+
+def test_rate_shape_pack_scales_the_engine_and_the_bucket(tmp_path, monkeypatch):
+    """rate_shape=pack: the rewritten conf asks the engine for the curve's
+    PEAK, the bucket starts at the shaped rate for 'now', and each run-loop
+    tick re-aims it (continuous owed(t))."""
+    import json as _json
+    from stoker_agent import shaping as _shaping
+    pack = tmp_path / "shaped"
+    (pack / "default").mkdir(parents=True)
+    (pack / "samples").mkdir()
+    (pack / "samples" / "s.sample").write_text("line\n")
+    hours = {str(h): (2.0 if 9 <= h < 17 else 0.5) for h in range(24)}
+    (pack / "default" / "eventgen.conf").write_text(
+        "[s.sample]\ncount = 10\ninterval = 1\nhourOfDayRate = %s\n" % _json.dumps(hours))
+    monkeypatch.setenv("STOKER_RATE_SHAPE", "pack")
+    env = {
+        "STOKER_STANDALONE": "1", "STOKER_BUNDLE": str(pack),
+        "STOKER_HEC_URL": "http://fake-hec:8088", "STOKER_HEC_TOKEN": "tok",
+        "STOKER_INDEX": "loadtest", "STOKER_RATE_MODE": "eps", "STOKER_RATE_VALUE": "100",
+        "STOKER_DURATION_S": "1", "STOKER_OUTPUT_SOCKET": str(tmp_path / "out.sock"),
+        "STOKER_METRICS_PORT": "0", "STOKER_HEARTBEAT_S": "1",
+    }
+    cfg = load_config(env)
+    sl = SpecSlice.from_standalone(cfg)
+    assert sl.rate_shape == "pack"
+    busy = time.mktime((2026, 9, 28, 10, 0, 0, 0, 0, -1))
+    agent = Agent(cfg, clock=lambda: busy)
+
+    class _P(object):
+        conf_path = str(pack / "default" / "eventgen.conf")
+
+    agent._setup_shape(sl, _P(), False)
+    assert agent._shape is not None and agent._shape.peak_ratio == 2.0
+    assert agent._engine_share(sl) == 200.0          # engine produces the peak
+    assert abs(agent._shape.rate(100.0, busy) - 200.0) < 1e-6
+
+    # a flat spec is untouched
+    sl.rate_shape = None
+    agent2 = Agent(cfg, clock=lambda: busy)
+    agent2._setup_shape(sl, _P(), False)
+    assert agent2._shape is None and agent2._engine_share(sl) == 100.0

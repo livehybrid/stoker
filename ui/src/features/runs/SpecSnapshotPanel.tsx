@@ -27,6 +27,7 @@ interface Snapshot {
   // Eventgen implementation knob frozen with the spec (eventgen engine only).
   eventgen_impl?: string | null;
   fast_envelope?: boolean | null;
+  rate_shape?: string | null;
   target?: {
     id?: number;
     name?: string;
@@ -82,6 +83,9 @@ export function SpecSnapshotPanel({ snapshot }: { snapshot: unknown }) {
         />
         {snap.engine === "eventgen" && (
           <Row label="Eventgen impl" value={snap.eventgen_impl ?? "auto"} />
+        )}
+        {snap.rate_mode === "eps" && (
+          <Row label="Rate shape" value={snap.rate_shape === "pack" ? "pack's time-of-day curve" : "flat"} />
         )}
         {snap.engine === "eventgen" && (
           <Row

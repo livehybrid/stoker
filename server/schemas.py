@@ -346,6 +346,19 @@ def _normalise_impl(v):
     return v
 
 
+def _normalise_shape(v):
+    # type: (Optional[str]) -> Optional[str]
+    """``flat``/blank -> None (the historical default), ``pack`` kept."""
+    if v is None:
+        return None
+    v = v.strip().lower()
+    if v in ("", "flat"):
+        return None
+    if v != "pack":
+        raise ValueError("rate_shape must be flat or pack")
+    return v
+
+
 class SpecCreate(BaseModel):
     name: str
     pack_id: int
@@ -372,12 +385,21 @@ class SpecCreate(BaseModel):
     # False keeps the classic socket envelope even with firebox
     # (STOKER_FAST_ENVELOPE=0); None/True = the HEC-line envelope default.
     fast_envelope: Optional[bool] = None
+    # flat (default) or pack: follow the pack's time-of-day maps with the
+    # configured eps as the average (eventgen eps runs only).
+    rate_shape: Optional[str] = None
 
     @field_validator("eventgen_impl")
     @classmethod
     def _validate_eventgen_impl(cls, v):
         # type: (Optional[str]) -> Optional[str]
         return _normalise_impl(v)
+
+    @field_validator("rate_shape")
+    @classmethod
+    def _validate_rate_shape(cls, v):
+        # type: (Optional[str]) -> Optional[str]
+        return _normalise_shape(v)
 
     @field_validator("engine")
     @classmethod
@@ -413,12 +435,19 @@ class SpecUpdate(BaseModel):
     # Send "auto" (or null) to clear back to the worker default.
     eventgen_impl: Optional[str] = None
     fast_envelope: Optional[bool] = None
+    rate_shape: Optional[str] = None
 
     @field_validator("eventgen_impl")
     @classmethod
     def _validate_eventgen_impl(cls, v):
         # type: (Optional[str]) -> Optional[str]
         return _normalise_impl(v)
+
+    @field_validator("rate_shape")
+    @classmethod
+    def _validate_rate_shape(cls, v):
+        # type: (Optional[str]) -> Optional[str]
+        return _normalise_shape(v)
 
     @field_validator("engine")
     @classmethod
@@ -454,6 +483,7 @@ class SpecOut(BaseModel):
     driver_opts_json: Optional[Dict[str, Any]] = None
     eventgen_impl: Optional[str] = None
     fast_envelope: Optional[bool] = None
+    rate_shape: Optional[str] = None
     created_at: datetime.datetime
 
 
@@ -688,6 +718,8 @@ class SpecSliceOut(BaseModel):
     # Present only on a backfill run; None otherwise. MUST be declared or the
     # response_model silently drops the backfill window from every claim.
     backfill: Optional[BackfillSlice] = None
+    # "pack" on a shaped eps run; absent otherwise. Declared for the same reason.
+    rate_shape: Optional[str] = None
 
 
 class ReadyRequest(BaseModel):

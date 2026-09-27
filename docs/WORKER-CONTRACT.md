@@ -106,6 +106,7 @@ Defaults in brackets; each is validated with the stated minimum:
 | `STOKER_EVENTGEN_IMPL` | `auto` | `auto` (firebox when a binary is found, else python), `firebox` (required; a missing binary fails the run with a config error), `python` (force the vendored eventgen) |
 | `STOKER_FIREBOX_BIN` | none | explicit path to the firebox binary; otherwise `firebox` on `PATH` (`/usr/local/bin/firebox` in the image) |
 | `STOKER_FIREBOX_THREADS` | none | passed as `--threads`; default = every CPU the cgroup allows |
+| `STOKER_RATE_SHAPE` | none | standalone: `pack` makes an eventgen eps run follow the pack's time-of-day maps with the eps as the average (managed runs get it as the slice's `rate_shape`) |
 | `STOKER_FAST_ENVELOPE` | `1` | `0` keeps the classic socket envelope with firebox (see "HEC-line envelope"); the control plane projects it from the spec's `fast_envelope` |
 | `FIREBOX_SOCKET_CONNECTIONS` | `per-thread` | firebox opens one agent-socket connection per generator thread (`single` shares one) |
 | `EVENTGEN_LOG_DIR` | `<workdir>/eventgen-logs` | eventgen's rotating log dir (created if absent); the agent sets it when unset |

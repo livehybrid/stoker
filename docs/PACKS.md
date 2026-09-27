@@ -170,6 +170,23 @@ both are honoured by the in-app [preview renderer](#) too:
   envelope `time` to now regardless, so `_time` is correct) or template the event
   around a human-readable timestamp field instead.
 
+### Time-of-day shaping in eps runs (`rate_shape`)
+
+An eps run is a flat rate by default, and the conf rewrite strips the pack's
+`hourOfDayRate` / `dayOfWeekRate` / `minuteOfHourRate` / `dayOfMonthRate` /
+`monthOfYearRate` maps so the engine cannot under-produce. Set a spec's **Rate
+shape** to *Pack's time-of-day curve* (`rate_shape: pack`) and the maps move
+into the agent instead: the engine is rewritten to produce the curve's peak, and
+the agent's token bucket follows `eps x factor(t) / mean factor`, re-aimed on
+every tick with owed events kept continuous (no burst or stall at an hour
+boundary). The configured eps is therefore the **average**: a day of a pack
+whose busy hours run at twice its quiet hours delivers the same volume as a flat
+run, shaped. Factors use eventgen's rules (local time, Sunday = 0, a missing key
+leaves the factor alone); the mean is the product of each map's mean. Only for
+eventgen eps runs (backfill stays flat). The per-worker ceiling is checked
+against the average; size the fleet for the peak (`peak / mean` times the
+share, logged when the run starts).
+
 ### sample vs replay mode inside eventgen.conf
 
 `mode` in `eventgen.conf` is an eventgen concept distinct from the pack engine:

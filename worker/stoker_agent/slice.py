@@ -72,6 +72,9 @@ class SpecSlice:
     backfill_start_s: Optional[float] = None   # epoch (window start)
     backfill_end_s: Optional[float] = None     # epoch (window end)
     backfill_resolution_s: Optional[float] = None  # metrics step (default: pack resolution)
+    # "pack": an eps run follows the pack's time-of-day maps (see shaping.py);
+    # None/"flat": the classic flat rate.
+    rate_shape: Optional[str] = None
 
     @classmethod
     def from_claim(cls, doc):
@@ -150,6 +153,7 @@ class SpecSlice:
             backfill_start_s=float(bf_start) if bf_start is not None else None,
             backfill_end_s=float(bf_end) if bf_end is not None else None,
             backfill_resolution_s=float(bf_res) if bf_res is not None else None,
+            rate_shape=(doc.get("rate_shape") or None),
         )
 
     @classmethod
@@ -205,6 +209,7 @@ class SpecSlice:
             backfill_start_s=_envf("STOKER_BACKFILL_START_S"),
             backfill_end_s=_envf("STOKER_BACKFILL_END_S"),
             backfill_resolution_s=_envf("STOKER_BACKFILL_RESOLUTION_S"),
+            rate_shape=((__import__("os").environ.get("STOKER_RATE_SHAPE") or "").strip().lower() or None),
         )
 
     def hec_defaults(self):

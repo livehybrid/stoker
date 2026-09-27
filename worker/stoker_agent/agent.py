@@ -25,6 +25,7 @@ from .control import (ControlClient, DeadManError, StandaloneControl,
 from .engine import (STOP_GRACE_S, EngineError, EngineRunner,
                      MetricsRunner, RawReplayRunner, eventgen_impl)
 from .metrics import CpuTracker, Metrics, read_rss_mb
+from . import shaping
 from .pacing import TokenBucket
 from .slice import SliceError, SpecSlice, parse_iso8601
 from .sockserver import SocketServer, make_filler
@@ -169,6 +170,10 @@ class Agent(object):
         # Which eventgen implementation this worker runs (firebox | python)
         # and which socket envelope it speaks; reported on heartbeats.
         self._engine_impl = None      # type: Optional[str]
+        # rate_shape=pack: the curve the bucket follows, and the unshaped
+        # (average) eps it is scaled from.
+        self._shape = None            # type: Optional[shaping.ShapeCurve]
+        self._shape_share = None      # type: Optional[float]
         self._envelope = None         # type: Optional[str]
         # measured-eps window
         self._last_events = 0
@@ -209,6 +214,10 @@ class Agent(object):
                 share_eps = self._gating_eps(sl, pack.estimates)
                 is_rawreplay = sl.engine == "rawreplay"
                 is_metrics = sl.engine == "metrics"
+                self._setup_shape(sl, pack, is_rawreplay or is_metrics)
+                if self._shape is not None:
+                    self._shape_share = share_eps
+                    share_eps = self._shape.rate(share_eps, self._clock())
                 if not is_rawreplay and not is_metrics:
                     # eventgen: rewrite the pack's conf for this worker's share.
                     # A backfill window turns it into an eventgen backfill run.
@@ -216,7 +225,7 @@ class Agent(object):
                     if sl.backfill_start_s is not None and sl.backfill_end_s is not None:
                         backfill_window_s = sl.backfill_end_s - sl.backfill_start_s
                     confrewrite.rewrite_file(
-                        pack.conf_path, conf_path, sl.rate_mode, sl.rate_value,
+                        pack.conf_path, conf_path, sl.rate_mode, self._engine_share(sl),
                         cfg.overdrive, pack.samples_dir,
                         slot=sl.slot, total_workers=sl.total_workers,
                         backfill_window_s=backfill_window_s)
@@ -442,6 +451,48 @@ class Agent(object):
         return "hec", {"STOKER_ENVELOPE": "hec",
                        "STOKER_ENVELOPE_META": json.dumps(policy)}
 
+    def _setup_shape(self, sl, pack, other_engine):
+        # type: (SpecSlice, Any, bool) -> None
+        """rate_shape=pack on an eventgen eps run (not a backfill): read the
+        pack's time-of-day maps before the rewrite strips them."""
+        self._shape = None
+        if (sl.rate_shape or "flat") != "pack":
+            return
+        if other_engine or sl.rate_mode != "eps" or sl.backfill_start_s is not None:
+            log.info("rate_shape=pack applies to eventgen eps runs only; running flat")
+            return
+        try:
+            curve = shaping.curve_from_conf(pack.conf_path)
+        except confrewrite.ConfRewriteError as exc:
+            log.warning("cannot read the pack's rate maps (%s); running flat", exc)
+            return
+        if curve is None:
+            log.warning("rate_shape=pack but the pack declares no time-of-day maps; running flat")
+            return
+        self._shape = curve
+        log.info("shaping eps to the pack's time-of-day curve: peak %.2fx the average",
+                 curve.peak_ratio)
+
+    def _engine_share(self, sl):
+        # type: (SpecSlice) -> Optional[float]
+        """What the conf rewrite should make the engine produce: the share, or
+        with shaping the curve's peak, so the busiest hour is never starved."""
+        if self._shape is not None and sl.rate_value is not None:
+            return sl.rate_value * self._shape.peak_ratio
+        return sl.rate_value
+
+    def _apply_shape(self):
+        # type: () -> None
+        """Re-aim the bucket at the curve's current rate. retarget() keeps
+        owed(t) continuous, so crossing an hour boundary neither bursts nor
+        stalls. Skipped for changes under 0.5% to avoid churn."""
+        if self._shape is None or self._bucket is None or self._shape_share is None:
+            return
+        want = self._shape.rate(self._shape_share, self._clock())
+        have = self._bucket.rate
+        if abs(want - have) > 0.005 * max(have, 1e-9):
+            self._bucket.retarget(want)
+
     def _set_assigned(self, count, unit, reason_when_zero=None):
         # type: (int, str, Optional[str]) -> None
         """Record how much work this worker holds (reported on heartbeats).
@@ -617,6 +668,7 @@ class Agent(object):
                 self.request_drain("dead-man")
                 break
             self._check_fencing(control)
+            self._apply_shape()
 
             if time.monotonic() >= next_hb:
                 next_hb = time.monotonic() + interval
@@ -687,6 +739,9 @@ class Agent(object):
         old_value = sl.rate_value
         sl.rate_value = new_value
         new_eps = self._gating_eps(sl, pack.estimates)
+        if self._shape is not None:
+            self._shape_share = new_eps
+            new_eps = self._shape.rate(new_eps, self._clock())
         if sl.rate_mode == "count_interval":
             log.info("retarget count %s -> %s: conf rewrite + engine restart",
                      old_value, new_value)
@@ -707,7 +762,7 @@ class Agent(object):
     def _rewrite_and_restart(self, sl, conf_path, pack):
         # type: (SpecSlice, str, Any) -> None
         confrewrite.rewrite_file(
-            pack.conf_path, conf_path, sl.rate_mode, sl.rate_value,
+            pack.conf_path, conf_path, sl.rate_mode, self._engine_share(sl),
             self._cfg.overdrive, pack.samples_dir,
             slot=sl.slot, total_workers=sl.total_workers)
         self._record_assigned_eventgen(conf_path, sl)

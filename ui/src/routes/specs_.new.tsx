@@ -71,6 +71,8 @@ interface FormState {
   // "python", and whether firebox uses the HEC-line socket envelope.
   eventgen_impl: string;
   fast_envelope: boolean;
+  // eps + eventgen: "flat" or "pack" (follow the pack's time-of-day maps).
+  rate_shape: string;
   overrides: Record<OverrideKey, string>;
 }
 
@@ -90,6 +92,7 @@ function emptyForm(): FormState {
     strict_release: false,
     eventgen_impl: "auto",
     fast_envelope: true,
+    rate_shape: "flat",
     overrides: { index: "", sourcetype: "", source: "", host: "" },
   };
 }
@@ -111,6 +114,7 @@ function formFromSpec(spec: SpecOut): FormState {
     strict_release: !!spec.strict_release,
     eventgen_impl: spec.eventgen_impl ?? "auto",
     fast_envelope: spec.fast_envelope !== false,
+    rate_shape: spec.rate_shape ?? "flat",
     overrides: {
       index: str(ov.index),
       sourcetype: str(ov.sourcetype),
@@ -409,6 +413,7 @@ function JobWizard() {
       strict_release: form.strict_release,
       eventgen_impl: form.eventgen_impl === "auto" ? null : form.eventgen_impl,
       fast_envelope: form.fast_envelope ? null : false,
+      rate_shape: form.rate_shape === "pack" ? "pack" : null,
       overrides: collectOverrides(form.overrides),
     };
   }
@@ -431,6 +436,7 @@ function JobWizard() {
       // "auto" clears back to the worker default server-side.
       eventgen_impl: form.eventgen_impl === "auto" ? null : form.eventgen_impl,
       fast_envelope: form.fast_envelope ? null : false,
+      rate_shape: form.rate_shape === "pack" ? "pack" : null,
       overrides: collectOverrides(form.overrides),
     };
   }
@@ -726,6 +732,17 @@ function JobWizard() {
                   <Select.Option value="python" label="python (vendored eventgen)" />
                 </Select>
               </Field>
+              {form.rate_mode === "eps" && (
+                <Field
+                  label="Rate shape"
+                  hint="Follow the pack's hourOfDayRate / dayOfWeekRate maps; the EPS above becomes the average"
+                >
+                  <Select value={form.rate_shape} onChange={(_e, { value }) => patch({ rate_shape: String(value) })}>
+                    <Select.Option value="flat" label="Flat (the same rate all day)" />
+                    <Select.Option value="pack" label="Pack's time-of-day curve" />
+                  </Select>
+                </Field>
+              )}
               <Field label="Socket envelope (firebox)">
                 <Switch
                   appearance="checkbox"

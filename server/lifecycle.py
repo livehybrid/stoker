@@ -2379,6 +2379,9 @@ def build_slice(run, lease, settings=None):
     # A backfill run carries the historical window for the worker (both engines).
     if snap.get("backfill"):
         slice_doc["backfill"] = snap["backfill"]
+    # Time-of-day shaping (eps eventgen runs; the agent ignores it otherwise).
+    if snap.get("rate_shape") == "pack":
+        slice_doc["rate_shape"] = "pack"
     return slice_doc
 
 
@@ -2433,6 +2436,7 @@ def build_spec_snapshot(spec, target, overrides=None, rate_mode=None,
         "driver_opts": spec.driver_opts_json or {},
         "eventgen_impl": getattr(spec, "eventgen_impl", None) or "auto",
         "fast_envelope": getattr(spec, "fast_envelope", None) is not False,
+        "rate_shape": getattr(spec, "rate_shape", None) or "flat",
         "target": {
             "id": target.id,
             "name": target.name,

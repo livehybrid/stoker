@@ -227,6 +227,9 @@ class Spec(Base):
     # False keeps the classic socket envelope even with firebox
     # (STOKER_FAST_ENVELOPE=0); null/True = the HEC-line envelope default.
     fast_envelope: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    # "pack": an eps run follows the pack's time-of-day maps, the configured
+    # eps being the average (agent-side shaping). null = flat (historical).
+    rate_shape: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     created_at: Mapped[datetime.datetime] = _ts_column(nullable=False, default=utcnow)
 
     pack: Mapped[Pack] = relationship(back_populates="specs")

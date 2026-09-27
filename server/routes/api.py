@@ -797,6 +797,7 @@ def create_spec(body: SpecCreate, db: Session = Depends(get_db)):
         driver_opts_json=body.driver_opts or None,
         eventgen_impl=body.eventgen_impl,
         fast_envelope=body.fast_envelope,
+        rate_shape=body.rate_shape,
     )
     db.add(spec)
     db.commit()
@@ -856,6 +857,7 @@ def export_spec(spec_id: int, db: Session = Depends(get_db)):
         "driver_opts": spec.driver_opts_json or None,
         "eventgen_impl": spec.eventgen_impl,
         "fast_envelope": spec.fast_envelope,
+        "rate_shape": spec.rate_shape,
     }
     body = {k: v for k, v in body.items() if v is not None}
 

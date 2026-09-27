@@ -274,6 +274,8 @@ export interface SpecCreate {
   eventgen_impl?: string | null;
   // false keeps the classic socket envelope with firebox; null = HEC-line.
   fast_envelope?: boolean | null;
+  // "pack": eps follows the pack's time-of-day maps (eps = average); null = flat.
+  rate_shape?: string | null;
 }
 
 // Partial update; unset fields are left unchanged (send only what changes).
@@ -296,6 +298,7 @@ export type SpecUpdate = Partial<{
   driver_opts: Record<string, unknown> | null;
   eventgen_impl: string | null;
   fast_envelope: boolean | null;
+  rate_shape: string | null;
 }>;
 
 export interface SpecOut {
@@ -317,6 +320,7 @@ export interface SpecOut {
   driver_opts_json?: Record<string, unknown> | null;
   eventgen_impl?: string | null;
   fast_envelope?: boolean | null;
+  rate_shape?: string | null;
   created_at: string;
 }
 

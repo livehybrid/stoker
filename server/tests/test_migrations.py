@@ -130,7 +130,7 @@ def test_delta_0003_adds_specs_extra_pack_ids(tmp_path):
     assert "extra_pack_ids_json" not in _spec_columns()
 
     run_migrations()  # managed at 0002 -> upgrade head applies 0003 (and on)
-    assert _head_rev() == "0004_spec_eventgen_impl"
+    assert _head_rev() == "0005_spec_rate_shape"
     assert "extra_pack_ids_json" in _spec_columns()
 
 
@@ -179,6 +179,35 @@ def test_delta_0004_adds_specs_eventgen_impl(tmp_path):
         command.stamp(cfg, "0003_spec_extra_pack_ids", purge=True)
     assert not ({"eventgen_impl", "fast_envelope"} & _spec_columns())
 
-    run_migrations()  # managed at 0003 -> upgrade head applies 0004
-    assert _head_rev() == "0004_spec_eventgen_impl"
+    run_migrations()  # managed at 0003 -> upgrade head applies 0004 (and on)
+    assert _head_rev() == "0005_spec_rate_shape"
     assert {"eventgen_impl", "fast_envelope"} <= _spec_columns()
+
+
+def test_delta_0005_adds_specs_rate_shape(tmp_path):
+    """A live DB stamped at 0004 gains ``specs.rate_shape`` from 0005."""
+    _use(tmp_path, "delta0005.db")
+    from alembic import command
+    from alembic.config import Config
+
+    from server.migrate import run_migrations
+
+    run_migrations()
+
+    def _spec_columns():
+        # type: () -> set
+        return {c["name"] for c in inspect(db_mod.get_engine()).get_columns("specs")}
+
+    assert "rate_shape" in _spec_columns()
+    with db_mod.get_engine().begin() as conn:
+        conn.execute(text("ALTER TABLE specs DROP COLUMN rate_shape"))
+        cfg = Config()
+        cfg.set_main_option(
+            "script_location",
+            os.path.join(os.path.dirname(db_mod.__file__), "migrations"))
+        cfg.attributes["connection"] = conn
+        command.stamp(cfg, "0004_spec_eventgen_impl", purge=True)
+    assert "rate_shape" not in _spec_columns()
+    run_migrations()
+    assert _head_rev() == "0005_spec_rate_shape"
+    assert "rate_shape" in _spec_columns()
