@@ -257,6 +257,14 @@ export const packs = {
   // is removed server-side). 409 when a spec references it or it came from a
   // repo (delete the repo instead).
   delete: (id: number) => request<void>("DELETE", `/packs/${id}`),
+  // URL of the pack export (.tar.gz) — the archive `upload` accepts on another
+  // instance. Used as a plain <a download> href rather than fetched: the
+  // browser streams the file straight to disk and the session cookie rides
+  // along (same origin). `includeDataset` false skips FETCHING a rawreplay
+  // dataset_url (a pack whose dataset is already a local file carries it
+  // either way), giving a fast copy that needs network on the receiving side.
+  exportUrl: (id: number, includeDataset = true) =>
+    `${API_BASE}/packs/${id}/export${includeDataset ? "" : "?include_dataset=false"}`,
   preview: (id: number) =>
     request<PackPreview>("GET", `/packs/${id}/preview`),
   // Render a few sample events in-process (no fleet, no HEC target). `n` is

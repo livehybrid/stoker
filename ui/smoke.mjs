@@ -391,6 +391,17 @@ const go = async (pathname) => {
     await go('/packs');
     await check('packs', 'apache-access');
     await check('packs: builder entry point', 'Build pack from events');
+    await check('packs: export entry point', 'Download');
+    // The download is a plain link so the browser saves the file; assert the
+    // href points at the export endpoint rather than being a no-op button.
+    {
+        const hrefs = Array.from(window.document.querySelectorAll('a[download]')).map((a) => a.getAttribute('href'));
+        if (!hrefs.some((h) => /\/api\/packs\/\d+\/export$/.test(h || ''))) {
+            problems.push(`packs: no pack export download link (saw ${JSON.stringify(hrefs)})`);
+        } else {
+            console.log('  ok  packs: export link href');
+        }
+    }
 
     await go('/pack-builder');
     await check('pack builder', 'Build a pack from events');

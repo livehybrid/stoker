@@ -642,6 +642,93 @@ curl -H "Authorization: Bearer stk_..." \
   a lying header does not help) plus the upload body itself — see the
   `PACK_UPLOAD_*` settings in the control-plane reference.
 
+The reverse direction is [Downloading a pack](#downloading-a-pack-moving-packs-between-instances).
+
+---
+
+## Downloading a pack (moving packs between instances)
+
+Every pack has a **Download** button on its card, and
+`GET /api/packs/{id}/export` behind it. The response is a `.tar.gz` that
+`POST /api/packs/upload` accepts **on another Stoker instance**, so a pack built
+here — usually in the pack builder — can move to a colleague's instance, a
+customer's air-gapped control plane, or into version control, with no git access
+on either side:
+
+```bash
+curl -H "Authorization: Bearer stk_..." -OJ \
+     https://stoker.example.com/api/packs/7/export
+curl -H "Authorization: Bearer stk_..." \
+     -F "file=@my-pack.tar.gz" https://other.example.com/api/packs/upload
+```
+
+The archive is rooted at one directory named after the pack and carries its
+source files: `pack.yaml`, `default/eventgen.conf`, everything under `samples/`,
+`stoker.json`, any `README.md`, the rawreplay dataset, and
+`stoker-builder.json` — so a builder pack **reopens in the receiving instance's
+builder** and stays editable there. It is reproducible (sorted members, fixed
+mtime/mode, zeroed gzip mtime), so exporting an unchanged pack twice gives
+identical bytes and a checksum is worth comparing across instances.
+
+Works for every kind of pack:
+
+| Pack | What is exported |
+|---|---|
+| local / uploaded / builder | its directory |
+| repo-synced | the tree at the pack's pinned `indexed_sha` — what its runs actually use, not the branch head |
+| metric pack (UI-authored) | a synthesised `pack.yaml` + `stoker.json` carrying the `metricgen` config, which the far side lints as a directory metric pack and can edit in its own metric builder |
+
+**rawreplay and the air-gap case.** A pack that only declares a `dataset_url`
+is not portable on its own: the receiving instance would have to fetch that URL
+when it builds a bundle, which an air-gapped one cannot. So the export fetches
+the dataset (through the same SSRF-safe, size-capped, gzip-decompressing path a
+bundle build uses), embeds it at `dataset/replay.dat`, and adds a `dataset:` key
+to the exported `pack.yaml`'s `replay:` block. A local `dataset` always wins
+over `dataset_url`, so the URL stays in the file as provenance and the pack
+replays with no network. Pass `?include_dataset=false` for a quick
+metadata-only copy instead.
+
+The response headers report what happened: `X-Stoker-Pack-Name`,
+`X-Stoker-Export-Members` and `X-Stoker-Dataset-Embedded`.
+
+**Limits.** The export is checked against the `PACK_UPLOAD_MAX_*` limits the
+*receiving* instance enforces (member count, per-file bytes, total unpacked
+bytes and the compressed body). Over one of them it is refused with `409
+pack_export_failed` naming the limit, rather than handing back an archive the
+other end would reject — for a very large dataset, export with
+`include_dataset=false` and move the data separately.
+
+**What is deliberately NOT exported.** Only the pack-shaped paths above, never a
+directory walk of `source_path`. `POST /api/packs` registers an arbitrary
+operator-supplied path, so a walk would turn "may register a path" into "may
+download any file the control plane can read". Symlinks, and any path whose real
+location escapes the pack root, are refused as well (the same guard the bundle
+builder applies), so a pack from an untrusted repo cannot smuggle a host file
+into the archive.
+
+**Moving many packs at once.** `tools/pack_sync.py` drives these two endpoints
+in a loop, with an operator token at each end:
+
+```bash
+# both instances reachable from here
+tools/pack_sync.py --from https://a.example.com --from-token stk_a \
+                   --to   https://b.example.com --to-token   stk_b --filter sc-ds-
+
+# or in two hops across an air gap
+tools/pack_sync.py --from https://a.example.com --from-token stk_a --out ./packs-out
+tools/pack_sync.py --in ./packs-out --to https://b.example.com --to-token stk_b
+```
+
+It skips a pack the destination already has (unless `--replace`), warns when one
+imports but fails lint, and exits non-zero if any pack failed. `--dry-run` lists
+what would move.
+
+For a large library that needs to stay in step over time, a git repo is still
+the better tool: register it on each instance and sync, including over `file://`
+from a path on the control plane's disk, which needs no remote at all.
+`git bundle create <file> --all` carries a whole repo through an air gap as a
+single file, and an incremental bundle carries later updates.
+
 ---
 
 ## Building a pack from sample events (pack builder)

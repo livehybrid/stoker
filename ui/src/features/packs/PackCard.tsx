@@ -11,7 +11,9 @@ import { packIsMetrics } from "../metrics/config";
 import { Between, Callout, Grid, Inline, Muted, Panel, Strong, Tags } from "../../components/text";
 
 // A pack card: lint + verified badges, sourcetypes, estimated bytes/event and
-// declared GB/day, with Preview and "New job from pack" (design section 10.4).
+// declared GB/day, with Download, Preview and "New job from pack" (design
+// section 10.4). Download exports the pack as the archive another instance's
+// "Upload pack" accepts, so a pack built here can move between instances.
 // Local packs (uploaded / registered / built here — no repo) also get Delete;
 // a repo-indexed pack's lifecycle belongs to its repo, so no delete appears
 // for those (the server refuses it anyway).
@@ -143,6 +145,16 @@ export function PackCard({ pack, onPreview }: Props) {
               Delete
             </Button>
           )}
+          {/* Plain download link (not a fetch): the browser streams the
+              archive to disk and sends the session cookie itself. The file is
+              what Packs > Upload pack accepts on another instance. */}
+          <a
+            href={api.packs.exportUrl(pack.id)}
+            download
+            title="Download as .tar.gz to upload into another Stoker instance"
+          >
+            <Button variant="secondary">Download</Button>
+          </a>
           {isMetric ? (
             // A metric pack has no eventgen stanzas to preview; edit it in the
             // builder instead.

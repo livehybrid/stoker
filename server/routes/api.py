@@ -30,7 +30,8 @@ from fastapi import (APIRouter, Depends, File, Form, HTTPException, Query,
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .. import bundles, crypto, gitsync, lifecycle, packupload, preview
+from .. import (bundles, crypto, gitsync, lifecycle, packexport, packupload,
+                preview)
 from ..config import get_settings
 from ..db import get_db
 from ..drivers.base import DriverError
@@ -659,6 +660,94 @@ def get_pack(pack_id: int, db: Session = Depends(get_db)):
     if pack is None:
         raise HTTPException(status_code=404, detail="unknown pack")
     return pack
+
+
+@router.get("/packs/{pack_id}/export")
+def export_pack(
+    pack_id: int,
+    include_dataset: bool = Query(
+        default=True,
+        description="embed a rawreplay dataset_url payload so the export needs no "
+                    "network on the receiving instance"),
+    db: Session = Depends(get_db),
+):
+    # type: (...) -> Any
+    """Download a pack as a ``.tar.gz`` that another instance can upload.
+
+    The mirror of ``POST /api/packs/upload``: the archive is rooted at a single
+    directory named after the pack and carries its source files (``pack.yaml``,
+    ``default/eventgen.conf``, ``samples/``, ``stoker.json``, a rawreplay
+    dataset and — so a builder pack stays editable on the far side —
+    ``stoker-builder.json``). Reproducible, so re-exporting an unchanged pack
+    gives identical bytes.
+
+    Works for every kind of pack: a local or uploaded directory, a repo-synced
+    pack (materialised at its pinned SHA, so the export matches what its runs
+    use, not the branch head) and a UI-authored metric pack (whose archive is
+    synthesised from its builder config, since it has no directory).
+
+    ``include_dataset`` (default true) fetches a rawreplay ``dataset_url`` here
+    and embeds it, which is what makes such a pack replay on an air-gapped
+    instance; ``false`` skips the fetch for a quick metadata-only copy. A pack
+    whose dataset is already a local file always carries it either way. The
+    response headers report the outcome (``X-Stoker-Pack-Name``,
+    ``X-Stoker-Export-Members``, ``X-Stoker-Dataset-Embedded``).
+
+    Read-only, so the auth gate allows viewer+. ``409 pack_export_failed`` when
+    the pack has no directory on this control plane (a repo pack whose clone is
+    gone), its dataset cannot be fetched, or the export would exceed the
+    ``PACK_UPLOAD_MAX_*`` limits the receiving instance enforces.
+    """
+    pack = db.get(Pack, pack_id)
+    if pack is None:
+        raise HTTPException(status_code=404, detail="unknown pack")
+    settings = get_settings()
+    try:
+        pack_dir = _resolve_pack_dir_for_export(pack)
+        if pack_dir is None:
+            result = packexport.export_metric_pack_bytes(
+                pack.name, pack.builder_config_json or {},
+                description=pack.description,
+                tags=pack.tags_json if isinstance(pack.tags_json, list) else None,
+                settings=settings)
+        else:
+            result = packexport.export_pack_bytes(
+                pack_dir, pack.name, include_dataset=include_dataset, settings=settings)
+    except (packexport.PackExportError, gitsync.GitSyncError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "pack_export_failed", "detail": str(exc)})
+    return Response(
+        content=result.data,
+        media_type="application/gzip",
+        headers={
+            "Content-Disposition": 'attachment; filename="%s"' % result.filename,
+            "Content-Length": str(len(result.data)),
+            "X-Stoker-Pack-Name": packexport.safe_basename(pack.name),
+            "X-Stoker-Export-Members": str(result.members),
+            "X-Stoker-Dataset-Embedded": "true" if result.dataset_embedded else "false",
+        },
+    )
+
+
+def _resolve_pack_dir_for_export(pack):
+    # type: (Pack) -> Optional[str]
+    """The pack's directory for export, or None for a directory-less metric pack.
+
+    A repo-synced pack is materialised at its pinned ``indexed_sha`` (the same
+    tree its bundles are built from). A metric pack authored in the UI has only
+    a ``builder://`` sentinel path and its builder config, so it has no
+    directory and the caller synthesises the archive instead.
+    """
+    if pack.repo_id is not None and pack.repo is not None:
+        return gitsync.resolve_pack_dir(pack.repo, pack)
+    if pack.source_path and os.path.isdir(pack.source_path):
+        return pack.source_path
+    if pack.builder_config_json is not None:
+        return None
+    raise packexport.PackExportError(
+        "the pack directory %r is not on this control plane; nothing to export"
+        % (pack.source_path or ""))
 
 
 @router.get("/packs/{pack_id}/preview", response_model=PackPreview)
