@@ -739,8 +739,25 @@ events into an eventgen pack without writing any `eventgen.conf` by hand.
 1. **Paste or upload events**: one per line (access logs, syslog, `key=value`,
    JSON lines), a JSON array or pretty-printed JSON objects, a CSV with a header
    row, a Splunk CSV export (its `_raw` column), or multi-line events such as
-   stack traces and XML. Up to 5,000 events, 64 KB each, 2 MB in total. **Event
-   breaking** defaults to *Detect automatically*; see below for the other modes.
+   stack traces and XML. The file picker takes **several files at once** and
+   joins them in the order selected, for samples that arrive one file per host
+   or per day. **Event breaking** defaults to *Detect automatically*; see below
+   for the other modes.
+
+   | Limit | Value |
+   |---|---|
+   | Events per pack | 5,000 |
+   | Bytes per event | 64 KB |
+   | Total sample size (also the upload guard, combined across files) | 2 MB |
+   | Events the analyser examines when suggesting fields | first 2,000 |
+   | Fields per pack | 100 |
+
+   Past the first 2,000 events the rest still ship in the pack and still
+   generate; they just do not influence which fields are suggested. The 2 MB
+   total is usually the binding limit, so 5,000 events needs an average line
+   under about 400 bytes. These bound the pack's **template**, not the volume a
+   run generates; for replaying a large capture verbatim use a
+   [rawreplay pack](#rawreplay-piston-packs) instead.
 2. **Review the suggested fields.** The analyser marks what it would vary and
    recommends a replacement for each. It finds timestamps in the common formats
    (ISO 8601, access log, syslog, `date time`, `%a %b %d %Y`, epoch seconds and

@@ -468,14 +468,31 @@ function PackBuilder() {
     onError: (err) => setAnalyseError(apiMessage(err)),
   });
 
-  async function onFile(file: File | undefined) {
-    if (!file) return;
-    if (file.size > 2 * 1024 * 1024) {
-      toast.error("That file is over 2 MB; trim it to a representative sample.");
+  // Several files are joined in the order selected, because a customer's
+  // samples usually arrive as one file per host or per day while the builder's
+  // input is a single blob. The guard is on the COMBINED size so it matches the
+  // server's MAX_TOTAL_BYTES and cannot pass here only to fail on analyse.
+  async function onFiles(files: FileList | null) {
+    const list = Array.from(files ?? []);
+    if (list.length === 0) return;
+    const total = list.reduce((n, f) => n + f.size, 0);
+    if (total > 2 * 1024 * 1024) {
+      toast.error(
+        list.length === 1
+          ? "That file is over 2 MB; trim it to a representative sample."
+          : `Those ${list.length} files total ${Math.round(total / 1024)} KB, over the 2 MB limit; select fewer or trim them.`,
+      );
       return;
     }
-    setText(await file.text());
-    if (!name) setName(file.name.replace(/\.[^.]+$/, "").replace(/[^A-Za-z0-9 _.-]/g, "-").slice(0, 64));
+    const parts = await Promise.all(list.map((f) => f.text()));
+    setText(parts.map((t) => t.replace(/\s+$/, "")).join("\n"));
+    if (!name) {
+      const base = list[0].name.replace(/\.[^.]+$/, "");
+      setName(base.replace(/[^A-Za-z0-9 _.-]/g, "-").slice(0, 64));
+    }
+    if (list.length > 1) {
+      toast.success(`Loaded ${list.length} files (${Math.round(total / 1024)} KB)`);
+    }
   }
 
   const config: BuilderConfig = useMemo(
@@ -641,11 +658,12 @@ function PackBuilder() {
             <Inline>
               <input
                 type="file"
+                multiple
                 accept=".log,.txt,.json,.csv,.ndjson,text/plain,application/json"
-                onChange={(e) => onFile(e.target.files?.[0])}
-                aria-label="Upload a sample file"
+                onChange={(e) => onFiles(e.target.files)}
+                aria-label="Upload one or more sample files"
               />
-              <Muted $small>or upload a file (up to 2 MB)</Muted>
+              <Muted $small>or upload one or more files (2 MB total)</Muted>
             </Inline>
             <Button variant="primary" onClick={() => analyse.mutate()} disabled={!text.trim() || analyse.isPending}>
               {analyse.isPending ? "Analysing…" : events.length ? "Re-analyse" : "Analyse events"}
