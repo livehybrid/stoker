@@ -373,6 +373,72 @@ def aligned_ident(text, window, size):
     return ((hi << 64) | lo) % max(1, size)
 
 
+def permute(x, size):
+    # type: (int, int) -> int
+    """Spread a counter uniformly over ``[0, size)`` without losing injectivity.
+
+    The raw rotation identity is a counter, so rendered directly it gives
+    100006, 100007, 100008 ... clustered at the bottom of the space, and
+    widening only adds leading zeros (100000000000006). Real identifiers do not
+    look like that, and anything in the system under test that buckets or hashes
+    on the field would see a distribution it never sees in production.
+
+    A permutation fixes the look and keeps every guarantee, because it is a
+    bijection: two distinct counters still give two distinct identities, so the
+    pass and worker-slot disjointness arguments are untouched.
+
+    Four-round balanced Feistel over the next even power of two, cycle-walking
+    back into range. Unkeyed: the identities are synthetic, so there is nothing
+    to keep secret, and both engines must agree.
+    """
+    if size <= 1:
+        return 0
+    bits = (size - 1).bit_length()
+    half = (bits + 1) // 2
+    mask = (1 << half) - 1
+    v = x % size
+    for _ in range(64):
+        left = (v >> half) & mask
+        right = v & mask
+        for rnd in range(4):
+            f = mix64((right + rnd * 0x9E3779B9) & _MASK64) & mask
+            left, right = right, left ^ f
+        v = (left << half) | right
+        if v < size:
+            return v
+    return x % size
+
+
+def rotate_ident(pass_, workers, slot, distinct, k):
+    # type: (int, int, int, int, int) -> int
+    """The raw rotation counter: ``(pass x workers + slot) x distinct + k``.
+
+    A mixed-radix number read right to left, so the map is injective and two
+    worker slots can never mint the same identity.
+    """
+    return (pass_ * max(1, workers) + slot) * max(1, distinct) + k
+
+
+def pass_rotation(span, pass_, workers=1, slot=0, distinct=1, k=0, widen=None):
+    # type: (str, int, int, int, int, int, Optional[Format]) -> Optional[str]
+    """What the engine will emit for ``span`` on ``pass_``, for the preview.
+
+    ``distinct`` and ``k`` come from the stanza's identity tables: how many
+    sample values share this value's format class, and where this one sits in
+    that class. The engines derive those from the sample, so the builder has to
+    reproduce the same numbers to preview honestly.
+    """
+    if not span:
+        return None
+    normalised = unicodedata.normalize("NFC", span)
+    fmt = widen if widen is not None else infer(normalised)
+    if fmt.shape == NONE:
+        return None
+    size = space(fmt)
+    return render(fmt, permute(rotate_ident(pass_, workers, slot, distinct, k), size),
+                  case_class(normalised))
+
+
 def aligned_rotation(span, window, widen=None):
     # type: (str, int, Optional[Format]) -> Optional[str]
     """The rotated stand-in for ``span`` in ``window``, in ``span``'s format.

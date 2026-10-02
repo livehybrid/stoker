@@ -561,10 +561,94 @@ def test_the_shared_vectors_still_describe_this_implementation():
         assert ps.window_index(int(entry["epoch"]), int(entry["period"])) \
             == int(entry["window"]), entry
 
+    for entry in v["permute"]:
+        assert ps.permute(int(entry["x"]), int(entry["size"])) == int(entry["out"]), entry
+
+    assert len(v["pass_render"]) > 50
+    for entry in v["pass_render"]:
+        widen = entry["widen"]
+        fmt = ps.widen_format(widen["shape"], widen.get("length")) if widen else None
+        got = ps.pass_rotation(entry["text"], int(entry["pass"]), int(entry["workers"]),
+                               int(entry["slot"]), int(entry["distinct"]), int(entry["k"]),
+                               widen=fmt)
+        assert got == entry["out"], entry
+
     for entry in v["mixer"]["fnv1a64"]:
         assert ps.fnv1a64(entry["text"]) == int(entry["out"]), entry
     for entry in v["mixer"]["mix64"]:
         assert ps.mix64(int(entry["x"])) == int(entry["out"]), entry
+
+
+# --------------------------------------------------------------------------- #
+# Pass rotation (rotate.scope = pass): a new identity every replay
+# --------------------------------------------------------------------------- #
+
+def test_the_permutation_is_a_bijection():
+    """The entire guarantee rests on this.
+
+    If two counters ever permuted to one value, two passes or two worker slots
+    could share an identity, which is the one thing rotation must never do.
+    Checked exhaustively on spaces that are not powers of two, where the
+    cycle-walking runs.
+    """
+    for size in (2, 3, 9, 10, 17, 90, 100, 900, 901, 4096, 9000):
+        seen = set()
+        for x in range(size):
+            out = ps.permute(x, size)
+            assert 0 <= out < size, (x, size, out)
+            assert out not in seen, "permute collided at %d in space %d" % (x, size)
+            seen.add(out)
+    assert ps.permute(0, 1) == 0
+    assert ps.permute(5, 0) == 0
+
+
+def test_the_permutation_scatters_the_counter():
+    """Without it the identities read 100006, 100007, 100008 ...
+
+    which no real identifier does, and which gives anything that buckets or
+    hashes on the field a distribution it would never see in production.
+    """
+    size = ps.space(ps.Format(ps.DIGITS, 6))
+    values = [ps.permute(x, size) for x in range(8)]
+    assert values != sorted(values), values
+    assert any(v > size // 2 for v in values), values
+
+
+def test_two_worker_slots_never_mint_the_same_identity():
+    """The property that matters at the customer's 58 slots."""
+    seen = {}
+    for slot in range(8):
+        for pass_ in range(200):
+            for k in range(3):
+                out = ps.pass_rotation("483920", pass_, workers=8, slot=slot,
+                                       distinct=3, k=k,
+                                       widen=ps.widen_format(ps.DIGITS, 12))
+                assert seen.setdefault(out, slot) == slot, \
+                    "identity %s minted by two slots" % out
+    assert len(seen) == 8 * 200 * 3
+
+
+def test_a_pass_shares_one_identity_and_the_next_differs():
+    # The customer's own sample: login and logout are the same user, and the
+    # next replay is a different one.
+    first = ps.pass_rotation("483920", 0, distinct=2, k=0)
+    assert first == ps.pass_rotation("483920", 0, distinct=2, k=0)
+    assert first != ps.pass_rotation("483920", 1, distinct=2, k=0)
+    assert first != ps.pass_rotation("771045", 0, distinct=2, k=1)
+
+
+def test_pass_rotation_keeps_the_format():
+    for text in ("483920", "a1b2c3", "ADA1", "ada.smith",
+                 "3f2b1c9e-8a7d-4e21-9b3c-1d2e3f4a5b6c"):
+        for pass_ in range(20):
+            out = ps.pass_rotation(text, pass_, distinct=2, k=pass_ % 2)
+            assert len(out) == len(text), (text, out)
+            assert ps.infer(out) == ps.infer(text), (text, out)
+
+
+def test_pass_rotation_leaves_alone_what_it_should():
+    assert ps.pass_rotation("", 1) is None
+    assert ps.pass_rotation("---", 1) is None
 
 
 # --------------------------------------------------------------------------- #
