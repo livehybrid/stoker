@@ -402,7 +402,8 @@ __all__ = [
     "SHAPES_WIDENABLE", "WIDEN_DEFAULTS", "WIDEN_FLOORS", "WIDEN_MAX",
     "case_class", "collision_probability", "derive_subkey", "expected_collisions",
     "find_residuals", "fingerprint", "infer", "pseudonym", "render",
-    "residual_regex", "space", "widen_format",
+    "residual_problems", "residual_regex", "scan_residuals", "space",
+    "widen_format", "RESIDUAL_MIN_REFUSE",
 ]
 
 
@@ -432,6 +433,11 @@ class PseudonymReport:
     originals: List[str]
     outputs: Dict[str, str]
     warnings: List[str] = dataclasses.field(default_factory=list)
+    # normalised original -> its stand-in, and -> the field it came from. Only
+    # ever held in memory, for the residual pass; never written anywhere.
+    mapping: Dict[str, str] = dataclasses.field(default_factory=dict)
+    origin: Dict[str, str] = dataclasses.field(default_factory=dict)
+    residuals: List[Dict[str, Any]] = dataclasses.field(default_factory=list)
 
     def total_spans(self):
         # type: () -> int
@@ -475,6 +481,8 @@ def pseudonymise_events(events, tokens, subkey, widen_of=None):
     rows = []        # type: List[TokenRows]
     originals = {}   # type: Dict[str, str]
     outputs = {}     # type: Dict[str, str]
+    mapping = {}     # type: Dict[str, str]
+    origin = {}      # type: Dict[str, str]
     warnings = []    # type: List[str]
     memo = {}        # type: Dict[Tuple[str, Any], Optional[str]]
     by_output = {}   # type: Dict[Tuple[str, str], str]
@@ -541,6 +549,8 @@ def pseudonymise_events(events, tokens, subkey, widen_of=None):
                         % (row.field or row.pattern, stand_in))
                 by_output[(fmt.shape, stand_in)] = normalised
                 originals[normalised] = normalised
+                mapping[normalised] = stand_in
+                origin.setdefault(normalised, row.field)
                 outputs[stand_in] = fmt.shape
                 seen[row.field].setdefault((fmt.shape, fmt.width), set()).add(normalised)
                 edits.append((s_i, e_i, stand_in, row))
@@ -594,4 +604,116 @@ def pseudonymise_events(events, tokens, subkey, widen_of=None):
         row.classes = classes
         row.distinct = len(every)
 
-    return PseudonymReport(out_events, rewritten, rows, sorted(originals), outputs, warnings)
+    return PseudonymReport(out_events, rewritten, rows, sorted(originals), outputs,
+                           warnings, mapping, origin)
+
+
+# --------------------------------------------------------------------------- #
+# Residuals: the same identifier surviving somewhere no field covered
+# --------------------------------------------------------------------------- #
+
+# An original this short cannot be told from coincidence (a 3-digit id matches
+# inside an IP octet, a byte count, a port), so it warns instead of refusing.
+RESIDUAL_MIN_REFUSE = 5
+
+
+def scan_residuals(report, texts=(), rewrite_fields=()):
+    # type: (PseudonymReport, Sequence[Tuple[str, str]], Sequence[str]) -> PseudonymReport
+    """Find originals that survive outside the spans the pass rewrote.
+
+    Pseudonymising ``client_id`` does not remove the same value from a URL, a
+    message string or a JSON blob that no marked field matched - and the pack
+    travels, through git-sync and the export button. So after the rewrite, every
+    original is searched for again, in the rewritten events and in ``texts``
+    (``(where, text)`` pairs: other fields' value lists, patterns, labels, the
+    pack name and description).
+
+    **Hits inside a span this pass wrote are skipped.** With the format kept the
+    output space IS the input space, so a stand-in can coincidentally equal a
+    different original: at 1,000 six-digit identifiers that happens in about two
+    builds out of three. Reporting it would refuse a build for a leak that does
+    not exist, and rewriting it would replace one identity's stand-in with
+    another's, merging them.
+
+    A field named in ``rewrite_fields`` has its own values rewritten in the
+    events as well, with the same stand-in, which both removes the residue and
+    makes the identifier correlate everywhere it appears. Patterns, labels and
+    value lists are never rewritten: they are configuration the operator wrote,
+    and silently editing them would change what the pack matches.
+    """
+    if not report.mapping:
+        return report
+    pattern = residual_regex(report.mapping)
+    wanted = set(rewrite_fields or ())
+    findings = []  # type: List[Dict[str, Any]]
+
+    for index, event in enumerate(report.events):
+        masked = list(report.rewritten.get(index, ()))
+        while True:
+            hits = [h for h in find_residuals(event, pattern, masked)
+                    if h[2] in report.mapping]
+            target = next((h for h in hits
+                           if report.origin.get(h[2]) in wanted), None)
+            if target is None:
+                break
+            start, end, value = target
+            stand_in = report.mapping[value]
+            event = event[:start] + stand_in + event[end:]
+            shift = len(stand_in) - (end - start)
+            masked = [(s + shift if s >= end else s, e + shift if e >= end else e)
+                      for s, e in masked]
+            masked.append((start, start + len(stand_in)))
+            for row in report.rows:
+                if row.field == report.origin.get(value):
+                    row.spans += 1
+        report.events[index] = event
+        report.rewritten[index] = masked
+        for start, end, value in find_residuals(event, pattern, masked):
+            if value in report.mapping:
+                findings.append({"where": "event %d" % (index + 1), "value": value,
+                                 "field": report.origin.get(value), "rewritten": False})
+
+    for where, text in texts or ():
+        for _s, _e, value in find_residuals(text or "", pattern):
+            if value in report.mapping:
+                findings.append({"where": where, "value": value,
+                                 "field": report.origin.get(value), "rewritten": False})
+
+    report.residuals = findings
+    return report
+
+
+def residual_problems(report):
+    # type: (PseudonymReport) -> Tuple[List[str], List[str]]
+    """``(blocking, warnings)`` messages for the residuals found.
+
+    Blocking for an original of %d characters or more, because that is long
+    enough that an occurrence is the real value rather than a coincidence, and
+    leaving it means the pack ships the identifier the operator asked to hide.
+    Shorter values only warn: a 3-digit identifier genuinely does appear inside
+    an IP address or a byte count, and refusing those would make the feature
+    unusable. No message ever contains the value.
+    """ % RESIDUAL_MIN_REFUSE
+    blocking, warnings = [], []  # type: List[str], List[str]
+    by_field = {}  # type: Dict[Tuple[str, bool], List[str]]
+    for finding in report.residuals:
+        long_enough = len(finding["value"]) >= RESIDUAL_MIN_REFUSE
+        by_field.setdefault((finding.get("field") or "", long_enough), []).append(
+            finding["where"])
+    for (field, long_enough), wheres in sorted(by_field.items()):
+        where = ", ".join(wheres[:3]) + (" and %d more" % (len(wheres) - 3)
+                                         if len(wheres) > 3 else "")
+        if long_enough:
+            blocking.append(
+                "%s: a value of this field still appears outside the field itself "
+                "(%s), so the pack would carry the identifier you asked to hide. "
+                "Turn on 'replace it everywhere' for this field, widen the pattern "
+                "to cover those occurrences, or remove them from the sample."
+                % (field or "a pseudonym field", where))
+        else:
+            warnings.append(
+                "%s: a value of this field also appears outside the field (%s). It "
+                "is short enough that this may be a coincidence, such as a digit "
+                "run inside an address or a size, so it is not treated as a leak."
+                % (field or "a pseudonym field", where))
+    return blocking, warnings

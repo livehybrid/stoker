@@ -269,11 +269,24 @@ function ReplacementEditor({
               />
             </Field>
           )}
+          <Field label="Elsewhere in the event">
+            <Switch
+              appearance="checkbox"
+              selected={value.rewrite_residuals === true}
+              onClick={() =>
+                onChange({ ...value, rewrite_residuals: !value.rewrite_residuals })
+              }
+            >
+              Replace this value everywhere it appears
+            </Switch>
+          </Field>
           <Field label=" ">
             <Muted $small>
               Keeping the format means the stand-in has the same shape and width, so
               field extractions keep working, but the space is small enough that two
-              values can merge. Widening removes that at the cost of the shape.
+              values can merge. Widening removes that at the cost of the shape. Turn
+              on "replace everywhere" when the same value also appears in a URL or a
+              message, which is otherwise left in the pack and blocks the save.
             </Muted>
           </Field>
         </>

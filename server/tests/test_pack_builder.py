@@ -927,3 +927,108 @@ def test_a_guid_is_only_an_identifier_when_it_recurs():
     assert pb.recommend("eventID", [one, two])[0]["kind"] == "guid"
     # Recurring: it identifies a session, so the correlation must survive.
     assert pb.recommend("session_uuid", [one, two, one])[0]["kind"] == "pseudonym"
+
+
+# ---- residuals: the identifier surviving where no field looked ----
+
+RESIDUAL_SAMPLE = ["client_id=654321 uri=/clients/654321/orders status=200",
+                   "client_id=111222 uri=/clients/111222/basket status=200"]
+
+
+def _residual_token(rewrite=False):
+    return {"field": "client_id", "pattern": r"\bclient_id=(\d+)", "enabled": True,
+            "replacement": {"kind": "pseudonym", "rewrite_residuals": rewrite}}
+
+
+def test_a_save_is_refused_when_the_identifier_survives_elsewhere(tmp_path, subkey):
+    """Pseudonymising the field does not remove the value from the URL.
+
+    The pack travels (git-sync, the export button), so shipping it would carry
+    the identifier the operator asked to hide.
+    """
+    sub, fp = subkey
+    cfg = pb.validate_config({"name": "c", "events": RESIDUAL_SAMPLE,
+                              "tokens": [_residual_token()]})
+    with pytest.raises(pb.BuilderError) as exc:
+        pb.write_pack(cfg, str(tmp_path / "p"), subkey=sub, fingerprint=fp)
+    message = str(exc.value)
+    assert "still appears outside the field itself" in message
+    assert "654321" not in message, "a refusal must not quote the value"
+
+
+def test_the_preview_warns_where_the_save_refuses(subkey):
+    # The operator is still editing; failing the live preview would just look
+    # broken, so it reports the same problem as a warning.
+    sub, _fp = subkey
+    cfg = pb.validate_config({"name": "c", "events": RESIDUAL_SAMPLE,
+                              "tokens": [_residual_token()]})
+    out = pb.render_preview(cfg, n=2, seed=1, subkey=sub)
+    assert any("outside the field itself" in w for w in out["warnings"])
+
+
+def test_replace_everywhere_fixes_it_and_correlates(tmp_path, subkey):
+    sub, fp = subkey
+    cfg = pb.validate_config({"name": "c", "events": RESIDUAL_SAMPLE,
+                              "tokens": [_residual_token(rewrite=True)]})
+    dest = str(tmp_path / "p")
+    pb.write_pack(cfg, dest, subkey=sub, fingerprint=fp)
+    lines = open(os.path.join(dest, "samples", "c.sample")).read().splitlines()
+    assert "654321" not in " ".join(lines) and "111222" not in " ".join(lines)
+    for line in lines:
+        field = re.search(r"client_id=(\d+)", line).group(1)
+        in_uri = re.search(r"/clients/(\d+)/", line).group(1)
+        assert field == in_uri, "the same identifier must appear in both places"
+    assert bundles.lint_pack(dest).ok
+
+
+def test_a_short_identifier_only_warns(subkey):
+    # 3 digits genuinely appears inside an address or a size, so refusing would
+    # make the feature unusable.
+    sub, _fp = subkey
+    cfg = pb.validate_config({"name": "c", "events": ["id=123 srcip=10.0.0.123"],
+                              "tokens": [{"field": "id", "pattern": r"\bid=(\d+)",
+                                          "replacement": {"kind": "pseudonym"}}]})
+    out = pb.render_preview(cfg, n=1, seed=1, subkey=sub)
+    assert any("may be a coincidence" in w for w in out["warnings"])
+    assert not any("still appears outside" in w for w in out["warnings"])
+
+
+def test_a_stand_in_coinciding_with_another_original_is_not_a_leak(subkey):
+    """The blocker this scan would otherwise have shipped.
+
+    With the format kept, the output space IS the input space, so a stand-in can
+    equal a DIFFERENT original by chance. Reporting it refuses a build for a
+    leak that does not exist; rewriting it would merge two identities.
+    """
+    from server.packbuilder import pseudonym as _ps
+    sub, _fp = subkey
+    pair = None
+    for n in range(100, 1000):
+        a = str(n)
+        s = _ps.pseudonym(a, sub)
+        if s != a and _ps.pseudonym(s, sub) not in (s, a):
+            pair = (a, s)
+            break
+    assert pair, "no usable coincidence in a 900-value space"
+    a, s = pair
+    cfg = pb.validate_config({"name": "c", "events": ["id=%s x" % a, "id=%s x" % s],
+                              "tokens": [{"field": "id", "pattern": r"\bid=(\d+)",
+                                          "replacement": {"kind": "pseudonym"}}]})
+    out = pb.render_preview(cfg, n=2, seed=1, subkey=sub)
+    # event 1's stand-in literally IS event 2's original, and that is fine
+    assert out["events"][0] == "id=%s x" % s
+    assert not any("outside the field" in w or "coincidence" in w
+                   for w in out["warnings"])
+
+
+def test_an_identifier_left_in_a_values_list_is_reported(tmp_path, subkey):
+    # "Values I list" copies what it saw into the pack, so an identifier that
+    # also appeared in another field would ship verbatim.
+    sub, fp = subkey
+    cfg = pb.validate_config({"name": "c", "events": RESIDUAL_SAMPLE, "tokens": [
+        _residual_token(),
+        {"field": "note", "pattern": r"status=(\d+)",
+         "replacement": {"kind": "values", "values": ["200", "654321"]}}]})
+    with pytest.raises(pb.BuilderError) as exc:
+        pb.write_pack(cfg, str(tmp_path / "p"), subkey=sub, fingerprint=fp)
+    assert "listed values of note" in str(exc.value)

@@ -1498,7 +1498,33 @@ def pseudonym_fields(cfg):
             and (t.get("replacement") or {}).get("kind") == "pseudonym"]
 
 
-def apply_pseudonyms(cfg, subkey=None, fingerprint=None, already=None):
+def _residual_texts(cfg, fields):
+    # type: (Dict[str, Any], Sequence[Dict[str, Any]]) -> List[Tuple[str, str]]
+    """Everything besides the events that a pack carries operator text into.
+
+    These are built from the ORIGINAL sample, so an identifier in one of them is
+    a real survivor and needs no masking: the analyser anchors a bare-value
+    pattern on the text before it, and a "values I list" field copies what it
+    saw. They are reported, never rewritten - they are configuration the
+    operator wrote, and editing it silently would change what the pack matches.
+    """
+    out = [("the pack name", cfg.get("name") or ""),
+           ("the description", cfg.get("description") or "")]
+    pseudo_patterns = {t["pattern"] for t in fields}
+    for token in cfg.get("tokens") or []:
+        label = token.get("field") or token.get("pattern") or "a field"
+        if token["pattern"] not in pseudo_patterns:
+            out.append(("the pattern of %s" % label, token["pattern"]))
+        out.append(("the name of %s" % label, token.get("field") or ""))
+        rep = token.get("replacement") or {}
+        if rep.get("kind") == "values":
+            out.append(("the listed values of %s" % label, "\n".join(rep.get("values") or [])))
+        elif rep.get("kind") == "static":
+            out.append(("the fixed value of %s" % label, str(rep.get("value") or "")))
+    return out
+
+
+def apply_pseudonyms(cfg, subkey=None, fingerprint=None, already=None, strict=True):
     # type: (Dict[str, Any], Optional[bytes], Optional[str], Optional[Sequence[str]]) -> Tuple[Dict[str, Any], Optional[Any]]
     """``(cfg with its events pseudonymised, report)`` - or the cfg unchanged.
 
@@ -1547,6 +1573,21 @@ def apply_pseudonyms(cfg, subkey=None, fingerprint=None, already=None):
             remap[original_index] = report.rewritten[position]
     report.events = merged
     report.rewritten = remap
+    # An identifier can survive outside the span its field matched - in a URL, a
+    # message string, another field's value list, a pattern the analyser anchored
+    # on neighbouring text. The pack travels, so look for it.
+    _ps.scan_residuals(
+        report,
+        texts=_residual_texts(cfg, fields),
+        rewrite_fields=[t.get("field") for t in fields
+                        if (t.get("replacement") or {}).get("rewrite_residuals")])
+    blocking, residual_warnings = _ps.residual_problems(report)
+    report.warnings.extend(residual_warnings)
+    if blocking:
+        if strict:
+            raise BuilderError(" ".join(blocking))
+        report.warnings.extend(blocking)
+    merged = report.events
     out = dict(cfg, events=merged)
     out["pseudonymised"] = [
         {"field": row.field, "pattern": row.pattern, "widen": row.widen,
@@ -1862,7 +1903,10 @@ def render_preview(cfg, n=20, seed=None, subkey=None, already=None):
     rng = random.Random(seed)
     # Pseudonymise first so the preview shows the stand-ins the pack will hold,
     # and so a later token can never match an original that will not be there.
-    cfg, pseudo_report = apply_pseudonyms(cfg, subkey=subkey, already=already)
+    # A preview REPORTS a blocking residual rather than failing, so the operator
+    # sees what to fix while they are still editing; the save refuses it.
+    cfg, pseudo_report = apply_pseudonyms(cfg, subkey=subkey, already=already,
+                                          strict=False)
     tokens = ordered_tokens(cfg)
     compiled = [(t, re.compile(t["pattern"])) for t in tokens]
     events = cfg["events"]

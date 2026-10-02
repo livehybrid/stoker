@@ -954,12 +954,28 @@ get is that the pack and the replayed events do not contain the originals, and
 that correlation is preserved.
 
 **Your sample is stored in the pack as you supplied it.** Only the fields you
-mark are rewritten. If the same identifier also appears in a URL, a message
-string or a JSON blob that no marked field covers, it is still in the pack, and
-the pack travels (git-sync, the export button). Redaction destroys correlation,
-since nothing groups by `REDACTED`, which is exactly why pseudonymisation
-exists for the fields you need to join on; everything else sensitive, free text,
-names, emails, payload bodies, should come out before you upload.
+mark are rewritten. Redaction destroys correlation, since nothing groups by
+`REDACTED`, which is exactly why pseudonymisation exists for the fields you need
+to join on; everything else sensitive, free text, names, emails, payload bodies,
+should come out before you upload.
+
+For the values it IS pseudonymising, the builder checks the rest of the pack. If
+`client_id=654321` is marked but `654321` also appears in a URL, a message, a
+"values I list" field, a pattern or the description, the save is **refused** and
+names where, because the pack travels and would carry the identifier you asked
+to hide. Turn on **"replace this value everywhere it appears"** for the field and
+the other occurrences get the same stand-in, which removes the residue and makes
+the identifier correlate in both places. Patterns, field names, value lists and
+the description are reported but never rewritten: they are configuration you
+wrote, and editing them silently would change what the pack matches.
+
+Two deliberate limits on that check. An original of fewer than five characters
+only warns, because a three-digit identifier genuinely does appear inside
+`10.0.0.123` or a byte count and refusing those would make the feature unusable.
+And a stand-in that happens to equal a *different* original is not reported: with
+the format kept the output space is the input space, so that coincidence is
+common (about two builds in three at 1,000 six-digit identifiers), it is not a
+leak, and "fixing" it would merge two identities.
 
 Other limits worth knowing:
 
