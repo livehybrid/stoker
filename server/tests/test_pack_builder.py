@@ -1032,3 +1032,43 @@ def test_an_identifier_left_in_a_values_list_is_reported(tmp_path, subkey):
     with pytest.raises(pb.BuilderError) as exc:
         pb.write_pack(cfg, str(tmp_path / "p"), subkey=sub, fingerprint=fp)
     assert "listed values of note" in str(exc.value)
+
+
+def test_api_lookup_tells_the_operator_what_to_search_for(client, upload_dir):
+    """Without this an operator cannot act on their own data: they know client
+    654321 exists but not which stand-in to put in a Splunk search."""
+    config = {"name": "look", "events": RESIDUAL_SAMPLE,
+              "tokens": [_residual_token(rewrite=True)]}
+    created = client.post("/api/pack-builder/packs", json={"config": config})
+    assert created.status_code == 201, created.text
+    sample = open(os.path.join(created.json()["source_path"], "samples",
+                               "look.sample")).read()
+
+    r = client.post("/api/pack-builder/pseudonym-lookup",
+                    json={"values": ["654321", "111222", "not-in-the-pack"]})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    results = {row["value"]: row["stand_in"] for row in body["results"]}
+    # the answer is literally what is in the pack
+    assert results["654321"] in sample and results["111222"] in sample
+    assert len(body["key_fingerprint"]) == 8
+    # a value that was never in a pack still resolves: the mapping is a keyed
+    # function, not a stored table
+    assert results["not-in-the-pack"]
+
+    # The policy is part of the identity, so a different widen gives a
+    # different answer and the caller must match the field.
+    wide = client.post("/api/pack-builder/pseudonym-lookup",
+                       json={"values": ["654321"],
+                             "widen": {"shape": "digits", "length": 15}}).json()
+    assert wide["results"][0]["stand_in"] != results["654321"]
+    assert len(wide["results"][0]["stand_in"]) == 15
+
+
+def test_api_lookup_never_creates_a_key(client, upload_dir, db_session):
+    from server import pseudonymkeys
+
+    r = client.post("/api/pack-builder/pseudonym-lookup", json={"values": ["1"]})
+    assert r.status_code == 409
+    assert r.json()["detail"]["error"] == "pseudonym_key_unavailable"
+    assert pseudonymkeys.peek(db_session) is None

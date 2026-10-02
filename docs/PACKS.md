@@ -1001,6 +1001,16 @@ holding digits (`user=123` is an account number, not a name), a digit string too
 long to be a number, and a GUID that recurs. It deliberately does not for a code
 set: pseudonymising a Windows `EventID` would break every search for 4624.
 
+**Finding out what a value became.** `POST /api/pack-builder/pseudonym-lookup
+{values, widen?}` answers "what should I search for", which an operator
+otherwise cannot work out: they know client 654321 exists but not which stand-in
+is in the index. Pass the field's own `widen` (or null), because the policy is
+part of the identity. The mapping is a keyed function rather than a stored table,
+so a value that was never in any pack still resolves. This is a deliberate
+oracle, and no new privilege - any operator could learn the same mapping by
+saving a pack - so the actor and the number of values are logged, and it never
+creates a key.
+
 API: `GET /api/pack-builder/pseudonym-key` reports whether a key exists and its
 fingerprint, and never creates one. A save needing a key that cannot be created
 is `409 pseudonym_key_unavailable`.

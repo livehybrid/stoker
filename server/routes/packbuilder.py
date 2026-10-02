@@ -41,6 +41,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .. import bundles, packbuilder, packupload, pseudonymkeys
+from ..packbuilder import pseudonym
 from ..config import get_settings
 from ..db import get_db
 from ..gitsync import local_pack_metadata
@@ -174,6 +175,50 @@ def pseudonym_key(db: Session = Depends(get_db)):
     builder cannot mint a key as a side effect of someone looking at a page.
     """
     return pseudonymkeys.describe(pseudonymkeys.peek(db))
+
+
+class LookupRequest(BaseModel):
+    values: List[str] = Field(..., description="real identifiers to look up", max_length=200)
+    widen: Optional[Dict[str, Any]] = Field(
+        default=None, description="the field's widen policy, or null for 'keep the format'")
+
+
+@router.post("/pseudonym-lookup")
+def pseudonym_lookup(body: LookupRequest, request: Request, db: Session = Depends(get_db)):
+    # type: (LookupRequest, Request, Session) -> Any
+    """What a real identifier became, so an operator can search for it.
+
+    Without this an operator cannot act on their own test data: they know
+    client 123 exists but not which stand-in to put in a Splunk search. It is a
+    deliberate oracle, and no new privilege - any operator can already learn the
+    same mapping by saving a pack - so the actor and the number of values are
+    logged, and the key is never created here: a lookup before any pack has been
+    built has nothing to look up.
+
+    ``widen`` must match the field's own policy, because the policy is part of
+    the identity: the same value at "keep the format" and at ``digits(15)`` has
+    two different stand-ins.
+    """
+    actor = _actor(request)
+    try:
+        sub, row = pseudonymkeys.subkey(db, create=False)
+    except pseudonymkeys.PseudonymKeyError as exc:
+        raise HTTPException(status_code=409, detail={
+            "error": "pseudonym_key_unavailable", "detail": str(exc)})
+    widen = None
+    if body.widen:
+        try:
+            widen = pseudonym.widen_format(body.widen.get("shape"), body.widen.get("length"))
+        except pseudonym.PseudonymError as exc:
+            raise _bad(exc)
+    log.info("pseudonym lookup of %d value(s) by %s (key %s)",
+             len(body.values), actor or "an operator", row.fingerprint)
+    out = []
+    for value in body.values:
+        stand_in = pseudonym.pseudonym(value, sub, widen=widen)
+        out.append({"value": value, "stand_in": stand_in,
+                    "format": str(pseudonym.infer(value)) if stand_in else None})
+    return {"key_fingerprint": row.fingerprint, "results": out}
 
 
 @router.post("/analyse")
