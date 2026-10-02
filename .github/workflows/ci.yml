@@ -112,6 +112,18 @@ jobs:
           FIREBOX_BIN: ${{ github.workspace }}/worker/engines/firebox/target/x86_64-unknown-linux-musl/release/firebox
         run: python -m pytest worker/engines/firebox/tests/parity -q
 
+      # These need a real engine, so they have to run AFTER the build above.
+      # The "Unit tests (agent)" step runs before it and skips them, which
+      # reads as passing while proving nothing: they are the tests that hold
+      # the control plane and the engines to the same arithmetic.
+      - name: Pseudonym and rotation parity (built packs through the real engine)
+        if: matrix.python-version == '3.12'
+        env:
+          FIREBOX_BIN: ${{ github.workspace }}/worker/engines/firebox/target/x86_64-unknown-linux-musl/release/firebox
+        run: |
+          python -m pytest worker/tests/test_pseudonym_engines.py \
+                           worker/tests/test_rotation_parity.py -q -p no:randomly
+
   server-test:
     runs-on: ubuntu-latest
     concurrency:
