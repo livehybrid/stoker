@@ -322,3 +322,29 @@ class TestRateMaps:
         conf = rewritten(tmp_path, "eps", 100, text=text)
         assert conf.get("r.csv", "hourOfDayRate") == '{"0": 0.3}'
 
+
+
+def test_whole_sample_count_is_left_unsplit_and_counts_as_work(tmp_path):
+    """``count = -1`` means "the whole sample every interval".
+
+    count_interval must NOT split it across workers (every worker generates the
+    whole sample), and the slot must report that it has work - otherwise a new
+    builder pack, whose default is -1, reports assigned_work 0 on every slot.
+    """
+    src = tmp_path / "eventgen.conf"
+    src.write_text("[a.sample]\nmode = sample\ncount = -1\ninterval = 1\n", encoding="utf-8")
+    parser = confrewrite.load_conf(str(src))
+
+    assert confrewrite.assigned_stanza_count(parser, "count_interval") == 1
+
+    confrewrite._rewrite_count_interval(parser, ["a.sample"], 1, 3)
+    assert parser.get("a.sample", "count") == "-1", "a whole-sample count must not be sharded"
+
+    # A positive count still splits by largest remainder, and a slot that is
+    # given 0 still reports no work.
+    pos = tmp_path / "pos.conf"
+    pos.write_text("[a.sample]\nmode = sample\ncount = 2\ninterval = 1\n", encoding="utf-8")
+    p2 = confrewrite.load_conf(str(pos))
+    confrewrite._rewrite_count_interval(p2, ["a.sample"], 2, 3)
+    assert p2.get("a.sample", "count") == "0"
+    assert confrewrite.assigned_stanza_count(p2, "count_interval") == 0

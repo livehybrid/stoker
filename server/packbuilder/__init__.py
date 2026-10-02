@@ -56,6 +56,11 @@ MAX_VALUE_LEN = 4096
 ANALYSE_EVENTS = 2000          # events examined for suggestions (the rest ride along)
 HIGHLIGHT_EVENTS = 25          # events returned with highlight spans
 PREVIEW_MAX = 200
+# eventgen's "generate the whole sample every interval". Both engines agree
+# (verified: 20 lines, count = -1, 3 intervals -> every line exactly 3 times),
+# and it is the only count the agent's count_interval rewrite does not split
+# across workers, so every worker emits the whole sample.
+WHOLE_SAMPLE = -1
 
 REPLACEMENT_KINDS = ("timestamp", "list", "linked", "values", "ipv4", "guid", "mac",
                      "integer", "float", "hex", "static", "sequence")
@@ -1225,7 +1230,14 @@ def validate_config(cfg):
         clean_tokens.append({"id": t.get("id") or "t%d" % (i + 1), "field": label[:80],
                              "pattern": pattern, "enabled": bool(t.get("enabled", True)),
                              "replacement": rep})
-    count = _int_in(cfg.get("count", 10), 1, 100000, "count")
+    # -1 is eventgen's "the whole sample, every interval". It is the default for
+    # a new pack because a positive count below the sample size silently emits
+    # only the first `count` events for ever (measured on both engines), which
+    # reads as "my upload did not work". eps and per_day_gb runs overwrite count
+    # anyway; count_interval is the mode that keeps it, and -1 is the one value
+    # the agent's count_interval rewrite leaves alone instead of splitting.
+    count = cfg.get("count", WHOLE_SAMPLE)
+    count = WHOLE_SAMPLE if _as_int(count) == WHOLE_SAMPLE else _int_in(count, 1, 100000, "count")
     interval = _int_in(cfg.get("interval", 1), 1, 86400, "interval")
     order = cfg.get("order") or "sequential"
     if order not in ("sequential", "random"):
@@ -1243,6 +1255,15 @@ def validate_config(cfg):
         "interval": interval,
         "order": order,
     }
+
+
+def _as_int(v):
+    # type: (Any) -> Optional[int]
+    """``v`` as an int, or None when it is not a whole number."""
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
 
 
 def _int_in(v, lo, hi, what):
@@ -1550,6 +1571,37 @@ def _value(rep, rng, epoch, state, rows=None):
     return ""
 
 
+def coverage_warnings(cfg):
+    # type: (Dict[str, Any]) -> List[str]
+    """Warn when the pack's own count/interval will not generate every event.
+
+    Each interval emits ``count`` events starting again at the sample's first
+    line, so a sequential pack whose count is below its sample size emits only
+    that prefix, for ever; and a count that is not a whole multiple of the
+    sample leaves the last pass of every interval half-finished. An eps or
+    per-day-GB run replaces count with the worker's share, so this only bites
+    count-per-interval runs - which is what a first smoke test usually is.
+    """
+    out = []  # type: List[str]
+    events = cfg.get("events") or []
+    count = _as_int(cfg.get("count", WHOLE_SAMPLE))
+    if cfg.get("order") == "random" or count is None or count <= 0 or not events:
+        return out
+    n = len(events)
+    interval = cfg.get("interval", 1)
+    if count < n:
+        out.append(
+            "a count-per-interval run generates only the first %d of your %d events every %s s; "
+            "the other %d are never generated (eps and GB/day runs use the whole sample). Set "
+            "\"whole sample every interval\" to generate all of them."
+            % (count, n, interval, n - count))
+    elif count % n:
+        out.append(
+            "count %d is not a whole multiple of your %d events, so the last pass of every "
+            "interval stops part-way through the sample" % (count, n))
+    return out
+
+
 def render_preview(cfg, n=20, seed=None):
     # type: (Dict[str, Any], int, Optional[int]) -> Dict[str, Any]
     """Render ``n`` events from a validated config without touching disk.
@@ -1568,11 +1620,21 @@ def render_preview(cfg, n=20, seed=None):
     for t, rx in compiled:
         if not any(rx.search(ev) for ev in events):
             warnings.append("%s: the pattern matches none of the sample events" % t["field"])
+    warnings.extend(coverage_warnings(cfg))
     now = time.time()
     state = {}  # type: Dict[str, Dict[str, int]]
     out = []
+    count = _as_int(cfg.get("count", WHOLE_SAMPLE))
     for i in range(n):
-        base = rng.choice(events) if cfg.get("order") == "random" else events[i % len(events)]
+        if cfg.get("order") == "random":
+            base = rng.choice(events)
+        elif count is not None and count > 0:
+            # Mirror the engines: each interval emits `count` events starting
+            # again at line 0, so the preview must repeat the same truncation
+            # rather than showing lines the run will never generate.
+            base = events[(i % count) % len(events)]
+        else:
+            base = events[i % len(events)]
         epoch = now - rng.uniform(0, cfg.get("interval", 1))
         rows = {}  # type: Dict[str, List[str]]   one table row per event (mvfile)
         text = base
@@ -1598,7 +1660,8 @@ def render_preview(cfg, n=20, seed=None):
 
 __all__ = [
     "BuilderError", "BUILDER_FILE", "BUILDER_TAG", "analyse", "break_events", "check_breaker",
-    "classify", "delete_custom_wordlist", "detect_breaker", "highlight", "load_wordlist",
+    "classify", "coverage_warnings", "delete_custom_wordlist", "detect_breaker", "highlight",
+    "load_wordlist", "WHOLE_SAMPLE",
     "ordered_tokens", "eventgen_tokens", "read_builder_config", "recommend", "render_preview",
     "save_custom_wordlist", "set_custom_dir", "split_events", "split_input", "table_columns",
     "validate_config", "wordlist_index", "wordlist_names", "write_pack",

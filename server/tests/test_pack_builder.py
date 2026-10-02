@@ -604,3 +604,69 @@ def test_auditd_epoch_and_serial():
     f = _by_field(pb.analyse([ev, ev.replace("15795", "15801")]))
     assert f["audit time"]["replacement"] == {"kind": "timestamp", "format": "%s"}
     assert f["audit serial"]["replacement"] == {"kind": "sequence", "start": 15795}
+
+
+# ---- sample coverage: a count below the sample size truncates it for ever ----
+
+def _twenty():
+    return ["line-%02d payload" % i for i in range(20)]
+
+
+def test_a_new_pack_generates_its_whole_sample_every_interval(tmp_path):
+    """The builder's default count is -1, eventgen's "the whole sample".
+
+    A positive count below the sample size makes BOTH engines emit only that
+    prefix, every interval, for ever (measured: 20 lines at count = 5 gives
+    lines 00-04 four times in four intervals). A 1,000-event upload generating
+    ten events reads as a broken upload, so -1 is the default.
+    """
+    cfg = pb.validate_config({"name": "whole", "events": _twenty(), "tokens": []})
+    assert cfg["count"] == pb.WHOLE_SAMPLE == -1
+    dest = str(tmp_path / "pack")
+    pb.write_pack(cfg, dest)
+    _, parser, _ = _conf_tokens(dest)
+    assert parser.get("whole.sample", "count") == "-1"
+    assert bundles.lint_pack(dest).ok
+    assert pb.read_builder_config(dest)["count"] == -1
+
+
+@pytest.mark.parametrize("count,expect", [
+    (-1, None),
+    (5, "only the first 5 of your 20 events"),
+    (30, "not a whole multiple"),
+    (40, None),
+])
+def test_coverage_warnings(count, expect):
+    cfg = pb.validate_config({"name": "cov", "events": _twenty(), "tokens": [],
+                              "count": count, "order": "sequential"})
+    warnings = pb.coverage_warnings(cfg)
+    if expect is None:
+        assert warnings == []
+    else:
+        assert len(warnings) == 1 and expect in warnings[0]
+    # random order has no passes, so neither warning applies
+    rand = pb.validate_config({"name": "cov", "events": _twenty(), "tokens": [],
+                               "count": count, "order": "random"})
+    assert pb.coverage_warnings(rand) == []
+
+
+def test_preview_mirrors_the_engines_truncation():
+    # The preview must show what the run will actually generate, not lines the
+    # engines will never reach.
+    cfg = pb.validate_config({"name": "cov", "events": _twenty(), "tokens": [],
+                              "count": 5, "order": "sequential"})
+    out = pb.render_preview(cfg, n=20, seed=1)
+    assert sorted({e.split()[0] for e in out["events"]}) == [
+        "line-00", "line-01", "line-02", "line-03", "line-04"]
+    assert any("only the first 5" in w for w in out["warnings"])
+
+    whole = pb.validate_config({"name": "cov", "events": _twenty(), "tokens": [],
+                                "count": -1, "order": "sequential"})
+    out = pb.render_preview(whole, n=20, seed=1)
+    assert len({e.split()[0] for e in out["events"]}) == 20
+    assert out["warnings"] == []
+
+
+def test_zero_count_is_still_refused():
+    with pytest.raises(pb.BuilderError):
+        pb.validate_config({"name": "z", "events": _twenty(), "tokens": [], "count": 0})

@@ -190,3 +190,19 @@ def test_count_interval_active_matches_worker_split():
             parts = largest_remainder(count, [1.0] * workers)
             truth = sum(1 for p in parts if p > 0)
             assert count_interval_active_workers([float(count)], workers) == truth
+
+
+def test_whole_sample_count_gives_every_worker_work():
+    """A negative count is "the whole sample every interval".
+
+    ``_rewrite_count_interval`` leaves it unsplit, so every slot generates the
+    whole sample and every slot has work. Treating it as no work marked the
+    fleet inactive and refused the submit with workers_exceed_shardable_work -
+    which is what a new builder pack (count = -1) would have hit.
+    """
+    for workers in (1, 2, 3, 8, 58):
+        assert count_interval_active_workers([-1.0], workers) == workers
+    # mixed stanzas: the whole-sample one alone gives every slot work
+    assert count_interval_active_workers([-1.0, 2.0], 3) == 3
+    # and a positive count still shards exactly as before
+    assert count_interval_active_workers([2.0], 3) == 2

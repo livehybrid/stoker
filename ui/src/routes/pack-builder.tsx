@@ -410,6 +410,11 @@ function PackBuilder() {
   const [description, setDescription] = useState("");
   const [sourcetype, setSourcetype] = useState("");
   const [tags, setTags] = useState("");
+  // -1 is eventgen's "the whole sample every interval" and the default for a new
+  // pack: a positive count below the sample size emits only that prefix for
+  // ever. The switch and the number are separate so toggling back restores the
+  // operator's last figure.
+  const [wholeSample, setWholeSample] = useState(true);
   const [count, setCount] = useState("10");
   const [interval, setInterval] = useState("1");
   const [order, setOrder] = useState<"sequential" | "random">("sequential");
@@ -447,7 +452,8 @@ function PackBuilder() {
     setDescription(c.description ?? "");
     setSourcetype(c.sourcetype ?? "");
     setTags((c.tags ?? []).join(", "));
-    setCount(String(c.count));
+    setWholeSample(c.count < 0);
+    if (c.count > 0) setCount(String(c.count));
     setInterval(String(c.interval));
     setOrder(c.order ?? "sequential");
     hydrated.current = true;
@@ -516,11 +522,11 @@ function PackBuilder() {
             ? { ...replacement, values: (replacement.values ?? []).map((v) => v.trim()).filter(Boolean) }
             : replacement,
       })),
-      count: Math.max(1, Math.floor(num(count, 10))),
+      count: wholeSample ? -1 : Math.max(1, Math.floor(num(count, 10))),
       interval: Math.max(1, Math.floor(num(interval, 1))),
       order,
     }),
-    [name, description, sourcetype, tags, events, breaker, tokens, count, interval, order],
+    [name, description, sourcetype, tags, events, breaker, tokens, wholeSample, count, interval, order],
   );
 
   // Debounced live preview whenever the config changes.
@@ -790,8 +796,22 @@ function PackBuilder() {
               <Field label="Tags" hint="comma separated">
                 <TextInput value={tags} onChange={(_e, { value }) => setTags(value)} placeholder="web, demo" />
               </Field>
-              <Field label="Events per interval" hint="a run's rate setting replaces this">
-                <TextInput value={count} onChange={(_e, { value }) => setCount(value)} />
+              <Field
+                label="Events per interval"
+                hint="eps and GB/day runs replace this; a count-per-interval run keeps it and splits it across workers"
+              >
+                <Stack $gap="small">
+                  <Switch
+                    appearance="checkbox"
+                    selected={wholeSample}
+                    onClick={() => setWholeSample(!wholeSample)}
+                  >
+                    Whole sample every interval
+                  </Switch>
+                  {!wholeSample && (
+                    <TextInput value={count} onChange={(_e, { value }) => setCount(value)} />
+                  )}
+                </Stack>
               </Field>
               <Field label="Interval (seconds)">
                 <TextInput value={interval} onChange={(_e, { value }) => setInterval(value)} />

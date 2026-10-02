@@ -107,7 +107,7 @@ def build_one(path, doc, out_dir):
         "events": split["events"],
         "breaker": split["breaker"],
         "tokens": suggestions,
-        "count": 10,
+        "count": -1,
         "interval": 1,
     })
     preview = pb.render_preview(cfg, n=10, seed=7)

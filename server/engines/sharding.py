@@ -132,7 +132,12 @@ def count_interval_active_workers(stanza_counts, workers):
         except (TypeError, ValueError):
             return workers  # unparseable declaration: never block on a guess
         if total < 0:
-            continue
+            # A negative count is eventgen's "the whole sample every interval".
+            # The agent's count_interval rewrite leaves it alone rather than
+            # splitting it, so EVERY slot generates the whole sample and every
+            # slot therefore has work. Skipping it here used to mark the fleet
+            # inactive and refuse the submit with workers_exceed_shardable_work.
+            return workers
         for slot, part in enumerate(largest_remainder(total, [1.0] * workers)):
             if part > 0:
                 active[slot] = True

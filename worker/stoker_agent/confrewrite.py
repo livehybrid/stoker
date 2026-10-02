@@ -300,7 +300,10 @@ def assigned_stanza_count(parser, rate_mode):
             assigned += 1
             continue
         count = _get_float(parser, section, "count")
-        if count is None or count > 0:
+        # A negative count ("the whole sample every interval") is left unsplit
+        # by _rewrite_count_interval, so this slot does generate it; only a
+        # count of exactly 0 after the split means this slot has nothing to do.
+        if count is None or count > 0 or count < 0:
             assigned += 1
     return assigned
 

@@ -150,6 +150,36 @@ The worker rewrites `interval`/`count` (or `perDayVolume`) for its share of the
 rate; `hourOfDayRate` and the other `*Rate` shaping maps are preserved verbatim
 in `per_day_gb`/`count_interval` modes (see `packs/apigw` for a diurnal example).
 
+### `count` and how much of your sample actually generates
+
+**Each interval emits `count` events starting again at the sample's first
+line**, wrapping through the sample as needed. Both engines behave identically
+here (measured: 20 sample lines at `count = 5` gives lines 1 to 5, four times,
+over four intervals; lines 6 to 20 never appear). So:
+
+| `count` vs sample size | What generates |
+|---|---|
+| `count = -1` | the whole sample, once per interval |
+| `count` below the sample size | only the first `count` lines, for ever |
+| `count` above the sample size | the whole sample, wrapping; a final partial pass when it is not a whole multiple |
+
+Which `count` the pack's own value survives depends on the run's rate mode:
+
+- **`eps`** replaces it with the worker's share, so at any real rate the whole
+  sample is used (10,000 eps over a 1,000-line sample wraps ten times a second).
+- **`per_day_gb`** replaces it too.
+- **`count_interval`** keeps the pack's `count` and **splits it across the
+  workers** by largest remainder, so two workers each emit half of it. The one
+  exception is `-1`, which is left unsplit, so every worker emits the whole
+  sample.
+
+**`-1` is what the pack builder writes for a new pack**, because a positive
+count below the sample size silently generates a prefix of an upload and reads
+as a failed upload. A pack written before this used `count = 10`; reopen it in
+the builder and turn on "whole sample every interval", or set a count that is a
+whole multiple of the sample. The builder's preview mirrors whichever applies
+and warns when a count would under-cover the sample.
+
 ### Token replacement: capture groups and the `%s` epoch gotcha
 
 Two behaviours of the vendored eventgen (7.2.1) matter when authoring tokens, and
