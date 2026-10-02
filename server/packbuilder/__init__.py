@@ -677,6 +677,99 @@ def _decimals(values):
     return max((len(v.split(".", 1)[1]) for v in values if "." in v), default=0)
 
 
+# Key segments that name an identifier rather than a described thing. Matched
+# against the LAST segment only (underscore or camelCase), because a leading
+# "id_" is usually a different idea ("identity_provider") and v1's
+# leading-segment rule put "Consistent pseudonym" on request_method.
+# "account" is deliberately NOT here: Windows "VirtualAccount" is a yes/no
+# field, not an identifier. account_number and account_id are still caught, by
+# their own last segment.
+_ID_SEGMENTS = frozenset(("id", "uid", "uuid", "guid", "sid", "ref", "no", "num",
+                          "number", "msisdn", "iban", "nino", "ssn"))
+# The all-lower-case compact spellings, listed rather than matched by suffix: a
+# generic "ends in id" rule also catches "valid", "hybrid" and "overpaid", and
+# no stop-list of English words is ever complete.
+_COMPACT_IDS = frozenset(("clientid", "sessionid", "userid", "orderid", "accountid",
+                          "deviceid", "traceid", "spanid", "requestid", "customerid",
+                          "transactionid", "tenantid", "subscriberid", "msgid",
+                          "correlationid", "externalid", "payerid", "merchantid"))
+# Below this many characters a numeric field is a CODE, not an identifier: a
+# Windows EventID of 4624 names a kind of event, and pseudonymising it would
+# break every search that looks for it.
+_ID_MIN_DIGITS = 6
+_ID_MIN_DISTINCT = 10
+_CAMEL_RE = re.compile(r"[A-Z]?[a-z0-9]+|[A-Z]+(?![a-z])")
+# Values that look like an identifier's shape but are not one: a Windows
+# message-table placeholder (%%1843 renders as "No") and a hex flag word.
+_PLACEHOLDER_RE = re.compile(r"^(?:%%\d+|0x[0-9a-fA-F]+)$")
+
+
+def _key_segments(key):
+    # type: (str) -> List[str]
+    """The key's words, splitting on separators AND camelCase.
+
+    ``client_id`` and ``clientId`` must both end in the segment ``id``; the
+    analyser missed the camelCase form before.
+    """
+    out = []  # type: List[str]
+    for chunk in re.split(r"[^A-Za-z0-9]+", str(key or "")):
+        out.extend(m.group(0).lower() for m in _CAMEL_RE.finditer(chunk))
+    return out
+
+
+def looks_like_identifier(key, values):
+    # type: (str, Sequence[str]) -> Optional[str]
+    """Why this field is an opaque identifier, or None.
+
+    An identifier is a value whose only job is to be equal to itself
+    elsewhere, so varying it randomly destroys the correlation the data had and
+    the honest treatment is a consistent pseudonym. The rules are deliberately
+    narrow: a field is only an identifier when its NAME says so and its VALUES
+    are opaque, or when the values are self-evidently opaque identifiers.
+    """
+    distinct = [v for v in dict.fromkeys(values) if v]
+    if not distinct:
+        return None
+    segments = _key_segments(key)
+    named = bool(segments) and (segments[-1] in _ID_SEGMENTS
+                                or "".join(segments) in _COMPACT_IDS)
+    shape = classify(distinct)
+    recurs = len(values) > len(distinct)
+
+    if named and shape == "guid" and not recurs:
+        # A GUID that appears once per event correlates with nothing, and the
+        # ordinary random-GUID replacement already keeps the original out of
+        # the pack while giving unlimited cardinality. A pseudonym would cap it
+        # at the sample's own distinct count for no privacy gain.
+        return None
+    if named and shape in ("int", "epoch", "epoch_ms"):
+        # Short numeric values, few of them, are a CODE SET (an event type, a
+        # status, a priority) rather than identifiers. A single distinct value
+        # is NOT by itself a reason to decline: a one-event sample is exactly
+        # where a real identifier is least likely to be noticed, so the
+        # privacy-preserving suggestion still belongs there.
+        longest = max(len(v.lstrip("-")) for v in distinct)
+        if longest < _ID_MIN_DIGITS and len(distinct) < _ID_MIN_DISTINCT:
+            return None
+    opaque = shape in ("int", "hex", "guid", "epoch", "epoch_ms")
+    if named and opaque:
+        return "an identifier (%s), so a consistent stand-in keeps it correlatable" % shape
+    if named and shape == "string" and all(len(v) >= 6 for v in distinct) \
+            and not any(_PLACEHOLDER_RE.match(v) for v in distinct):
+        return "an identifier, so a consistent stand-in keeps it correlatable"
+    # Values that are identifiers whatever the field is called: a digit string
+    # too long to be a number, or a GUID that RECURS (a GUID appearing once per
+    # event is just noise; one that comes back is identifying something).
+    if shape == "int" and any(len(v.lstrip("-")) > 18 for v in distinct):
+        return "a digit string too long to be a number, so it is an identifier"
+    if shape == "guid" and len(values) > len(distinct):
+        return "a GUID that recurs, so it identifies something"
+    # A person-shaped key holding digits is an opaque account number, not a name.
+    if _key_list(key) in ("usernames", "emails", "full_names") and shape in ("int", "hex"):
+        return "an account identifier rather than a name"
+    return None
+
+
 def recommend(key, values):
     # type: (str, Sequence[str]) -> Tuple[Dict[str, Any], bool, str]
     """(replacement, enabled, why) for a field named ``key`` with these values."""
@@ -684,6 +777,10 @@ def recommend(key, values):
     if any(len(v) > MAX_VALUE_LEN for v in distinct):
         # a blob (certificate, SAML document, encoded payload): not a field to vary
         return {"kind": "static", "value": distinct[0]}, False, "a long value"
+    why_identifier = looks_like_identifier(key, values)
+    if why_identifier:
+        return {"kind": "pseudonym", "widen": None, "rotate": False,
+                "rewrite_residuals": False}, True, why_identifier
     shape = classify(distinct)
     k = _norm_key(key)
     constant = len(distinct) <= 1
@@ -1815,7 +1912,8 @@ def render_preview(cfg, n=20, seed=None, subkey=None, already=None):
 __all__ = [
     "BuilderError", "BUILDER_FILE", "BUILDER_TAG", "analyse", "break_events", "check_breaker",
     "apply_pseudonyms", "classify", "coverage_warnings", "delete_custom_wordlist",
-    "detect_breaker", "highlight", "pseudonym_fields", "pseudonym_warnings",
+    "detect_breaker", "highlight", "looks_like_identifier", "pseudonym_fields",
+    "pseudonym_warnings",
     "load_wordlist", "WHOLE_SAMPLE",
     "ordered_tokens", "eventgen_tokens", "read_builder_config", "recommend", "render_preview",
     "save_custom_wordlist", "set_custom_dir", "split_events", "split_input", "table_columns",

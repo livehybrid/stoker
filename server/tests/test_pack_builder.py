@@ -578,8 +578,12 @@ def test_lists_must_fit_the_values():
     assert fields["MFAUsed"]["replacement"]["kind"] == "values"       # "No" is not Norway
     assert fields["countryCode"]["replacement"] == {"kind": "list", "list": "country_codes"}
     assert fields["login"]["replacement"] == {"kind": "list", "list": "usernames"}
-    assert fields["id"]["replacement"]["kind"] == "integer"           # 17 digits: a 64-bit draw
-    assert fields["big"]["replacement"]["kind"] == "values"           # 24 digits: kept as seen
+    # Both are identifiers now: a field named `id` and a digit string too long
+    # to be a number get a consistent stand-in, which keeps them correlatable
+    # AND keeps the real value out of the pack. Before, `big` was copied into a
+    # values list verbatim.
+    assert fields["id"]["replacement"]["kind"] == "pseudonym"
+    assert fields["big"]["replacement"]["kind"] == "pseudonym"
     assert fields["lat"]["replacement"]["decimals"] == 9
     blob = '{"cert":"%s","user":"ada.smith"}' % ("A" * 5000)
     f = _by_field(pb.analyse([blob]))
@@ -594,8 +598,12 @@ def test_windows_value_shapes_and_single_values_do_not_match_lists():
           "<Data Name='ProcessId'>0x3e4</Data><Data Name='VirtualAccount'>%%1843</Data>"
           "<Data Name='department'>Finance</Data></EventData></Event>")
     f = _by_field(pb.analyse([ev]))
-    for key in ("TargetUserSid", "ProcessId", "VirtualAccount", "Channel"):
+    for key in ("ProcessId", "VirtualAccount", "Channel"):
         assert f[key]["replacement"]["kind"] == "values", key
+    # A SID names a user, so it is an identifier: a consistent stand-in keeps
+    # the correlation and keeps the real SID out of the pack, where a values
+    # list would have copied it in.
+    assert f["TargetUserSid"]["replacement"]["kind"] == "pseudonym"
     assert f["department"]["replacement"] == {"kind": "list", "list": "departments"}
 
 
@@ -876,3 +884,46 @@ def test_a_pack_without_pseudonyms_never_touches_the_key(client, upload_dir, db_
         "name": "plain", "events": ["a=1 b=2"], "tokens": []}, "n": 2})
     assert r.status_code == 200
     assert pseudonymkeys.peek(db_session) is None
+
+
+@pytest.mark.parametrize("key,values,expect", [
+    # Named identifiers, opaque values: the point of the feature.
+    ("client_id", ["123456", "789012"], "pseudonym"),
+    ("clientId", ["123456", "789012"], "pseudonym"),
+    ("clientid", ["123456", "789012"], "pseudonym"),
+    ("order_no", ["100001", "100002"], "pseudonym"),
+    ("TargetUserSid", ["S-1-5-21-1-2-3-1001", "S-1-5-21-1-2-3-1002"], "pseudonym"),
+    ("trace_id", ["a1b2c3d4e5f6", "998877665544"], "pseudonym"),
+    # A person-shaped key holding digits is an account number, not a name.
+    ("user", ["123", "456", "123"], "pseudonym"),
+    # Code sets: short numbers, few of them. Pseudonymising a Windows EventID
+    # would break every search that looks for 4624.
+    ("EventID", ["4624", "4625", "4624"], "integer"),
+    ("LogonType", ["3", "2"], "integer"),
+    ("priority", ["1", "2", "3"], "integer"),
+    # Not identifier names at all: v1's rule put pseudonyms on these.
+    ("request_method", ["GET", "POST"], "list"),
+    ("user_agent", ["Mozilla/5.0 (X11)", "curl/8.9.1"], "list"),
+    ("status", ["200", "404"], "list"),
+    ("city", ["London", "Paris"], "list"),
+    ("bytes", ["512", "2048"], "integer"),
+    # Words that merely end in "id".
+    ("overpaid", ["12", "13"], "integer"),
+    ("valid", ["true", "false"], "values"),
+    # A name stays a name: the word list gives realistic people.
+    ("username", ["ada.smith", "bob.jones"], "list"),
+])
+def test_the_identifier_rule_is_narrow(key, values, expect):
+    replacement, _enabled, _why = pb.recommend(key, values)
+    assert replacement["kind"] == expect, (key, replacement)
+
+
+def test_a_guid_is_only_an_identifier_when_it_recurs():
+    one = "3f2b1c9e-8a7d-4e21-9b3c-1d2e3f4a5b6c"
+    two = "4a2b1c9e-8a7d-4e21-9b3c-1d2e3f4a5b6d"
+    # Unique per event: the ordinary random GUID already keeps the original out
+    # of the pack and gives unlimited cardinality, so a pseudonym would cap it
+    # at the sample's distinct count for no privacy gain.
+    assert pb.recommend("eventID", [one, two])[0]["kind"] == "guid"
+    # Recurring: it identifies a session, so the correlation must survive.
+    assert pb.recommend("session_uuid", [one, two, one])[0]["kind"] == "pseudonym"
