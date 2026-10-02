@@ -1023,6 +1023,11 @@ pack still contains no real identifiers.
 run** with a message saying so, rather than quietly emitting the stable stand-in
 and leaving you to discover from the data that nothing rotated.
 
+The preview shows rotated events, so you can check that the login and the logout
+of one pass share an identity and that the next pass does not. It previews one
+worker (slot 0 of 1), because it cannot know how many workers the run will use;
+a real multi-worker run produces different identities but the same structure.
+
 **Watch the capacity.** The identities come from the field's own format space,
 so a 6-digit id with 1,000 distinct values has 900 passes per worker, which at
 load-test rates is seconds. The builder states the figure while you can still
