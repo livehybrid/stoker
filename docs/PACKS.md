@@ -893,6 +893,102 @@ The vendored Python eventgen needed a patch for this (see
 two spellings of the same path, so the first event a process generated could mix
 rows.
 
+### Consistent pseudonyms (keeping an identifier correlatable)
+
+An identifier is a value whose only job is to equal itself somewhere else. Vary
+it the ordinary way and the correlation in the data is destroyed: `client_id=123`
+in one event and `client_id=123` in another become two unrelated values, so a
+search that groups by client, or joins a login to its logout, returns nonsense.
+
+Mark the field **Consistent pseudonym (keyed hash)** instead. The same value
+always gets the same stand-in, so the structure survives, and the original is
+not in the pack. For the three-event sample
+
+```
+user=123 action=login
+user=456 action=register
+user=123 action=logout
+```
+
+the saved pack holds
+
+```
+user=583 action=login
+user=908 action=register
+user=583 action=logout
+```
+
+**It happens when the pack is written, not when events are generated.** The
+sample text itself is rewritten, so no eventgen token is emitted for the field,
+the stand-ins reach Splunk through firebox and the Python engine alike with no
+engine change, and no worker can leak anything. That last point is the reason
+for the design: both engines silently DROP a `replacementType` they do not
+recognise and emit the matched text verbatim, so a pack that carried real
+identifiers for an engine to hash would leak them on any un-patched worker.
+
+**Format is kept by default**, so six digits in gives six different digits out
+and `\d+` extractions, numeric comparisons and dashboards keep working. That
+caps the output space, so the builder states the collision risk before you save:
+1,000 six-digit identifiers carry about a 43% chance that two of them merge, and
+a merge silently joins two customers' events, which corrupts the very
+correlation you are testing. A real collision is refused outright, not warned
+about. Widen the field to fixed-length digits, hex or a GUID when the space is
+too small; 15 digits makes it vanish.
+
+**The key.** One per Stoker instance, created on the first pseudonymising save,
+held as Fernet ciphertext under the control plane's master key exactly like a
+target's HEC token. Packs built on one instance therefore correlate with each
+other with no configuration, and `pack.yaml` records the key's 8-hex
+fingerprint so you can see which packs share one. A save is refused while
+`STOKER_MASTER_KEY` is auto-generated, because a key stored under an ephemeral
+master key is unreadable after a restart and would orphan every pack built with
+it. Losing the key does not break existing packs, whose stand-ins are already
+written, but new packs will not correlate with them, and that cannot be undone.
+
+**What this is and is not.** It is pseudonymisation, not anonymisation. The
+mapping is a keyed hash, so whoever holds the control-plane database and its
+master key can rebuild it, and an identifier space small enough to enumerate
+(six digits is a million) can be brute-forced from the key in seconds. Under
+GDPR Art 4(5) pseudonymised data about people remains personal data. What you
+get is that the pack and the replayed events do not contain the originals, and
+that correlation is preserved.
+
+**Your sample is stored in the pack as you supplied it.** Only the fields you
+mark are rewritten. If the same identifier also appears in a URL, a message
+string or a JSON blob that no marked field covers, it is still in the pack, and
+the pack travels (git-sync, the export button). Redaction destroys correlation,
+since nothing groups by `REDACTED`, which is exactly why pseudonymisation
+exists for the fields you need to join on; everything else sensitive, free text,
+names, emails, payload bodies, should come out before you upload.
+
+Other limits worth knowing:
+
+- **Equality is exact text.** `000123` and `123` are different identifiers, and
+  so are `ABC` and `abc`. A field captured with its quotes in one pack and
+  without in another will not line up.
+- **The policy is part of the identity.** The same value at `same` and at
+  `digits(15)` gives two different stand-ins, so fields that must correlate need
+  the same setting.
+- **Correlation is per instance.** Another Stoker has another key.
+- **Frequency survives by design.** A client producing 40% of events still does.
+- **Reopening a pack** shows the stand-ins, and a rebuild keeps them: the server
+  passes the events it read from disk so they are never hashed twice, which
+  would silently stop the pack correlating with every other one. To start over,
+  re-upload the originals.
+- **Rotating a new identity per replay** (so each pass through the sample is a
+  fresh user) needs worker support that is not released yet and is refused for
+  now.
+
+The analyser suggests this on its own for a field whose name says identifier
+(`client_id`, `clientId`, `TargetUserSid`, `order_no`), a person-shaped key
+holding digits (`user=123` is an account number, not a name), a digit string too
+long to be a number, and a GUID that recurs. It deliberately does not for a code
+set: pseudonymising a Windows `EventID` would break every search for 4624.
+
+API: `GET /api/pack-builder/pseudonym-key` reports whether a key exists and its
+fingerprint, and never creates one. A save needing a key that cannot be created
+is `409 pseudonym_key_unavailable`.
+
 ### Your own word lists
 
 **Manage lists** under the fields saves a list, or a table when you give column
