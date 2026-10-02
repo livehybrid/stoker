@@ -257,15 +257,16 @@ class Agent(object):
                                                                 gated, workdir)
                 elif is_metrics:
                     self._engine = self._build_metrics_engine(sl, pack, workdir)
-                elif engine_env:
+                else:
+                    # One call, always passing extra_env (None is the factory's
+                    # own default). Two branches here is how the fleet position
+                    # came to ride only one envelope: the slot keeps workers'
+                    # identities apart, so a path that silently omitted it had
+                    # every worker minting the same ones.
                     self._engine = self._engine_factory(conf_path,
                                                         cfg.output_socket,
                                                         pack.pack_dir,
                                                         extra_env=engine_env)
-                else:
-                    self._engine = self._engine_factory(conf_path,
-                                                        cfg.output_socket,
-                                                        pack.pack_dir)
                 if gated and not is_metrics and not is_rawreplay:
                     # Warm the engine; the paused bucket holds output back. This
                     # is ONLY safe for eventgen, which templates events on demand
@@ -436,21 +437,28 @@ class Agent(object):
         self._envelope = "stoker"
         if other_engine:
             return "stoker", None
+        # The fleet position has to reach the engine on EVERY path below, not
+        # just the HEC-envelope one. The slot is the only thing keeping two
+        # workers' identities apart, so a path that dropped it would have all N
+        # workers mint the SAME identities and merge every journey, silently and
+        # invisibly in the data. STOKER_FAST_ENVELOPE=0 is a supported setting,
+        # so that path is reachable in a real deployment.
+        rotation = self._rotation_env(sl)
         if os.environ.get("STOKER_ENGINE_CMD"):
-            return "stoker", None  # a custom launcher: implementation unknown
+            return "stoker", rotation  # a custom launcher: implementation unknown
         try:
             impl, _binary = eventgen_impl()
         except EngineError:
-            return "stoker", None
+            return "stoker", rotation
         self._engine_impl = impl
         if impl != "firebox" or not cfg.fast_envelope:
-            return "stoker", None
+            return "stoker", rotation
         self._envelope = "hec"
         policy = {"overrides": dict(sl.overrides), "defaults": sl.hec_defaults()}
         log.info("firebox will emit HEC-line envelopes; the agent forwards bytes")
         return "hec", dict({"STOKER_ENVELOPE": "hec",
                             "STOKER_ENVELOPE_META": json.dumps(policy)},
-                           **self._rotation_env(sl))
+                           **rotation)
 
     def _rotation_env(self, sl):
         # type: (SpecSlice) -> Dict[str, str]
@@ -458,8 +466,9 @@ class Agent(object):
 
         The slot is the digit that keeps workers disjoint: every worker walks
         the same event ordinals, and it is ``slot`` alone that stops two of them
-        minting the same identity. Sending it always, rather than only for a
-        rotating pack, keeps one code path and costs two environment variables.
+        minting the same identity. Sent on every eventgen path and for every
+        pack, rotating or not: one code path, two environment variables, and no
+        way for a configuration change to quietly take it away.
         """
         return {"STOKER_ROTATE_WORKERS": str(int(sl.total_workers or 1)),
                 "STOKER_ROTATE_SLOT": str(int(sl.slot or 0))}

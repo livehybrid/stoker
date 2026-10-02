@@ -145,7 +145,7 @@ def make_agent(tmp_path, rate=100, duration="4", extra_env=None):
 
     agent = Agent(cfg,
                   hec_factory=hec_factory,
-                  engine_factory=lambda conf, sock, cwd=None:
+                  engine_factory=lambda conf, sock, cwd=None, extra_env=None:
                   StubEngine(conf, sock, cwd=cwd))
     return agent, sinks
 
@@ -235,7 +235,7 @@ def test_standalone_hec_auth_failure_exits_3(tmp_path):
     }
     agent = Agent(load_config(env),
                   hec_factory=AuthFailingHec,
-                  engine_factory=lambda conf, sock, cwd=None:
+                  engine_factory=lambda conf, sock, cwd=None, extra_env=None:
                   StubEngine(conf, sock, cwd=cwd))
     assert agent.run() == 3
 
@@ -537,3 +537,73 @@ def test_rate_shape_pack_scales_the_engine_and_the_bucket(tmp_path, monkeypatch)
     agent2 = Agent(cfg, clock=lambda: busy)
     agent2._setup_shape(sl, _P(), False)
     assert agent2._shape is None and agent2._engine_share(sl) == 100.0
+
+
+def test_the_fleet_position_reaches_the_engine_on_every_path(tmp_path, monkeypatch):
+    """The worker's slot must travel whatever the envelope.
+
+    Under `pass`-scope rotation the identity is
+    `(pass x workers + slot) x D + k`, so the slot is the only thing keeping two
+    workers' identities apart. It used to ride only the HEC-line envelope, which
+    meant STOKER_FAST_ENVELOPE=0 (a supported setting) left every worker at the
+    default slot 0 of 1: all N workers would mint the SAME identities and merge
+    every journey, with nothing in the data to show it.
+    """
+    import stat
+    fake = tmp_path / "firebox"
+    fake.write_text("#!/bin/sh\nexit 0\n")
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("STOKER_FIREBOX_BIN", str(fake))
+    monkeypatch.delenv("STOKER_ENGINE_CMD", raising=False)
+    monkeypatch.delenv("STOKER_EVENTGEN_IMPL", raising=False)
+    base = {
+        "STOKER_STANDALONE": "1",
+        "STOKER_BUNDLE": make_pack(tmp_path),
+        "STOKER_HEC_URL": "http://fake-hec:8088",
+        "STOKER_HEC_TOKEN": "tok",
+        "STOKER_INDEX": "loadtest",
+        "STOKER_RATE_MODE": "eps",
+        "STOKER_RATE_VALUE": "100",
+        "STOKER_OUTPUT_SOCKET": str(tmp_path / "out.sock"),
+        "STOKER_METRICS_PORT": "0",
+    }
+
+    def envelope_env(extra=None, python=False, override=None):
+        env = dict(base, **(extra or {}))
+        if python:
+            monkeypatch.setenv("STOKER_EVENTGEN_IMPL", "python")
+        else:
+            monkeypatch.delenv("STOKER_EVENTGEN_IMPL", raising=False)
+        if override:
+            monkeypatch.setenv("STOKER_ENGINE_CMD", override)
+        else:
+            monkeypatch.delenv("STOKER_ENGINE_CMD", raising=False)
+        cfg = load_config(env)
+        sl = SpecSlice.from_standalone(cfg)
+        return Agent(cfg)._eventgen_envelope(cfg, sl, False)
+
+    # The HEC-line envelope: rotation rides alongside the envelope metadata.
+    name, extra = envelope_env()
+    assert name == "hec"
+    assert extra["STOKER_ROTATE_WORKERS"] == "1" and extra["STOKER_ROTATE_SLOT"] == "0"
+    assert "STOKER_ENVELOPE_META" in extra
+
+    # The classic envelope: this is the path that used to drop it.
+    name, extra = envelope_env({"STOKER_FAST_ENVELOPE": "0"})
+    assert name == "stoker"
+    assert extra is not None, "the classic envelope dropped the fleet position"
+    assert extra["STOKER_ROTATE_SLOT"] == "0"
+    assert "STOKER_ENVELOPE" not in extra, "the classic envelope sets no envelope keys"
+
+    # The Python engine (the run fails later at build_command) and a custom
+    # launcher both still carry it, so neither can be the quiet path.
+    for kwargs in ({"python": True}, {"override": "/bin/echo {conf}"}):
+        name, extra = envelope_env(**kwargs)
+        assert name == "stoker"
+        assert extra and "STOKER_ROTATE_WORKERS" in extra, kwargs
+
+    # Another engine (rawreplay/metrics) cannot hold a rotate token, so it
+    # needs nothing.
+    cfg = load_config(base)
+    sl = SpecSlice.from_standalone(cfg)
+    assert Agent(cfg)._eventgen_envelope(cfg, sl, True) == ("stoker", None)
