@@ -29,6 +29,7 @@ import type {
   WordlistInfo,
   PackPreview,
   PackPreviewRun,
+  PseudonymKeyInfo,
   PackUploadMeta,
   RepoCreate,
   RepoCreated,
@@ -310,10 +311,15 @@ export const packBuilder = {
     request<WordlistInfo>("POST", "/pack-builder/wordlists", { body }),
   deleteWordlist: (name: string) =>
     request<void>("DELETE", `/pack-builder/wordlists/${encodeURIComponent(name)}`),
-  preview: (config: BuilderConfig, n = 20, seed?: number) =>
+  // `already` echoes the events a previous build pseudonymised, so previewing
+  // a reopened pack does not hash its stand-ins again. Advisory only: a SAVE
+  // reads the authoritative list from the pack on disk, never from here.
+  preview: (config: BuilderConfig, n = 20, seed?: number, already?: string[]) =>
     request<BuilderPreviewResponse>("POST", "/pack-builder/preview", {
-      body: { config, n, seed },
+      body: { config, n, seed, already },
     }),
+  pseudonymKey: () =>
+    request<PseudonymKeyInfo>("GET", "/pack-builder/pseudonym-key"),
   create: (config: BuilderConfig) =>
     request<PackOut>("POST", "/pack-builder/packs", { body: { config } }),
   get: (id: number) =>

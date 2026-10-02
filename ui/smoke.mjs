@@ -158,6 +158,10 @@ const ROUTES = {
         { name: 'usernames', title: 'Usernames', description: 'Accounts', kind: 'list', custom: false, count: 300, sample: ['ada.smith'] },
         { name: 'store_ids', title: 'Store IDs', description: '', kind: 'list', custom: true, count: 3, sample: ['S-001'] },
     ],
+    '/pack-builder/pseudonym-key': {
+        exists: true, name: 'default', fingerprint: '3fa1c2d9',
+        algorithm: 'hmac-sha256-v1', created_at: '2026-10-02T00:00:00Z',
+    },
     '/pack-builder/analyse': {
         events: 2,
         event_list: ['user=alice city=London', 'user=bob city=Paris'],
@@ -167,7 +171,8 @@ const ROUTES = {
         suggestions: [
             {
                 id: 'f1_user', field: 'user', kind: 'kv', pattern: '\\buser=([^\\s]+)', enabled: true,
-                replacement: { kind: 'list', list: 'usernames' }, why: 'field name suggests usernames',
+                replacement: { kind: 'pseudonym', widen: null, rotate: false, rewrite_residuals: false },
+                why: 'an account identifier rather than a name',
                 examples: ['alice', 'bob'], matches: 2,
             },
             {
@@ -426,7 +431,9 @@ const go = async (pathname) => {
         } else {
             analyseButton.click();
             await check('pack builder: fields listed', 'Fields to vary (2 of 2 on)');
-            await check('pack builder: word list offered', 'Word list: Usernames');
+            await check('pack builder: pseudonym offered', 'Consistent pseudonym (keyed hash)');
+            await check('pack builder: pseudonym notice', 'not anonymisation');
+            await check('pack builder: key fingerprint shown', '3fa1c2d9');
             await check('pack builder: linked field', 'Linked: Identities');
             await check('pack builder: split described', 'One event per line.');
             await check('pack builder: custom lists', 'Your word lists (1)');

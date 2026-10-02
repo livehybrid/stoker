@@ -59,6 +59,7 @@ const PALETTE = [
 ];
 
 const SIMPLE_KINDS: Array<[BuilderReplacementKind, string]> = [
+  ["pseudonym", "Consistent pseudonym (keyed hash)"],
   ["timestamp", "Timestamp (the event time)"],
   ["values", "Values I list"],
   ["ipv4", "Random IPv4"],
@@ -88,6 +89,8 @@ function defaultReplacement(key: string, examples: string[]): BuilderReplacement
     return { kind: "linked", table, column };
   }
   switch (key as BuilderReplacementKind) {
+    case "pseudonym":
+      return { kind: "pseudonym", widen: null, rotate: false, rewrite_residuals: false };
     case "timestamp":
       return { kind: "timestamp", format: "%Y-%m-%dT%H:%M:%S" };
     case "values":
@@ -215,6 +218,65 @@ function ReplacementEditor({
             {table?.sample[0] ? ` (e.g. ${table.sample[0]})` : ""}.
           </Muted>
         </Field>
+      )}
+      {value.kind === "pseudonym" && (
+        <>
+          <Field
+            label="Stand-in"
+            hint="the same value always gets the same stand-in, so correlation survives; the original is not in the pack"
+          >
+            <Select
+              value={value.widen ? `${value.widen.shape}` : "same"}
+              onChange={(_e, { value: v }) =>
+                onChange(
+                  String(v) === "same"
+                    ? { ...value, widen: null }
+                    : {
+                        ...value,
+                        widen:
+                          String(v) === "guid"
+                            ? { shape: "guid" }
+                            : {
+                                shape: String(v) as "digits" | "hex",
+                                length: String(v) === "digits" ? 15 : 16,
+                              },
+                      },
+                )
+              }
+            >
+              <Select.Option value="same" label="Keep the same format and length" />
+              <Select.Option value="digits" label="Widen to fixed-length digits" />
+              <Select.Option value="hex" label="Widen to fixed-length hex" />
+              <Select.Option value="guid" label="Replace with a GUID" />
+            </Select>
+          </Field>
+          {value.widen && value.widen.shape !== "guid" && (
+            <Field
+              label="Length"
+              hint={value.widen.shape === "digits" ? "12 to 48" : "16 to 48"}
+            >
+              <TextInput
+                value={String(value.widen.length ?? (value.widen.shape === "digits" ? 15 : 16))}
+                onChange={(_e, { value: v }) =>
+                  onChange({
+                    ...value,
+                    widen: {
+                      shape: value.widen!.shape,
+                      length: num(v, value.widen!.shape === "digits" ? 15 : 16),
+                    },
+                  })
+                }
+              />
+            </Field>
+          )}
+          <Field label=" ">
+            <Muted $small>
+              Keeping the format means the stand-in has the same shape and width, so
+              field extractions keep working, but the space is small enough that two
+              values can merge. Widening removes that at the cost of the shape.
+            </Muted>
+          </Field>
+        </>
       )}
       {value.kind === "values" && (
         <Field label="Values" hint="one per line; repeat a value to make it more likely">
@@ -425,8 +487,13 @@ function PackBuilder() {
   const [breakerInput, setBreakerInput] = useState("");
   const [breaker, setBreaker] = useState<string | null>(null);
   const [splitNote, setSplitNote] = useState<string | null>(null);
+  // The events as the reopened pack stores them: already pseudonymised, so the
+  // preview must not hash their stand-ins again. Cleared on a re-analyse,
+  // which replaces the sample wholesale.
+  const [builtEvents, setBuiltEvents] = useState<string[]>([]);
 
   const listsQ = useQuery({ queryKey: ["pack-builder", "wordlists"], queryFn: api.packBuilder.wordlists });
+  const keyQ = useQuery({ queryKey: ["pack-builder", "pseudonym-key"], queryFn: api.packBuilder.pseudonymKey });
   const lists = listsQ.data ?? [];
 
   // Edit mode: reopen a builder pack's saved config once.
@@ -440,6 +507,7 @@ function PackBuilder() {
     if (!editing || hydrated.current || !packQ.data) return;
     const c = packQ.data.config;
     setEvents(c.events);
+    setBuiltEvents(c.events);
     setText(c.events.join("\n"));
     setBreaker(c.breaker ?? null);
     if (c.breaker) {
@@ -463,6 +531,7 @@ function PackBuilder() {
     mutationFn: () => api.packBuilder.analyse(text, mode, mode === "regex" ? breakerInput : null),
     onSuccess: (res) => {
       setAnalyseError(null);
+      setBuiltEvents([]);
       setEvents(res.event_list);
       setBreaker(res.breaker ?? null);
       setSplitNote(describeSplit(res));
@@ -540,7 +609,7 @@ function PackBuilder() {
     const timer = window.setTimeout(async () => {
       setPreviewing(true);
       try {
-        const res = await api.packBuilder.preview(config, 12);
+        const res = await api.packBuilder.preview(config, 12, undefined, builtEvents);
         if (cancelled) return;
         setPreview({ events: res.events, warnings: res.warnings, bpe: res.bytes_per_event });
         setHighlights(res.highlights);
@@ -555,7 +624,7 @@ function PackBuilder() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [config, events.length, nonce]);
+  }, [config, events.length, nonce, builtEvents]);
 
   const save = useMutation({
     mutationFn: () =>
@@ -781,6 +850,18 @@ function PackBuilder() {
                   </Field>
                 </Grid>
               </Panel>
+              {tokens.some((t) => t.enabled && t.replacement.kind === "pseudonym") && (
+                <Callout $tone="info">
+                  <Strong>Consistent pseudonyms.</Strong> The marked fields are rewritten
+                  when the pack is saved, so this instance's key decides the stand-ins and
+                  the originals are not stored in the pack. Packs built here share the key
+                  {keyQ.data?.fingerprint ? ` (${keyQ.data.fingerprint})` : ""}, so the same
+                  value correlates across all of them. Everything you upload that is NOT
+                  marked is stored in the pack as you supplied it, so remove anything else
+                  sensitive before uploading. This is pseudonymisation, not anonymisation:
+                  whoever holds the control plane can rebuild the mapping.
+                </Callout>
+              )}
               <CustomLists lists={lists} />
             </Stack>
           </Card>

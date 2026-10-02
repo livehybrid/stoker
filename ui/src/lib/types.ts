@@ -533,6 +533,7 @@ export type BuilderReplacementKind =
   | "timestamp"
   | "list"
   | "linked"
+  | "pseudonym"
   | "values"
   | "ipv4"
   | "guid"
@@ -549,6 +550,11 @@ export interface BuilderReplacement {
   list?: string; // list: word list name
   table?: string; // linked: table name (one row per event across its fields)
   column?: string; // linked: column of that table
+  // pseudonym: null keeps the value's own shape and width; a widen object
+  // fixes the output shape and length instead (a bigger space, fewer merges).
+  widen?: { shape: "digits" | "hex" | "guid"; length?: number } | null;
+  rotate?: boolean; // pseudonym: a new identity per replay (not released yet)
+  rewrite_residuals?: boolean; // pseudonym: rewrite the value elsewhere too
   values?: string[]; // values: custom / observed values
   min?: number; // integer, float
   max?: number;
@@ -607,6 +613,15 @@ export interface BuilderPreviewResponse {
   warnings: string[];
   bytes_per_event: number;
   highlights: BuilderHighlights;
+}
+
+/** Whether this instance holds a pseudonym key, and its public fingerprint. */
+export interface PseudonymKeyInfo {
+  exists: boolean;
+  name: string;
+  fingerprint: string | null;
+  algorithm: string;
+  created_at: string | null;
 }
 
 export interface WordlistInfo {
