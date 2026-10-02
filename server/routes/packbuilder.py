@@ -33,14 +33,14 @@ import logging
 import os
 import shutil
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .. import bundles, packbuilder, packupload
+from .. import bundles, packbuilder, packupload, pseudonymkeys
 from ..config import get_settings
 from ..db import get_db
 from ..gitsync import local_pack_metadata
@@ -77,6 +77,10 @@ class PreviewRequest(BaseModel):
     config: Dict[str, Any]
     n: int = 20
     seed: Optional[int] = None
+    # Events already pseudonymised by a previous build, echoed back by the UI
+    # when it is previewing a reopened pack. Advisory only: the authoritative
+    # list for a SAVE is read from the pack on disk, never from the client.
+    already: Optional[List[str]] = None
 
 
 class BuildRequest(BaseModel):
@@ -86,6 +90,31 @@ class BuildRequest(BaseModel):
 def _bad(exc):
     # type: (Exception) -> HTTPException
     return HTTPException(status_code=422, detail={"error": "pack_builder_invalid", "detail": str(exc)})
+
+
+def _pseudonym_key(db, cfg, actor=None, create=True):
+    # type: (Session, Dict[str, Any], Optional[str], bool) -> Tuple[Optional[bytes], Optional[str]]
+    """``(subkey, fingerprint)`` for a config that needs one, else ``(None, None)``.
+
+    Resolved per request rather than cached, so a key created or restored
+    between requests takes effect at once. A config with no pseudonym field
+    never touches the key store, which is what keeps ``GET`` previews of
+    ordinary packs free of any key side effect.
+    """
+    if not packbuilder.pseudonym_fields(cfg):
+        return None, None
+    try:
+        sub, row = pseudonymkeys.subkey(db, actor=actor, create=create)
+    except pseudonymkeys.PseudonymKeyError as exc:
+        raise HTTPException(status_code=409, detail={
+            "error": "pseudonym_key_unavailable", "detail": str(exc)})
+    return sub, row.fingerprint
+
+
+def _actor(request):
+    # type: (Any) -> Optional[str]
+    user = getattr(getattr(request, "state", None), "user", None)
+    return getattr(user, "username", None) if user is not None else None
 
 
 def _validated(config):
@@ -136,6 +165,17 @@ def delete_wordlist(name: str):
         raise HTTPException(status_code=404 if "unknown" in str(exc) else 422, detail=str(exc))
 
 
+@router.get("/pseudonym-key")
+def pseudonym_key(db: Session = Depends(get_db)):
+    # type: (Session) -> Any
+    """Whether this instance has a pseudonym key, and its public fingerprint.
+
+    Read-only in the strongest sense: it never creates one, so opening the
+    builder cannot mint a key as a side effect of someone looking at a page.
+    """
+    return pseudonymkeys.describe(pseudonymkeys.peek(db))
+
+
 @router.post("/analyse")
 def analyse(body: AnalyseRequest):
     # type: (AnalyseRequest) -> Any
@@ -152,10 +192,16 @@ def analyse(body: AnalyseRequest):
 
 
 @router.post("/preview")
-def preview(body: PreviewRequest):
-    # type: (PreviewRequest) -> Any
+def preview(body: PreviewRequest, request: Request, db: Session = Depends(get_db)):
+    # type: (PreviewRequest, Request, Session) -> Any
     cfg = _validated(body.config)
-    result = packbuilder.render_preview(cfg, n=body.n, seed=body.seed)
+    # A preview of a pseudonym field shows the REAL stand-ins, because the
+    # operator uploaded the originals and will see the same values in the saved
+    # pack; a preview-only key would show values the pack does not contain and
+    # would hide the cross-pack consistency the feature exists for.
+    sub, _fp = _pseudonym_key(db, cfg, actor=_actor(request))
+    result = packbuilder.render_preview(cfg, n=body.n, seed=body.seed, subkey=sub,
+                                       already=body.already or None)
     result["highlights"] = packbuilder.highlight(
         cfg["events"][:packbuilder.HIGHLIGHT_EVENTS],
         [t for t in cfg["tokens"] if t["enabled"]])
@@ -176,12 +222,13 @@ def _upload_root():
     return root
 
 
-def _stage(cfg):
-    # type: (Dict[str, Any]) -> str
+def _stage(cfg, subkey=None, fingerprint=None, already=None):
+    # type: (Dict[str, Any], Optional[bytes], Optional[str], Optional[List[str]]) -> str
     """Write the pack into a hidden staging directory under the upload root."""
     staging = os.path.join(_upload_root(), ".builder-%s" % uuid.uuid4().hex)
     try:
-        packbuilder.write_pack(cfg, staging)
+        packbuilder.write_pack(cfg, staging, subkey=subkey, fingerprint=fingerprint,
+                               already=already)
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         raise
@@ -208,13 +255,14 @@ def _apply_lint(pack, pack_dir, cfg):
 
 
 @router.post("/packs", response_model=PackOut, status_code=201)
-def create_pack(body: BuildRequest, db: Session = Depends(get_db)):
-    # type: (BuildRequest, Session) -> Any
+def create_pack(body: BuildRequest, request: Request, db: Session = Depends(get_db)):
+    # type: (BuildRequest, Request, Session) -> Any
     cfg = _validated(body.config)
     if _name_taken(db, cfg["name"]):
         raise HTTPException(status_code=409, detail={
             "error": "pack_name_taken", "detail": "a pack named %r already exists" % cfg["name"]})
-    staging = _stage(cfg)
+    sub, fp = _pseudonym_key(db, cfg, actor=_actor(request))
+    staging = _stage(cfg, subkey=sub, fingerprint=fp)
     final = packupload._unique_pack_dir(_upload_root(), cfg["name"])
     os.rename(staging, final)
     pack = Pack(name=cfg["name"], source_path=final)
@@ -252,15 +300,22 @@ def get_pack_config(pack_id: int, db: Session = Depends(get_db)):
 
 
 @router.put("/packs/{pack_id}", response_model=PackOut)
-def update_pack(pack_id: int, body: BuildRequest, db: Session = Depends(get_db)):
-    # type: (int, BuildRequest, Session) -> Any
+def update_pack(pack_id: int, body: BuildRequest, request: Request,
+                db: Session = Depends(get_db)):
+    # type: (int, BuildRequest, Request, Session) -> Any
     pack = _builder_pack(db, pack_id)
     cfg = _validated(body.config)
     if _name_taken(db, cfg["name"], except_id=pack.id):
         raise HTTPException(status_code=409, detail={
             "error": "pack_name_taken", "detail": "a pack named %r already exists" % cfg["name"]})
     current = os.path.realpath(pack.source_path)
-    staging = _stage(cfg)
+    sub, fp = _pseudonym_key(db, cfg, actor=_actor(request))
+    # The events ON DISK are the ones a previous build pseudonymised, so they
+    # must not be pseudonymised again (p(p(x)) would silently stop this pack
+    # correlating with every other one). Read from disk, never from the client.
+    previous = packbuilder.read_builder_config(current) or {}
+    staging = _stage(cfg, subkey=sub, fingerprint=fp,
+                     already=list(previous.get("events") or ()))
     retired = current + ".old-%s" % uuid.uuid4().hex[:8]
     # Swap: the pack directory is replaced whole, never half-written.
     os.rename(current, retired)

@@ -806,3 +806,73 @@ def test_widening_a_field_changes_its_length_in_the_pack(tmp_path, subkey):
     assert all(re.match(r"^user=\d{15} action=\w+$", l) for l in lines)
     assert lines[0].split()[0] == lines[2].split()[0]
     assert bundles.lint_pack(dest).ok
+
+
+def test_api_pseudonym_end_to_end(client, upload_dir, db_session):
+    """Upload, preview, save, reopen, rebuild - with the instance key."""
+    from server import pseudonymkeys
+
+    # No key exists until a pseudonymising save needs one, and asking does not
+    # bring one into being.
+    status = client.get("/api/pack-builder/pseudonym-key").json()
+    assert status["exists"] is False and status["fingerprint"] is None
+    assert pseudonymkeys.peek(db_session) is None
+
+    config = {"name": "sessions", "events": PSEUDO_SAMPLE, "order": "sequential",
+              "tokens": [PSEUDO_TOKEN]}
+
+    # The preview shows the real stand-ins, which creates the key on first use.
+    preview = client.post("/api/pack-builder/preview",
+                          json={"config": config, "n": 3, "seed": 1})
+    assert preview.status_code == 200, preview.text
+    shown = preview.json()["events"]
+    assert not any("123" in e or "456" in e for e in shown)
+    assert shown[0].split()[0] == shown[2].split()[0]
+
+    status = client.get("/api/pack-builder/pseudonym-key").json()
+    assert status["exists"] is True and len(status["fingerprint"]) == 8
+    assert status["algorithm"] == "hmac-sha256-v1"
+
+    created = client.post("/api/pack-builder/packs", json={"config": config})
+    assert created.status_code == 201, created.text
+    pack_id = created.json()["id"]
+    assert created.json()["lint_status"] == "ok"
+
+    on_disk = os.path.join(created.json()["source_path"], "samples", "sessions.sample")
+    sample = open(on_disk).read()
+    assert "123" not in sample and "456" not in sample
+    lines = sample.splitlines()
+    assert lines[0].split()[0] == lines[2].split()[0]
+
+    # Reopening returns the stand-ins, and rebuilding is idempotent because the
+    # server passes the on-disk events rather than trusting the client.
+    reopened = client.get("/api/pack-builder/packs/%d" % pack_id).json()["config"]
+    assert reopened["events"] == lines
+    assert reopened["pseudonym_key"]["fingerprint"] == status["fingerprint"]
+    rebuilt = client.put("/api/pack-builder/packs/%d" % pack_id,
+                         json={"config": reopened})
+    assert rebuilt.status_code == 200, rebuilt.text
+    assert open(on_disk).read().splitlines() == lines, "a rebuild must not re-hash"
+
+
+def test_api_refuses_a_pseudonym_save_without_a_usable_master_key(client, upload_dir):
+    import dataclasses
+
+    from server import config as config_mod
+
+    config_mod.set_settings(dataclasses.replace(
+        config_mod.get_settings(), master_key_generated=True))
+    r = client.post("/api/pack-builder/packs", json={"config": {
+        "name": "p", "events": PSEUDO_SAMPLE, "tokens": [PSEUDO_TOKEN]}})
+    assert r.status_code == 409
+    assert r.json()["detail"]["error"] == "pseudonym_key_unavailable"
+    assert "STOKER_MASTER_KEY" in r.json()["detail"]["detail"]
+
+
+def test_a_pack_without_pseudonyms_never_touches_the_key(client, upload_dir, db_session):
+    from server import pseudonymkeys
+
+    r = client.post("/api/pack-builder/preview", json={"config": {
+        "name": "plain", "events": ["a=1 b=2"], "tokens": []}, "n": 2})
+    assert r.status_code == 200
+    assert pseudonymkeys.peek(db_session) is None
