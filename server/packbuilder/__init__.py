@@ -1685,18 +1685,24 @@ def pseudonym_warnings(report):
 
 def rotation_tables(cfg):
     # type: (Dict[str, Any]) -> Dict[str, Dict[str, Tuple[int, int]]]
-    """``{token id: {matched text: (k, D)}}`` for the rotating fields.
+    """``{format class: {matched text: (k, D)}}`` for the rotating fields.
 
-    The engines build these from the sample at load, walking it line by line in
-    file order then token by token then match by match, which is what lets every
-    worker derive the same numbers with nothing shipped alongside the pack. The
-    preview has to reproduce that walk exactly or it would show identities the
-    run will not produce. See ``build_rotation_tables`` in the worker's firebox.
+    ONE table per class, shared by every rotating field, exactly as the engine
+    builds it: two fields holding the same identifier must rotate to the same
+    new identifier, or a pack with ``src_user`` and ``dest_user`` would stop
+    joining the moment it rotated. A table per field would also give a different
+    ``D`` from the engine's and so a different identity for every value.
+
+    Walked line by line in file order, then token by token in conf order, then
+    match by match left to right. That walk defines ``k``, ``k`` is part of the
+    identity, and the engines do it independently from the sample, so the order
+    is a contract rather than an implementation detail. See
+    ``build_rotation_tables`` in firebox.
     """
     fields = [(t, re.compile(t["pattern"])) for t in rotating_fields(cfg)]
     if not fields:
         return {}
-    order = {}  # type: Dict[str, Dict[str, List[str]]]
+    order = {}  # type: Dict[str, List[str]]
     for event in cfg.get("events") or []:
         for token, rx in fields:
             for m in rx.finditer(event):
@@ -1706,16 +1712,12 @@ def rotation_tables(cfg):
                 fmt = _rotation_format(token["replacement"], text)
                 if fmt.shape == _ps.NONE:
                     continue
-                cls = order.setdefault(token["id"], {}).setdefault(_class_key(fmt), [])
+                cls = order.setdefault(_class_key(fmt), [])
                 if text not in cls:
                     cls.append(text)
     out = {}  # type: Dict[str, Dict[str, Tuple[int, int]]]
-    for tid, classes in order.items():
-        table = {}
-        for values in classes.values():
-            for k, text in enumerate(values):
-                table[text] = (k, len(values))
-        out[tid] = table
+    for key, values in order.items():
+        out[key] = {text: (k, len(values)) for k, text in enumerate(values)}
     return out
 
 
@@ -1779,7 +1781,6 @@ def _rotate_preview(cfg, text, tables, index, epoch):
     rotation = cfg.get("rotation") or {}
     sample = len(cfg.get("events") or []) or 1
     for token in rotating_fields(cfg):
-        table = tables.get(token["id"]) or {}
         rx = re.compile(token["pattern"])
         widen = token["replacement"].get("widen")
         fmt = (_ps.widen_format(widen.get("shape"), widen.get("length"))
@@ -1795,7 +1796,8 @@ def _rotate_preview(cfg, text, tables, index, epoch):
                     span, _ps.window_index(int(epoch), rotation.get("period") or 60),
                     widen=fmt)
             else:
-                k, distinct = table.get(span, (0, 1))
+                cls = _class_key(fmt if fmt is not None else _ps.infer(span))
+                k, distinct = (tables.get(cls) or {}).get(span, (0, 1))
                 # Preview is one worker: slot 0 of 1, as a standalone run is.
                 new = _ps.pass_rotation(span, index // sample, 1, 0, distinct, k, widen=fmt)
             pieces.append(text[pos:s_])

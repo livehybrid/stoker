@@ -1349,3 +1349,60 @@ def test_the_preview_shows_what_the_engine_will_send(tmp_path, widen):
     assert [re.search(r"user=(\d+)", e).group(1) for e in previewed] == \
         [re.search(r"user=(\d+)", l).group(1) for l in produced], \
         "the preview and the engine disagree on the rotated identities"
+
+
+def test_two_rotating_fields_share_one_identity_table(tmp_path):
+    """`src_user=X` and `dest_user=X` must rotate to the same new identity.
+
+    The engine keeps one table per format class for the whole stanza, so a value
+    matched by two patterns is one identity. A table per field would give a
+    different D and so a different identity for every value, and the pack would
+    stop joining the moment it rotated. Compared against the real binary,
+    because this is exactly the kind of agreement that looks fine in isolation
+    on both sides.
+    """
+    import subprocess
+
+    binary = _firebox_bin()
+    if binary is None:
+        pytest.skip("firebox binary not built; set FIREBOX_BIN")
+    cfg = {"name": "Pairs", "count": -1, "interval": 1, "order": "sequential",
+           "events": ["src=483920 dst=771045 act=call",
+                      "src=771045 dst=483920 act=reply"],
+           "tokens": [
+               {"field": "src", "pattern": r"src=(\d+)",
+                "replacement": {"kind": "pseudonym", "rotate": True}},
+               {"field": "dst", "pattern": r"dst=(\d+)",
+                "replacement": {"kind": "pseudonym", "rotate": True}}],
+           "rotation": {"scope": "pass"}}
+    clean = pb.validate_config(cfg)
+    assert clean["rotation"]["fields"] == ["src", "dst"]
+    previewed = pb.render_preview(clean, 4, seed=1, subkey=ROT_SUB)["events"]
+
+    out = pb.write_pack(clean, os.path.join(str(tmp_path), "pairs"),
+                        subkey=ROT_SUB, fingerprint="fp")
+    conf_path = os.path.join(out, "default", "eventgen.conf")
+    with open(conf_path, encoding="utf-8") as fh:
+        text = fh.read()
+    with open(conf_path, "w", encoding="utf-8") as fh:
+        fh.write(text + "outputMode = stdout\nend = 2\n")
+    done = subprocess.run([binary, "generate", "default/eventgen.conf"], cwd=out,
+                          timeout=120, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          env=dict(os.environ, STOKER_ROTATE_WORKERS="1",
+                                   STOKER_ROTATE_SLOT="0"))
+    assert done.returncode == 0, done.stderr.decode()[-2000:]
+    produced = [l for l in done.stdout.decode().splitlines() if "src=" in l]
+    assert len(produced) == 4
+
+    def pairs(lines):
+        return [(re.search(r"src=(\d+)", l).group(1), re.search(r"dst=(\d+)", l).group(1))
+                for l in lines]
+
+    assert pairs(previewed) == pairs(produced), \
+        "the preview and the engine disagree once two fields share a table"
+    # The property itself: within a pass the two events are the same two
+    # parties, swapped. One identity, two fields.
+    a, b = pairs(produced)[0], pairs(produced)[1]
+    assert a == (b[1], b[0]), pairs(produced)
+    # ...and the next pass is a different pair.
+    assert set(pairs(produced)[:2]).isdisjoint(set(pairs(produced)[2:]))
