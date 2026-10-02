@@ -1249,3 +1249,41 @@ def test_the_preview_warns_about_rotation():
 # worker/tests/test_rotation_parity.py, which is the suite CI runs AFTER it
 # builds firebox. Here they would find no binary and skip, which reads as
 # passing while proving nothing.
+
+
+@pytest.mark.parametrize("scope,period", [("pass", None), ("window", 300)])
+def test_reopening_a_rotating_pack_keeps_its_settings(tmp_path, scope, period):
+    """An operator who reopens a pack to change one word must not lose rotation.
+
+    The settings live in stoker-builder.json, so a round trip through
+    write_pack / read_builder_config / validate_config has to preserve the
+    scope, the period, the per-field flag and the widen. Silently dropping any
+    of them would turn rotation off on the next save, and the pack would look
+    fine.
+    """
+    cfg = _rot_cfg(scope=scope, period=period,
+                   widen={"shape": "digits", "length": 15})
+    clean = pb.validate_config(cfg)
+    out = pb.write_pack(clean, os.path.join(str(tmp_path), "first"),
+                        subkey=ROT_SUB, fingerprint="fp")
+    reopened = pb.read_builder_config(out)
+    again = pb.validate_config(reopened)
+
+    assert again["rotation"]["scope"] == scope
+    assert again["rotation"]["fields"] == ["user"]
+    if period is not None:
+        assert again["rotation"]["period"] == period
+    rep = again["tokens"][0]["replacement"]
+    assert rep["rotate"] is True
+    assert rep["widen"] == {"shape": "digits", "length": 15}
+
+    # And a rebuild must not hash the stand-ins a second time, which would
+    # silently stop the pack correlating with every other one.
+    out2 = pb.write_pack(again, os.path.join(str(tmp_path), "second"),
+                         subkey=ROT_SUB, fingerprint="fp",
+                         already=reopened["events"])
+    with open(os.path.join(out, "samples", "sessions.sample"), encoding="utf-8") as fh:
+        first = fh.read()
+    with open(os.path.join(out2, "samples", "sessions.sample"), encoding="utf-8") as fh:
+        second = fh.read()
+    assert first == second, "a rebuild changed the stand-ins"
