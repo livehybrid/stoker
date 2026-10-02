@@ -1997,9 +1997,9 @@ def write_pack(cfg, dest, subkey=None, fingerprint=None, already=None):
                  "  fields: %s" % ", ".join(r["field"] for r in cfg.get("pseudonymised") or [])]
     if cfg.get("rotation"):
         rot = cfg["rotation"]
-        # Recorded so an operator reading the pack can see why the ids move,
-        # and so the control plane can refuse to run it on an engine that would
-        # silently not rotate.
+        # Recorded so an operator reading the pack can see why the ids move and
+        # which engine it needs. The actual refusal is the worker's, from the
+        # conf, because the worker is where the engine is chosen.
         yaml += ["rotation:",
                  "  algorithm: %s" % (_ps.ALIGNED_ALGORITHM if rot["scope"] == "window"
                                       else _ps.ROTATE_ALGORITHM),

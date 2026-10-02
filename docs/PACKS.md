@@ -1068,7 +1068,13 @@ Three things to know about the trade:
 
 It hashes the stand-in rather than the original, so there is no key to ship to a
 worker, and a worker too old to know the token emits the stable stand-in rather
-than leaking an identifier.
+than leaking an identifier. That also means an **exported pack keeps aligning
+after it is imported somewhere else**: the stand-ins travel in the sample and
+the identity needs no key, so a pack built here and loaded on the customer's
+air-gapped Stoker produces the same identities for the same window. Rotation
+per replay is not instance-dependent either, but it counts each pack's own
+replays, so two instances running the same pack do not line up unless they are
+aligned.
 
 If you are unsure, turn it on. Doing it now costs nothing; doing it after a
 round of testing moves every identity.
