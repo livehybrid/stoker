@@ -728,21 +728,8 @@ def test_the_collision_rate_is_the_one_we_already_warn_about():
     expected = ps.expected_collisions(len(values), ps.space(ps.Format(ps.DIGITS, 6)))
     assert clashes <= max(5, expected * 6), (clashes, expected)
 
-
-def test_the_engine_copy_of_the_vectors_has_not_drifted():
-    """firebox keeps its own copy so its standalone CI can check the contract.
-
-    Two copies can drift, which would mean each side passing its own tests while
-    disagreeing with the other, so the submodule's copy is compared here. Skipped
-    when the submodule is not checked out.
-    """
-    here = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    engine_copy = os.path.join(here, "worker", "engines", "firebox", "fixtures",
-                               "format_vectors.json")
-    if not os.path.isfile(engine_copy):
-        pytest.skip("firebox submodule not checked out")
-    with open(engine_copy, encoding="utf-8") as fh:
-        assert json.load(fh) == _vectors(), (
-            "worker/engines/firebox/fixtures/format_vectors.json has drifted from "
-            "worker/engines/fixtures/format_vectors.json; copy the reference over it "
-            "and bump the submodule")
+# The check that firebox's own copy of this fixture has not drifted lives in
+# worker/tests/test_rotation_parity.py. Here it skipped on every CI run, because
+# the control-plane job never checks the submodule out, and a drift check that
+# does not run is the exact failure it exists to catch: each repo would test
+# against its own copy and both would pass while disagreeing.

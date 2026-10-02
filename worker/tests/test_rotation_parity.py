@@ -46,6 +46,32 @@ def _firebox():
     pytest.skip("firebox binary not built; set FIREBOX_BIN")
 
 
+def test_the_engine_copy_of_the_vectors_has_not_drifted():
+    """firebox keeps its own copy of the cross-engine vectors; they must agree.
+
+    Two copies can drift, and then each repo tests against its own and both go
+    green while disagreeing: a pack built by one Stoker would stop correlating
+    on a worker built from the other. This runs here rather than in
+    server/tests because this is the suite CI runs with the submodule checked
+    out; there it skipped on every run.
+    """
+    import json
+
+    reference = os.path.join(WORKER, "engines", "fixtures", "format_vectors.json")
+    engine_copy = os.path.join(WORKER, "engines", "firebox", "fixtures",
+                               "format_vectors.json")
+    if not os.path.isfile(engine_copy):
+        pytest.skip("firebox submodule not checked out")
+    with open(reference, encoding="utf-8") as fh:
+        want = json.load(fh)
+    with open(engine_copy, encoding="utf-8") as fh:
+        got = json.load(fh)
+    assert got == want, (
+        "worker/engines/firebox/fixtures/format_vectors.json has drifted from "
+        "worker/engines/fixtures/format_vectors.json; copy the reference over it "
+        "and bump the submodule")
+
+
 def _cfg(scope="pass", period=None, widen=None, events=None, tokens=None):
     rep = {"kind": "pseudonym", "rotate": True}
     if widen is not None:
