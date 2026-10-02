@@ -25,7 +25,9 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import math
+import os
 import random
 import re
 import unicodedata
@@ -501,3 +503,65 @@ def test_the_whole_pass_is_deterministic():
     a = ps.pseudonymise_events(CUSTOMER_SAMPLE, [_tok()], SUB)
     b = ps.pseudonymise_events(CUSTOMER_SAMPLE, [_tok()], SUB)
     assert a.events == b.events
+
+
+# --------------------------------------------------------------------------- #
+# The cross-engine contract file
+# --------------------------------------------------------------------------- #
+
+def _vectors():
+    here = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    with open(os.path.join(here, "worker", "engines", "fixtures",
+                           "format_vectors.json"), encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def test_the_shared_vectors_still_describe_this_implementation():
+    """firebox's format.rs is tested against this file, so it must stay true.
+
+    If a change here moves an output, a pack built by this Stoker and replayed
+    by a worker built against the old vectors would silently stop correlating.
+    Regenerating the file is a wire-format change, not a refactor.
+    """
+    v = _vectors()
+    for entry in v["infer"]:
+        fmt = ps.infer(entry["text"])
+        assert fmt.shape == entry["shape"], entry["text"]
+        if fmt.shape in (ps.DIGITS, ps.HEX):
+            assert fmt.width == entry["width"], entry["text"]
+        assert str(ps.space(fmt)) == entry["space"], entry["text"]
+        assert ps.case_class(entry["text"]) == entry["case"], entry["text"]
+
+    assert len(v["rotate_render"]) > 300
+    for entry in v["rotate_render"]:
+        if "from_text" in entry:
+            fmt = ps.infer(entry["from_text"])
+        else:
+            fmt = ps.Format(entry["shape"], entry["width"])
+        got = ps.render(fmt, int(entry["x"]), entry["case"])
+        assert got == entry["out"], entry
+
+    sub = ps.derive_subkey(bytes(range(32)))
+    for entry in v["mode1_render"]:
+        widen = entry["widen"]
+        fmt = ps.widen_format(widen["shape"], widen.get("length")) if widen else None
+        assert ps.pseudonym(entry["span"], sub, widen=fmt) == entry["out"], entry
+
+
+def test_the_engine_copy_of_the_vectors_has_not_drifted():
+    """firebox keeps its own copy so its standalone CI can check the contract.
+
+    Two copies can drift, which would mean each side passing its own tests while
+    disagreeing with the other, so the submodule's copy is compared here. Skipped
+    when the submodule is not checked out.
+    """
+    here = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    engine_copy = os.path.join(here, "worker", "engines", "firebox", "fixtures",
+                               "format_vectors.json")
+    if not os.path.isfile(engine_copy):
+        pytest.skip("firebox submodule not checked out")
+    with open(engine_copy, encoding="utf-8") as fh:
+        assert json.load(fh) == _vectors(), (
+            "worker/engines/firebox/fixtures/format_vectors.json has drifted from "
+            "worker/engines/fixtures/format_vectors.json; copy the reference over it "
+            "and bump the submodule")
