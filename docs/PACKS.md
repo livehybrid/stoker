@@ -173,12 +173,28 @@ Which `count` the pack's own value survives depends on the run's rate mode:
   exception is `-1`, which is left unsplit, so every worker emits the whole
   sample.
 
+**`-1` sets the pack's own rate in `count_interval` mode.** That mode is
+engine-paced with no token bucket, so a whole-sample pack emits
+`sample size / interval` events per second **per worker**: a 5,000-event pack at
+`interval = 1` on three workers is 15,000 events per second into the index,
+where the old `count = 10` default was ten. Launch it as `eps` or `per_day_gb`
+to choose the rate instead, or raise the pack's interval. The builder states the
+implied figure before you build.
+
 **`-1` is what the pack builder writes for a new pack**, because a positive
 count below the sample size silently generates a prefix of an upload and reads
 as a failed upload. A pack written before this used `count = 10`; reopen it in
 the builder and turn on "whole sample every interval", or set a count that is a
 whole multiple of the sample. The builder's preview mirrors whichever applies
 and warns when a count would under-cover the sample.
+
+> **Telemetry note for a digest-pinned worker.** A worker older than the
+> whole-sample change counts `-1` as no work, so a `count_interval` run reports
+> `assigned_work: 0` and the run roster says the slot will generate nothing,
+> while events flow correctly. Estates whose worker image floats on a tag are
+> unaffected, because every run resolves the tag to the current digest at launch;
+> a deployment pinned to an older digest should roll its worker image to get
+> correct telemetry.
 
 ### Token replacement: capture groups and the `%s` epoch gotcha
 

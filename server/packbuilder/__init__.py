@@ -61,6 +61,9 @@ PREVIEW_MAX = 200
 # and it is the only count the agent's count_interval rewrite does not split
 # across workers, so every worker emits the whole sample.
 WHOLE_SAMPLE = -1
+# Above this implied per-worker rate, say so: a whole-sample pack in
+# count_interval mode paces itself off the sample size.
+WHOLE_SAMPLE_RATE_NOTE = 500
 
 REPLACEMENT_KINDS = ("timestamp", "list", "linked", "values", "ipv4", "guid", "mac",
                      "integer", "float", "hex", "static", "sequence")
@@ -1585,10 +1588,23 @@ def coverage_warnings(cfg):
     out = []  # type: List[str]
     events = cfg.get("events") or []
     count = _as_int(cfg.get("count", WHOLE_SAMPLE))
-    if cfg.get("order") == "random" or count is None or count <= 0 or not events:
+    if not events or count is None:
         return out
     n = len(events)
     interval = cfg.get("interval", 1)
+    if count < 0:
+        # Whole-sample packs set their own rate in count_interval mode, which is
+        # engine-paced with no token bucket: a big sample at interval 1 is a big
+        # rate. eps and GB/day runs replace count, so they are unaffected.
+        implied = int(n / max(1, interval))
+        if implied >= WHOLE_SAMPLE_RATE_NOTE:
+            out.append(
+                "a count-per-interval run of this pack emits about %d events per second PER WORKER "
+                "(%d events every %s s, engine-paced with no rate cap). Launch it as eps or GB/day "
+                "to choose the rate, or raise the interval." % (implied, n, interval))
+        return out
+    if cfg.get("order") == "random":
+        return out
     if count < n:
         out.append(
             "a count-per-interval run generates only the first %d of your %d events every %s s; "

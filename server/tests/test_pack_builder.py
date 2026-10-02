@@ -670,3 +670,26 @@ def test_preview_mirrors_the_engines_truncation():
 def test_zero_count_is_still_refused():
     with pytest.raises(pb.BuilderError):
         pb.validate_config({"name": "z", "events": _twenty(), "tokens": [], "count": 0})
+
+
+def test_a_whole_sample_pack_declares_its_implied_rate():
+    """count_interval is engine-paced with no token bucket.
+
+    A whole-sample pack therefore sets its own rate from the sample size, so a
+    5,000-event upload emits 5,000 events per second per worker in that mode
+    where the old count = 10 default emitted ten. Say so before they build.
+    """
+    big = pb.validate_config({"name": "big", "events": ["l%05d" % i for i in range(5000)],
+                              "tokens": []})
+    (note,) = pb.coverage_warnings(big)
+    assert "about 5000 events per second PER WORKER" in note
+    assert "eps or GB/day" in note
+
+    # Raising the interval lowers it proportionally...
+    slower = pb.validate_config({"name": "big", "events": ["l%05d" % i for i in range(5000)],
+                                 "tokens": [], "interval": 10})
+    assert "about 500 events per second" in pb.coverage_warnings(slower)[0]
+    # ...and a small pack says nothing.
+    small = pb.validate_config({"name": "small", "events": ["l%02d" % i for i in range(20)],
+                                "tokens": []})
+    assert pb.coverage_warnings(small) == []
