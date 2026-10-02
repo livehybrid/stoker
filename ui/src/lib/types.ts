@@ -553,7 +553,7 @@ export interface BuilderReplacement {
   // pseudonym: null keeps the value's own shape and width; a widen object
   // fixes the output shape and length instead (a bigger space, fewer merges).
   widen?: { shape: "digits" | "hex" | "guid"; length?: number } | null;
-  rotate?: boolean; // pseudonym: a new identity per replay (not released yet)
+  rotate?: boolean; // pseudonym: a new identity per replay (needs firebox)
   rewrite_residuals?: boolean; // pseudonym: rewrite the value elsewhere too
   values?: string[]; // values: custom / observed values
   min?: number; // integer, float
@@ -606,6 +606,11 @@ export interface BuilderConfig {
   count: number;
   interval: number;
   order: "sequential" | "random";
+  // Set when any field rotates. The scope is per pack because it is one
+  // setting on the eventgen stanza: "pass" counts replays of the sample and
+  // gives the most identities, "window" counts clock windows so the same id
+  // appears in every sourcetype of that window. `fields` is server-written.
+  rotation?: { scope: "pass" | "window"; period?: number; fields?: string[] } | null;
 }
 
 export interface BuilderPreviewResponse {

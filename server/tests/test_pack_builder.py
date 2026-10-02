@@ -1072,3 +1072,280 @@ def test_api_lookup_never_creates_a_key(client, upload_dir, db_session):
     assert r.status_code == 409
     assert r.json()["detail"]["error"] == "pseudonym_key_unavailable"
     assert pseudonymkeys.peek(db_session) is None
+
+
+# --------------------------------------------------------------------------- #
+# Identity rotation: a new identity per replay, optionally aligned
+# --------------------------------------------------------------------------- #
+
+from server.packbuilder import pseudonym as _ps  # noqa: E402
+
+ROT_SUB = _ps.derive_subkey(bytes(range(32)))
+ROT_EVENTS = ["user=483920 action=login",
+              "user=771045 action=register",
+              "user=483920 action=logout"]
+
+
+def _rot_cfg(rotate=True, scope="pass", period=None, order="sequential", widen=None):
+    rep = {"kind": "pseudonym", "rotate": rotate}
+    if widen is not None:
+        rep["widen"] = widen
+    cfg = {"name": "Sessions", "events": list(ROT_EVENTS), "order": order,
+           "count": -1, "interval": 1,
+           "tokens": [{"field": "user", "pattern": r"user=(\d+)", "replacement": rep}]}
+    if rotate:
+        cfg["rotation"] = {"scope": scope}
+        if period is not None:
+            cfg["rotation"]["period"] = period
+    return cfg
+
+
+def _conf_of(tmp_path, cfg, name="pack"):
+    clean = pb.validate_config(cfg)
+    out = pb.write_pack(clean, os.path.join(str(tmp_path), name),
+                        subkey=ROT_SUB, fingerprint="fp123")
+    with open(os.path.join(out, "default", "eventgen.conf"), encoding="utf-8") as fh:
+        conf = fh.read()
+    with open(os.path.join(out, "pack.yaml"), encoding="utf-8") as fh:
+        manifest = fh.read()
+    with open(os.path.join(out, "samples", "sessions.sample"), encoding="utf-8") as fh:
+        sample = fh.read()
+    return clean, conf, manifest, sample, out
+
+
+def test_rotation_writes_the_token_and_the_stanza_setting(tmp_path):
+    clean, conf, manifest, sample, _ = _conf_of(tmp_path, _rot_cfg())
+    assert clean["rotation"] == {"scope": "pass", "fields": ["user"]}
+    assert "rotate.scope = pass" in conf
+    assert "rotate.period" not in conf, "a period only means something for windows"
+    assert "token.0.replacementType = rotate" in conf
+    assert "token.0.replacement = keep" in conf
+    # The sample still holds build-time stand-ins, never the originals: rotation
+    # is applied on top of them by the engine, so an engine that does not know
+    # the token emits a stable pseudonym rather than a real identifier.
+    assert "483920" not in sample and "771045" not in sample
+    assert "rotation:" in manifest
+    assert "algorithm: rotate-counter-v1" in manifest
+    assert "engine: firebox" in manifest
+
+
+def test_rotation_is_the_first_token_in_the_conf(tmp_path):
+    """It has to see the stand-in the pack was written with.
+
+    The engines apply tokens in conf order to the same event text, so a token
+    that rewrote the span first would leave the rotation matching nothing (or
+    worse, rotating some other field's inserted value).
+    """
+    cfg = _rot_cfg()
+    cfg["tokens"].append({"field": "action", "pattern": r"action=(\w+)",
+                          "replacement": {"kind": "values",
+                                          "values": ["login", "logout"]}})
+    _clean, conf, _m, _s, _out = _conf_of(tmp_path, cfg)
+    assert "token.0.replacementType = rotate" in conf
+    assert "token.1.replacementType = file" in conf
+
+
+def test_aligned_rotation_writes_its_period(tmp_path):
+    clean, conf, manifest, _s, _out = _conf_of(tmp_path, _rot_cfg(scope="window", period=300))
+    assert clean["rotation"]["period"] == 300
+    assert "rotate.scope = window" in conf
+    assert "rotate.period = 300" in conf
+    assert "algorithm: rotate-window-v1" in manifest
+    assert "period_s: 300" in manifest
+
+
+def test_aligned_rotation_defaults_its_period(tmp_path):
+    clean, conf, _m, _s, _out = _conf_of(tmp_path, _rot_cfg(scope="window"))
+    assert clean["rotation"]["period"] == pb.ROTATE_PERIOD_DEFAULT
+    assert "rotate.period = 60" in conf
+
+
+def test_a_widen_flows_into_the_rotate_replacement(tmp_path):
+    """One width setting covers the stand-in and the rotation.
+
+    The pack's stand-ins are already widened, so `keep` would widen the
+    rotation anyway, but writing it explicitly means a hand-read conf says what
+    it does.
+    """
+    for widen, expected in [({"shape": "digits", "length": 15}, "digits(15)"),
+                            ({"shape": "hex", "length": 16}, "hex(16)"),
+                            ({"shape": "guid"}, "guid")]:
+        _c, conf, _m, _s, _o = _conf_of(tmp_path, _rot_cfg(widen=widen),
+                                        name="w-%s" % expected[:5])
+        assert "token.0.replacement = %s" % expected in conf
+
+
+def test_rotation_refuses_random_event_order():
+    """randomizeEvents picks a line at random, so there is no pass.
+
+    The three events of one user would land in three different identities,
+    which destroys exactly the correlation rotation exists to keep. Refusing
+    beats emitting something that looks rotated and correlates nothing.
+    """
+    with pytest.raises(pb.BuilderError) as exc:
+        pb.validate_config(_rot_cfg(order="random"))
+    assert "sequential" in str(exc.value)
+    # ...and the same pack without rotation is fine in random order.
+    pb.validate_config(_rot_cfg(rotate=False, order="random"))
+
+
+def test_no_rotation_means_no_token_and_no_setting(tmp_path):
+    clean, conf, manifest, _s, _out = _conf_of(tmp_path, _rot_cfg(rotate=False),
+                                               name="plain")
+    assert clean["rotation"] is None
+    assert "rotate" not in conf
+    assert "rotation:" not in manifest
+
+
+@pytest.mark.parametrize("scope", ["hourly", "", "PASS?"])
+def test_rotation_rejects_an_unknown_scope(scope):
+    cfg = _rot_cfg()
+    cfg["rotation"] = {"scope": scope}
+    if scope == "":
+        # empty falls back to the default rather than erroring
+        assert pb.validate_config(cfg)["rotation"]["scope"] == "pass"
+        return
+    with pytest.raises(pb.BuilderError):
+        pb.validate_config(cfg)
+
+
+def test_the_capacity_warning_states_how_long_rotation_lasts():
+    """Easy to underestimate, and silent when it runs out.
+
+    A 6-digit id with 2 distinct values has 450,000 identities per worker; at
+    load-test rates that is minutes, so the number has to be on the screen
+    while the operator can still widen the field.
+    """
+    clean = pb.validate_config(_rot_cfg())
+    cfg, report = pb.apply_pseudonyms(clean, subkey=ROT_SUB)
+    cap = pb.rotation_capacity(cfg, report)
+    assert cap["passes"] == 900000 // 2
+    assert cap["events"] == cap["passes"] * 3
+    assert cap["tightest"]["field"] == "user"
+    notes = " ".join(pb.rotation_warnings(cfg, report))
+    assert "450,000 identities per worker" in notes
+    assert "Widen" in notes
+
+    # Widening makes it effectively unlimited, and the warning says a bigger number.
+    wide = pb.validate_config(_rot_cfg(widen={"shape": "digits", "length": 15}))
+    wcfg, wreport = pb.apply_pseudonyms(wide, subkey=ROT_SUB)
+    assert pb.rotation_capacity(wcfg, wreport)["passes"] > 10 ** 14
+
+
+def test_the_aligned_warning_explains_the_cardinality_trade():
+    clean = pb.validate_config(_rot_cfg(scope="window", period=60))
+    cfg, report = pb.apply_pseudonyms(clean, subkey=ROT_SUB)
+    notes = " ".join(pb.rotation_warnings(cfg, report))
+    assert "every sourcetype" in notes
+    assert "60s window" in notes
+
+
+def test_the_preview_warns_about_rotation():
+    clean = pb.validate_config(_rot_cfg())
+    out = pb.render_preview(clean, 3, 1, subkey=ROT_SUB)
+    assert any("identities per worker" in w for w in out["warnings"])
+
+
+def _firebox_bin():
+    import shutil as _sh
+    for cand in (os.environ.get("STOKER_FIREBOX_BIN"), os.environ.get("FIREBOX_BIN"),
+                 _sh.which("firebox"),
+                 "/opt/aios/apps/stoker/worker/engines/firebox/target/"
+                 "x86_64-unknown-linux-musl/release/firebox",
+                 "/opt/aios/apps/firebox/target/x86_64-unknown-linux-musl/release/firebox"):
+        if cand and os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    return None
+
+
+@pytest.mark.parametrize("scope", ["pass", "window"])
+def test_a_built_rotating_pack_rotates_on_the_real_engine(tmp_path, scope):
+    """The contract that matters: what the builder writes, the engine replays.
+
+    Every other test here checks one side. This one proves the whole path, so a
+    change to the conf the builder writes, to the token name, to the stanza
+    settings or to the engine's arithmetic cannot pass silently.
+    """
+    import subprocess
+
+    binary = _firebox_bin()
+    if binary is None:
+        pytest.skip("firebox binary not built; set FIREBOX_BIN")
+    cfg = _rot_cfg(scope=scope, period=(3600 if scope == "window" else None))
+    _clean, _conf, _m, sample, out = _conf_of(tmp_path, cfg, name="e2e-%s" % scope)
+    stand_ins = re.findall(r"user=(\d+)", sample)
+    assert len(set(stand_ins)) == 2
+
+    conf_path = os.path.join(out, "default", "eventgen.conf")
+    with open(conf_path, encoding="utf-8") as fh:
+        text = fh.read()
+    # The agent points output at its socket and sets the fleet position; do the
+    # same here, but print so the test can read the events.
+    with open(conf_path, "w", encoding="utf-8") as fh:
+        fh.write(text + "outputMode = stdout\nend = 3\n")
+    done = subprocess.run([binary, "generate", "default/eventgen.conf"], cwd=out,
+                          timeout=120, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          env=dict(os.environ, STOKER_ROTATE_WORKERS="1",
+                                   STOKER_ROTATE_SLOT="0"))
+    assert done.returncode == 0, done.stderr.decode()[-2000:]
+    lines = [l for l in done.stdout.decode().splitlines() if "user=" in l]
+    assert len(lines) == 9, lines
+
+    journeys = {}
+    for line in lines:
+        user = re.search(r"user=(\d+)", line).group(1)
+        journeys.setdefault(user, []).append(re.search(r"action=(\w+)", line).group(1))
+    # No original, and no un-rotated stand-in: the engine really replaced them.
+    assert not {"483920", "771045"} & set(journeys)
+    assert not set(stand_ins) & set(journeys), "the stand-ins were not rotated"
+
+    if scope == "pass":
+        # Three replays, three brand new users, each journey still whole.
+        assert len(journeys) == 6, journeys
+        assert sorted(sorted(v) for v in journeys.values()) == [
+            ["login", "logout"], ["login", "logout"], ["login", "logout"],
+            ["register"], ["register"], ["register"]]
+    else:
+        # One hour window, so all three replays share the window's identities:
+        # two users, one of whom logs in and out three times.
+        assert len(journeys) == 2, journeys
+        assert sorted(len(v) for v in journeys.values()) == [3, 6]
+    for user in journeys:
+        assert len(user) == 6 and user.isdigit(), user
+
+
+@pytest.mark.parametrize("widen", [None, {"shape": "digits", "length": 15}])
+def test_the_preview_shows_what_the_engine_will_send(tmp_path, widen):
+    """The preview derives (k, D) itself; the engine derives them from the sample.
+
+    If those two walks ever disagree the preview would quietly show identities
+    the run never produces, which is worse than showing nothing: the operator
+    would sign off on a correlation that does not exist. So they are compared
+    against the real binary rather than against each other's code.
+    """
+    import subprocess
+
+    binary = _firebox_bin()
+    if binary is None:
+        pytest.skip("firebox binary not built; set FIREBOX_BIN")
+    cfg = _rot_cfg(widen=widen)
+    clean = pb.validate_config(cfg)
+    previewed = pb.render_preview(clean, 9, seed=1, subkey=ROT_SUB)["events"]
+
+    _c, _conf, _m, _s, out = _conf_of(tmp_path, cfg, name="agree")
+    conf_path = os.path.join(out, "default", "eventgen.conf")
+    with open(conf_path, encoding="utf-8") as fh:
+        text = fh.read()
+    with open(conf_path, "w", encoding="utf-8") as fh:
+        fh.write(text + "outputMode = stdout\nend = 3\n")
+    done = subprocess.run([binary, "generate", "default/eventgen.conf"], cwd=out,
+                          timeout=120, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          env=dict(os.environ, STOKER_ROTATE_WORKERS="1",
+                                   STOKER_ROTATE_SLOT="0"))
+    assert done.returncode == 0, done.stderr.decode()[-2000:]
+    produced = [l for l in done.stdout.decode().splitlines() if "user=" in l]
+
+    assert len(produced) == 9
+    assert [re.search(r"user=(\d+)", e).group(1) for e in previewed] == \
+        [re.search(r"user=(\d+)", l).group(1) for l in produced], \
+        "the preview and the engine disagree on the rotated identities"

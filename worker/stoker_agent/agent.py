@@ -448,8 +448,21 @@ class Agent(object):
         self._envelope = "hec"
         policy = {"overrides": dict(sl.overrides), "defaults": sl.hec_defaults()}
         log.info("firebox will emit HEC-line envelopes; the agent forwards bytes")
-        return "hec", {"STOKER_ENVELOPE": "hec",
-                       "STOKER_ENVELOPE_META": json.dumps(policy)}
+        return "hec", dict({"STOKER_ENVELOPE": "hec",
+                            "STOKER_ENVELOPE_META": json.dumps(policy)},
+                           **self._rotation_env(sl))
+
+    def _rotation_env(self, sl):
+        # type: (SpecSlice) -> Dict[str, str]
+        """This worker's position in the fleet, for identity rotation.
+
+        The slot is the digit that keeps workers disjoint: every worker walks
+        the same event ordinals, and it is ``slot`` alone that stops two of them
+        minting the same identity. Sending it always, rather than only for a
+        rotating pack, keeps one code path and costs two environment variables.
+        """
+        return {"STOKER_ROTATE_WORKERS": str(int(sl.total_workers or 1)),
+                "STOKER_ROTATE_SLOT": str(int(sl.slot or 0))}
 
     def _setup_shape(self, sl, pack, other_engine):
         # type: (SpecSlice, Any, bool) -> None

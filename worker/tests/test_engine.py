@@ -219,3 +219,60 @@ def test_engine_cmd_override_beats_impl_selection(tmp_path):
     binary = _fake_firebox(tmp_path)
     env = {"STOKER_FIREBOX_BIN": binary, "STOKER_ENGINE_CMD": "/bin/echo {conf} x"}
     assert build_command("/w/eventgen.conf", env) == ["/bin/echo", "/w/eventgen.conf", "x"]
+
+
+# --------------------------------------------------------------------------- #
+# Identity rotation needs firebox
+# --------------------------------------------------------------------------- #
+
+def _rotating_conf(tmp_path, rotate=True):
+    path = tmp_path / "eventgen.conf"
+    body = ["[s.sample]", "mode = sample", "interval = 1", "count = -1",
+            "token.0.token = user=(\\d+)"]
+    body.append("token.0.replacementType = %s" % ("rotate" if rotate else "static"))
+    body.append("token.0.replacement = keep" if rotate else "token.0.replacement = x")
+    path.write_text("\n".join(body) + "\n", encoding="utf-8")
+    return str(path)
+
+
+def test_rotation_refuses_the_python_engine(tmp_path):
+    """The vendored eventgen drops an unknown replacementType silently.
+
+    It would emit the stable pseudonym, so nothing leaks, but nothing rotates
+    either and nothing says so: every replay would reuse one identity and the
+    cardinality the pack was built for would simply not appear. Failing the run
+    is the only honest outcome, and the message has to say what to do.
+    """
+    conf = _rotating_conf(tmp_path)
+    with pytest.raises(EngineError) as exc:
+        build_command(conf, {"STOKER_EVENTGEN_IMPL": "python"})
+    text = str(exc.value)
+    assert "only firebox" in text
+    assert "turn rotation off" in text
+
+
+def test_a_pack_that_does_not_rotate_still_runs_on_python(tmp_path):
+    conf = _rotating_conf(tmp_path, rotate=False)
+    cmd = build_command(conf, {"STOKER_EVENTGEN_IMPL": "python"})
+    assert cmd[-1] == conf and "splunk_eventgen" in cmd
+
+
+def test_rotation_runs_on_firebox(tmp_path):
+    binary = tmp_path / "firebox"
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+    conf = _rotating_conf(tmp_path)
+    cmd = build_command(conf, {"STOKER_FIREBOX_BIN": str(binary)})
+    assert cmd[0] == str(binary)
+
+
+def test_rotation_detection_ignores_comments_and_other_types(tmp_path):
+    path = tmp_path / "c.conf"
+    path.write_text(
+        "[s]\n# token.9.replacementType = rotate\n"
+        "token.0.replacementType = static\n"
+        "token.1.replacement = rotate\n",   # a VALUE of rotate is not a type
+        encoding="utf-8")
+    from stoker_agent.engine import conf_declares_rotation
+    assert conf_declares_rotation(str(path)) is False
+    assert conf_declares_rotation(str(tmp_path / "missing.conf")) is False

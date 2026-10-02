@@ -991,9 +991,82 @@ Other limits worth knowing:
   passes the events it read from disk so they are never hashed twice, which
   would silently stop the pack correlating with every other one. To start over,
   re-upload the originals.
-- **Rotating a new identity per replay** (so each pass through the sample is a
-  fresh user) needs worker support that is not released yet and is refused for
-  now.
+- **Rotating a new identity per replay** is a separate switch on the field; see
+  below.
+
+#### A new identity each replay (rotation)
+
+A stable stand-in replays the same user for ever. Over the three-event sample
+above that means thousands of logins by `user=583`, so anything that counts
+users, groups by user or measures session length is meaningless, and a load test
+of a system that caches or shards per customer exercises one cache entry.
+
+Turn on **"give every replay of the sample a new identity"** on the field. Each
+pass over the sample mints a new identity, and within the pass the login and the
+logout still belong to it:
+
+```
+pass 1:  user=463222 login    user=695508 register    user=463222 logout
+pass 2:  user=693026 login    user=928073 register    user=693026 logout
+pass 3:  user=870466 login    user=295851 register    user=870466 logout
+```
+
+The identity is a **counter, not a hash**. The identities are synthetic so there
+is nothing to conceal, and a counter is collision-free by construction where a
+hash is not: it is `(pass x workers + slot) x D + k`, a mixed-radix number, so
+two passes and two worker slots can never mint the same identity. It is then put
+through a format-preserving permutation so it does not read as 100006, 100007,
+100008. Rotation applies on top of the stand-ins, never the originals, so the
+pack still contains no real identifiers.
+
+**It needs firebox.** A worker running the fallback Python engine **fails the
+run** with a message saying so, rather than quietly emitting the stable stand-in
+and leaving you to discover from the data that nothing rotated.
+
+**Watch the capacity.** The identities come from the field's own format space,
+so a 6-digit id with 1,000 distinct values has 900 passes per worker, which at
+load-test rates is seconds. The builder states the figure while you can still
+widen the field; 12 digits lasts weeks at 500,000 eps and 15 digits effectively
+for ever. The engine logs once and wraps rather than failing a run.
+
+**The event order must be sequential.** `randomizeEvents` picks a line at
+random, so there is no pass over the sample and the three events of one user
+would land in three different identities. The builder refuses the combination.
+
+**A rotating run cannot be scaled.** The worker's slot is part of the identity,
+so changing the worker count would re-mint identities already sent to Splunk.
+`POST /runs/{id}/scale` answers 409 `rotation_fixed_fleet`. Stop the run and
+start a new one at the size you want, or use the aligned scope below, which does
+not depend on the fleet.
+
+#### Lining identities up across sourcetypes
+
+Rotation per replay cannot be joined across sourcetypes, and no setting makes
+it so: each stanza counts its own passes over its own sample, so two sourcetypes
+are never on the same pass. The only thing two independently running streams
+agree on without coordination is the clock.
+
+Tick **"line the identities up across sourcetypes, packs and runs"** and the
+identity becomes a function of the value and the clock instead:
+`mix(stand-in, epoch / period)`. Every pack, run and worker computes the same
+value from the same stand-in, so `client_id` joins between `web` and `auth` and
+a correlation search works across them.
+
+Three things to know about the trade:
+
+- **Cardinality is set by the window, not the volume.** One identity per value
+  per window, so a 60-second window over 1,000 values gives 1,000 new identities
+  a minute however fast you send. A shorter period gives more.
+- **It can merge two values**, at the same birthday rate as keeping the format,
+  because it is a hash rather than a counter. The same widen setting answers it.
+- **It can be scaled**, because it ignores the worker slot entirely.
+
+It hashes the stand-in rather than the original, so there is no key to ship to a
+worker, and a worker too old to know the token emits the stable stand-in rather
+than leaking an identifier.
+
+If you are unsure, turn it on. Doing it now costs nothing; doing it after a
+round of testing moves every identity.
 
 The analyser suggests this on its own for a field whose name says identifier
 (`client_id`, `clientId`, `TargetUserSid`, `order_no`), a person-shaped key

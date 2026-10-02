@@ -269,6 +269,15 @@ function ReplacementEditor({
               />
             </Field>
           )}
+          <Field label="Each replay">
+            <Switch
+              appearance="checkbox"
+              selected={value.rotate === true}
+              onClick={() => onChange({ ...value, rotate: !value.rotate })}
+            >
+              Give every replay of the sample a new identity
+            </Switch>
+          </Field>
           <Field label="Elsewhere in the event">
             <Switch
               appearance="checkbox"
@@ -286,7 +295,11 @@ function ReplacementEditor({
               field extractions keep working, but the space is small enough that two
               values can merge. Widening removes that at the cost of the shape. Turn
               on "replace everywhere" when the same value also appears in a URL or a
-              message, which is otherwise left in the pack and blocks the save.
+              message, which is otherwise left in the pack and blocks the save. Without
+              "new identity each replay" one value keeps one stand-in for ever, so a
+              three-event journey replays as the same user logging in thousands of
+              times; with it, each pass over the sample is a new user whose events still
+              belong together.
             </Muted>
           </Field>
         </>
@@ -493,6 +506,12 @@ function PackBuilder() {
   const [count, setCount] = useState("10");
   const [interval, setInterval] = useState("1");
   const [order, setOrder] = useState<"sequential" | "random">("sequential");
+  // Aligned rotation: off by default, because the pass counter gives far more
+  // identities and nothing needs the join until a correlation search spans
+  // sourcetypes. Switching it on is cheap; switching it on later is not,
+  // because the identities move.
+  const [rotateAligned, setRotateAligned] = useState(false);
+  const [rotatePeriod, setRotatePeriod] = useState("60");
   const [custom, setCustom] = useState("");
   const [customIsRegex, setCustomIsRegex] = useState(false);
   const [analyseError, setAnalyseError] = useState<string | null>(null);
@@ -537,6 +556,8 @@ function PackBuilder() {
     if (c.count > 0) setCount(String(c.count));
     setInterval(String(c.interval));
     setOrder(c.order ?? "sequential");
+    setRotateAligned((c.rotation?.scope ?? "pass") === "window");
+    setRotatePeriod(String(c.rotation?.period ?? 60));
     hydrated.current = true;
   }, [editing, packQ.data]);
 
@@ -607,8 +628,16 @@ function PackBuilder() {
       count: wholeSample ? -1 : Math.max(1, Math.floor(num(count, 10))),
       interval: Math.max(1, Math.floor(num(interval, 1))),
       order,
+      rotation: tokens.some((t) => t.enabled && t.replacement.kind === "pseudonym" && t.replacement.rotate)
+        ? rotateAligned
+          ? { scope: "window" as const, period: Math.max(1, Math.floor(num(rotatePeriod, 60))) }
+          : { scope: "pass" as const }
+        : null,
     }),
-    [name, description, sourcetype, tags, events, breaker, tokens, wholeSample, count, interval, order],
+    [
+      name, description, sourcetype, tags, events, breaker, tokens, wholeSample, count,
+      interval, order, rotateAligned, rotatePeriod,
+    ],
   );
 
   // Debounced live preview whenever the config changes.
@@ -874,6 +903,56 @@ function PackBuilder() {
                   sensitive before uploading. This is pseudonymisation, not anonymisation:
                   whoever holds the control plane can rebuild the mapping.
                 </Callout>
+              )}
+              {tokens.some(
+                (t) => t.enabled && t.replacement.kind === "pseudonym" && t.replacement.rotate,
+              ) && (
+                <Panel>
+                  <Stack $gap="small">
+                    <Field label="Rotation">
+                      <Switch
+                        appearance="checkbox"
+                        selected={rotateAligned}
+                        onClick={() => setRotateAligned(!rotateAligned)}
+                      >
+                        Line the identities up across sourcetypes, packs and runs
+                      </Switch>
+                    </Field>
+                    {rotateAligned && (
+                      <Field
+                        label="Window (seconds)"
+                        hint="one identity per value per window; shorter gives more identities"
+                      >
+                        <TextInput
+                          value={rotatePeriod}
+                          onChange={(_e, { value }) => setRotatePeriod(value)}
+                        />
+                      </Field>
+                    )}
+                    <Muted $small>
+                      {rotateAligned
+                        ? "The identity comes from the value and the clock, so the same client" +
+                          " id appears in every sourcetype, pack and run of the same window," +
+                          " which is what a correlation search needs to join them. The cost is" +
+                          " that the number of distinct identities is set by the window length" +
+                          " rather than by the volume, and that two values can merge into one" +
+                          " identity (the same risk as keeping the format, answered by the same" +
+                          " widen setting)."
+                        : "Each replay of the sample gets its own identities, which gives the" +
+                          " most of them and cannot merge two values. They will not line up with" +
+                          " another sourcetype or another run, because each pack counts its own" +
+                          " replays. Turn this on if a correlation search has to join this field" +
+                          " across sources: doing it now costs nothing, doing it later moves" +
+                          " every identity."}
+                    </Muted>
+                    <Muted $small>
+                      Rotation needs firebox on the workers. A worker running the fallback
+                      Python engine fails the run rather than quietly replaying one identity.
+                      The worker count is part of the identity, so a rotating run cannot be
+                      scaled unless the identities are aligned.
+                    </Muted>
+                  </Stack>
+                </Panel>
               )}
               <CustomLists lists={lists} />
             </Stack>

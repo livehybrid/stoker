@@ -1530,9 +1530,26 @@ def scale_run_endpoint(run_id: int, body: ScaleRequest, request: Request, db: Se
                 "workers": body.workers,
             },
         )
+    snap = run.spec_snapshot_json or {}
+    rotation = lifecycle.rotation_pins_fleet(snap)
+    if rotation and body.workers != (snap.get("workers") or body.workers):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "rotation_fixed_fleet",
+                "detail": (
+                    "this run rotates %s per replay, and the identity includes "
+                    "the worker's slot out of the fleet, so changing the worker "
+                    "count would re-mint identities already sent to Splunk. Stop "
+                    "the run and start a new one at the size you want, or build "
+                    "the pack with rotation aligned across sourcetypes, which "
+                    "does not depend on the fleet and can be scaled."
+                    % (", ".join(rotation.get("fields") or []) or "identities")),
+                "workers": body.workers,
+            },
+        )
     # Same per-worker ceiling the submit guard applies: scaling DOWN spreads the
     # same rate over fewer slots, which can exceed a ceiling the run cleared.
-    snap = run.spec_snapshot_json or {}
     _guard_run_ceiling(db, run, snap.get("rate_mode") or "eps",
                        snap.get("rate_value"), body.workers)
     driver = _run_driver(db, run)

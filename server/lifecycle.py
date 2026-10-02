@@ -256,6 +256,14 @@ def provision_run(db, spec, driver, overrides=None, started_by=None, settings=No
                                    duration_s=eff_duration_s, backfill=backfill_block)
     if workers != spec.workers:
         snapshot["workers"] = workers
+    # Identity rotation under `pass` scope puts the worker's slot in the
+    # identity, which is what keeps two workers from minting the same one. The
+    # worker count is therefore part of the arithmetic, and changing it mid-run
+    # re-mints identities that have already been sent. Frozen here so scale can
+    # refuse. `window` scope ignores the slot entirely and stays scalable.
+    rotation = _snapshot_rotation(db, spec)
+    if rotation:
+        snapshot["rotation"] = rotation
 
     # 2. Resolve the bundle (build from the pack dir if absent).
     bundle = _resolve_bundle(db, spec, settings=settings)
@@ -481,6 +489,35 @@ def stop_run(db, run, driver, force=False, actor="operator"):
     return run
 
 
+def _snapshot_rotation(db, spec):
+    # type: (Session, Any) -> Optional[Dict[str, Any]]
+    """The pack's rotation settings, for the run snapshot."""
+    from .models import Pack
+
+    pack = spec.pack if spec.pack is not None else db.get(Pack, spec.pack_id)
+    rotation = ((pack.builder_config_json or {}).get("rotation")
+                if pack is not None else None)
+    if not rotation:
+        return None
+    return {"scope": rotation.get("scope") or "pass",
+            "fields": list(rotation.get("fields") or [])}
+
+
+def rotation_pins_fleet(snap):
+    # type: (Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]
+    """The run's rotation when it makes the worker count unchangeable.
+
+    Only `pass` scope: its identity is `(pass x workers + slot) x D + k`, so a
+    different worker count is a different identity for every value, and ones
+    already sent to Splunk would be minted again. `window` scope derives the
+    identity from the value and the clock alone, so it is unaffected.
+    """
+    rotation = (snap or {}).get("rotation") or None
+    if rotation and (rotation.get("scope") or "pass") == "pass":
+        return rotation
+    return None
+
+
 def scale_run(db, run, driver, workers, actor="operator"):
     # type: (Session, Run, ExecutionDriver, int, str) -> Run
     """Change a run's worker count.
@@ -503,6 +540,14 @@ def scale_run(db, run, driver, workers, actor="operator"):
     # 409, so this is the belt-and-braces invariant for any other caller.
     engine = (run.spec_snapshot_json or {}).get("engine")
     workers = effective_workers(engine, workers)
+    snap_now = run.spec_snapshot_json or {}
+    if (rotation_pins_fleet(snap_now)
+            and workers != (snap_now.get("workers") or len(run.worker_leases or []) or workers)):
+        # The route rejects this with a 409; this is the invariant for any other
+        # caller, because getting it wrong corrupts data rather than failing.
+        raise ValueError(
+            "this run rotates identities per replay, which puts the worker count "
+            "in the identity; changing it would re-mint identities already sent")
 
     ref = driver_ref_of(run)
     if ref is not None:

@@ -1348,6 +1348,7 @@ def validate_config(cfg):
     order = cfg.get("order") or "sequential"
     if order not in ("sequential", "random"):
         raise BuilderError("order must be sequential or random")
+    rotation = _validate_rotation(cfg.get("rotation"), clean_tokens, order)
     tags = [str(x).strip()[:40] for x in (cfg.get("tags") or []) if str(x).strip()][:20]
     return {
         "name": name,
@@ -1360,7 +1361,69 @@ def validate_config(cfg):
         "count": count,
         "interval": interval,
         "order": order,
+        "rotation": rotation,
     }
+
+
+ROTATE_SCOPES = ("pass", "window")
+ROTATE_PERIOD_MIN, ROTATE_PERIOD_MAX, ROTATE_PERIOD_DEFAULT = 1, 86400, 60
+
+
+def _validate_rotation(rotation, tokens, order):
+    # type: (Any, Sequence[Dict[str, Any]], str) -> Optional[Dict[str, Any]]
+    """The pack's rotation settings, or None when no field rotates.
+
+    The scope is per pack rather than per field because it is one setting on the
+    eventgen stanza: a stanza counts its passes, or its clock windows, once for
+    all of its tokens. Which fields rotate stays per field.
+    """
+    rotating = [t for t in tokens
+                if t.get("enabled", True)
+                and t["replacement"].get("kind") == "pseudonym"
+                and t["replacement"].get("rotate")]
+    if not rotating:
+        return None
+    if order == "random":
+        # randomizeEvents picks a line at random, so there is no pass over the
+        # sample and no journey to hold together: the three events of one user
+        # would land in three different identities. Refusing beats emitting
+        # something that looks like rotation but correlates nothing.
+        raise BuilderError(
+            "a field is set to rotate per replay, which needs the events replayed "
+            "in order; set the event order to sequential, or turn rotation off")
+    rotation = rotation or {}
+    if not isinstance(rotation, dict):
+        raise BuilderError("rotation must be an object or null")
+    scope = str(rotation.get("scope") or "pass").strip().lower()
+    if scope not in ROTATE_SCOPES:
+        raise BuilderError("rotation scope must be one of %s" % ", ".join(ROTATE_SCOPES))
+    out = {"scope": scope, "fields": [t["field"] for t in rotating]}
+    if scope == "window":
+        out["period"] = _int_in(rotation.get("period", ROTATE_PERIOD_DEFAULT),
+                                ROTATE_PERIOD_MIN, ROTATE_PERIOD_MAX, "rotation period")
+    return out
+
+
+def rotating_fields(cfg):
+    # type: (Dict[str, Any]) -> List[Dict[str, Any]]
+    """The enabled pseudonym fields that rotate per replay."""
+    return [t for t in pseudonym_fields(cfg) if t["replacement"].get("rotate")]
+
+
+def _rotate_replacement(rep):
+    # type: (Dict[str, Any]) -> str
+    """``token.N.replacement`` for a rotate token: the format to render in.
+
+    ``keep`` follows the stand-in's own shape, so widening the stand-in widens
+    the rotation with it and one width is chosen in one place.
+    """
+    widen = rep.get("widen")
+    if not widen:
+        return "keep"
+    shape = widen.get("shape")
+    if shape == _ps.GUID:
+        return "guid"
+    return "%s(%d)" % (shape, widen["length"])
 
 
 def _as_int(v):
@@ -1423,10 +1486,7 @@ def _validate_replacement(label, rep, known_lists, tables=None):
             out["widen"] = {"shape": fmt.shape}
             if fmt.shape != _ps.GUID:
                 out["widen"]["length"] = fmt.width
-        if rep.get("rotate"):
-            raise BuilderError(
-                "%s: 'rotate per replay' needs worker support that is not released "
-                "yet; leave it off to get one stable stand-in per value" % label)
+        out["rotate"] = bool(rep.get("rotate"))
         return out
     if kind == "values":
         values = rep.get("values") or []
@@ -1623,6 +1683,162 @@ def pseudonym_warnings(report):
     return out
 
 
+def rotation_tables(cfg):
+    # type: (Dict[str, Any]) -> Dict[str, Dict[str, Tuple[int, int]]]
+    """``{token id: {matched text: (k, D)}}`` for the rotating fields.
+
+    The engines build these from the sample at load, walking it line by line in
+    file order then token by token then match by match, which is what lets every
+    worker derive the same numbers with nothing shipped alongside the pack. The
+    preview has to reproduce that walk exactly or it would show identities the
+    run will not produce. See ``build_rotation_tables`` in the worker's firebox.
+    """
+    fields = [(t, re.compile(t["pattern"])) for t in rotating_fields(cfg)]
+    if not fields:
+        return {}
+    order = {}  # type: Dict[str, Dict[str, List[str]]]
+    for event in cfg.get("events") or []:
+        for token, rx in fields:
+            for m in rx.finditer(event):
+                text = m.group(1) if rx.groups else m.group(0)
+                if text is None:
+                    continue
+                fmt = _rotation_format(token["replacement"], text)
+                if fmt.shape == _ps.NONE:
+                    continue
+                cls = order.setdefault(token["id"], {}).setdefault(_class_key(fmt), [])
+                if text not in cls:
+                    cls.append(text)
+    out = {}  # type: Dict[str, Dict[str, Tuple[int, int]]]
+    for tid, classes in order.items():
+        table = {}
+        for values in classes.values():
+            for k, text in enumerate(values):
+                table[text] = (k, len(values))
+        out[tid] = table
+    return out
+
+
+def _rotation_format(rep, text):
+    # type: (Dict[str, Any], str) -> Any
+    """The format a rotate token renders in: its widen, else the text's own."""
+    widen = rep.get("widen")
+    if widen:
+        return _ps.widen_format(widen.get("shape"), widen.get("length"))
+    return _ps.infer(text)
+
+
+def _class_key(fmt):
+    # type: (Any) -> str
+    """A format class as a dict key; `mixed` carries its template signature."""
+    if fmt.shape == _ps.MIXED:
+        return "m" + "|".join(str(e) for e in fmt.template)
+    return "%s%s" % (fmt.shape, fmt.width or "")
+
+
+def rotation_capacity(cfg, report):
+    # type: (Dict[str, Any], Optional[Any]) -> Optional[Dict[str, Any]]
+    """How much rotation a pack has before its identities start repeating.
+
+    Under ``pass`` scope the identity is a counter in the field's own format
+    space, so the space divided by the number of distinct values sharing it is
+    how many passes each worker gets. That bound is easy to underestimate: a
+    6-digit id over a 1000-line sample has 900 passes per worker, which at
+    load-test rates is seconds, not hours. Returning the number lets the builder
+    say so and the run gate refuse.
+
+    None when nothing rotates. ``passes`` is per worker, so a run over N workers
+    consumes it N times as fast.
+    """
+    if not cfg.get("rotation") or report is None:
+        return None
+    rotating = {t["field"] for t in rotating_fields(cfg)}
+    passes, tightest = None, None
+    for row in report.rows:
+        if row.field not in rotating:
+            continue
+        for cls in row.classes:
+            available = int(cls["space"]) // max(1, int(cls["distinct"]))
+            if passes is None or available < passes:
+                passes, tightest = available, dict(cls, field=row.field)
+    if passes is None:
+        return None
+    events = len(cfg.get("events") or []) or 1
+    return {"passes": passes, "events": passes * events, "tightest": tightest,
+            "scope": cfg["rotation"]["scope"]}
+
+
+def _rotate_preview(cfg, text, tables, index, epoch):
+    # type: (Dict[str, Any], str, Dict[str, Dict[str, Tuple[int, int]]], int, float) -> str
+    """Apply the rotating fields to one preview event.
+
+    ``index`` is the event's ordinal, so the pass is ``index // sample size``:
+    the same arithmetic the engine does, which is what makes the preview show
+    the login and the logout of one pass sharing an identity.
+    """
+    rotation = cfg.get("rotation") or {}
+    sample = len(cfg.get("events") or []) or 1
+    for token in rotating_fields(cfg):
+        table = tables.get(token["id"]) or {}
+        rx = re.compile(token["pattern"])
+        widen = token["replacement"].get("widen")
+        fmt = (_ps.widen_format(widen.get("shape"), widen.get("length"))
+               if widen else None)
+        pieces, pos = [], 0
+        for m in rx.finditer(text):
+            s_, e_ = (m.span(1) if rx.groups else m.span(0))
+            if s_ < pos or s_ < 0:
+                continue
+            span = text[s_:e_]
+            if rotation.get("scope") == "window":
+                new = _ps.aligned_rotation(
+                    span, _ps.window_index(int(epoch), rotation.get("period") or 60),
+                    widen=fmt)
+            else:
+                k, distinct = table.get(span, (0, 1))
+                # Preview is one worker: slot 0 of 1, as a standalone run is.
+                new = _ps.pass_rotation(span, index // sample, 1, 0, distinct, k, widen=fmt)
+            pieces.append(text[pos:s_])
+            pieces.append(new if new is not None else span)
+            pos = e_
+        pieces.append(text[pos:])
+        text = "".join(pieces)
+    return text
+
+
+def rotation_warnings(cfg, report):
+    # type: (Dict[str, Any], Optional[Any]) -> List[str]
+    """Operator-facing notes for a rotating pack.
+
+    Both scopes have a cost the operator is choosing, and neither is visible
+    from the builder form, so both are stated.
+    """
+    rotation = cfg.get("rotation")
+    if not rotation:
+        return []
+    out = []
+    fields = ", ".join(rotation["fields"])
+    if rotation["scope"] == "window":
+        out.append(
+            "%s: aligned rotation gives each %ds window one identity per value, so "
+            "the same id appears in every sourcetype, pack and run of that window. "
+            "That is what makes it joinable, and it also means the number of distinct "
+            "identities is set by the window length rather than by the volume: a "
+            "shorter period gives more of them."
+            % (fields, rotation["period"]))
+    cap = rotation_capacity(cfg, report)
+    if cap and rotation["scope"] == "pass":
+        t = cap["tightest"]
+        out.append(
+            "%s: rotation has %s identities per worker before they repeat (%d distinct "
+            "value(s) in a %s space of %d, over a %d-event sample, so about %s events "
+            "per worker). Widen the field to a fixed length if the run will send more "
+            "than that."
+            % (t["field"], "{:,}".format(cap["passes"]), t["distinct"], t["shape"],
+               int(t["space"]), len(cfg.get("events") or []), "{:,}".format(cap["events"])))
+    return out
+
+
 def _slugify(text):
     # type: (str) -> str
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:48] or "pack"
@@ -1656,6 +1872,12 @@ def eventgen_tokens(cfg):
     files = {}  # type: Dict[str, List[str]]
     used = set()  # type: set
     tables = None  # type: Optional[Dict[str, List[str]]]
+    # Rotation goes FIRST. The engines apply tokens in conf order to the same
+    # event text, so a rotate token has to see the stand-in the pack was written
+    # with; if an earlier token had already rewritten that span, the rotation
+    # would either miss it or rotate something else's value.
+    for t in rotating_fields(cfg):
+        out.append((_conf_value(t["pattern"]), "rotate", _rotate_replacement(t["replacement"])))
     for t in ordered_tokens(cfg):
         rep = t["replacement"]
         kind = rep["kind"]
@@ -1739,6 +1961,11 @@ def write_pack(cfg, dest, subkey=None, fingerprint=None, already=None):
     ]
     if cfg["order"] == "random":
         lines.append("randomizeEvents = true")
+    rotation = cfg.get("rotation")
+    if rotation:
+        lines.append("rotate.scope = %s" % rotation["scope"])
+        if rotation["scope"] == "window":
+            lines.append("rotate.period = %d" % rotation["period"])
     if cfg.get("breaker"):
         lines.append("breaker = %s" % _conf_value(cfg["breaker"]))
     for i, (pattern, rtype, replacement) in enumerate(tokens):
@@ -1766,6 +1993,19 @@ def write_pack(cfg, dest, subkey=None, fingerprint=None, already=None):
                  "  algorithm: %s" % key["algorithm"],
                  "  key_fingerprint: %s" % key["fingerprint"],
                  "  fields: %s" % ", ".join(r["field"] for r in cfg.get("pseudonymised") or [])]
+    if cfg.get("rotation"):
+        rot = cfg["rotation"]
+        # Recorded so an operator reading the pack can see why the ids move,
+        # and so the control plane can refuse to run it on an engine that would
+        # silently not rotate.
+        yaml += ["rotation:",
+                 "  algorithm: %s" % (_ps.ALIGNED_ALGORITHM if rot["scope"] == "window"
+                                      else _ps.ROTATE_ALGORITHM),
+                 "  scope: %s" % rot["scope"],
+                 "  engine: firebox",
+                 "  fields: %s" % ", ".join(rot["fields"])]
+        if rot["scope"] == "window":
+            yaml += ["  period_s: %d" % rot["period"]]
     if cfg.get("sourcetype"):
         yaml += ["defaults:", "  sourcetype: %s" % cfg["sourcetype"]]
     with open(os.path.join(dest, "pack.yaml"), "w", encoding="utf-8") as fh:
@@ -1915,11 +2155,13 @@ def render_preview(cfg, n=20, seed=None, subkey=None, already=None):
         if not any(rx.search(ev) for ev in events):
             warnings.append("%s: the pattern matches none of the sample events" % t["field"])
     warnings.extend(pseudonym_warnings(pseudo_report))
+    warnings.extend(rotation_warnings(cfg, pseudo_report))
     warnings.extend(coverage_warnings(cfg))
     now = time.time()
     state = {}  # type: Dict[str, Dict[str, int]]
     out = []
     count = _as_int(cfg.get("count", WHOLE_SAMPLE))
+    rot_tables = rotation_tables(cfg)
     for i in range(n):
         if cfg.get("order") == "random":
             base = rng.choice(events)
@@ -1933,6 +2175,12 @@ def render_preview(cfg, n=20, seed=None, subkey=None, already=None):
         epoch = now - rng.uniform(0, cfg.get("interval", 1))
         rows = {}  # type: Dict[str, List[str]]   one table row per event (mvfile)
         text = base
+        # Rotation first, as the conf orders it, and before any other token can
+        # rewrite the span. Without this the preview would show the pack's
+        # stand-ins, which is what the pack HOLDS but not what Splunk receives:
+        # the whole point of rotation is that the value moves every replay.
+        if rot_tables:
+            text = _rotate_preview(cfg, text, rot_tables, i, epoch)
         for t, rx in compiled:
             matches = list(rx.finditer(text))
             if not matches:
@@ -1957,7 +2205,8 @@ __all__ = [
     "BuilderError", "BUILDER_FILE", "BUILDER_TAG", "analyse", "break_events", "check_breaker",
     "apply_pseudonyms", "classify", "coverage_warnings", "delete_custom_wordlist",
     "detect_breaker", "highlight", "looks_like_identifier", "pseudonym_fields",
-    "pseudonym_warnings",
+    "pseudonym_warnings", "rotating_fields", "rotation_capacity", "rotation_tables",
+    "rotation_warnings",
     "load_wordlist", "WHOLE_SAMPLE",
     "ordered_tokens", "eventgen_tokens", "read_builder_config", "recommend", "render_preview",
     "save_custom_wordlist", "set_custom_dir", "split_events", "split_input", "table_columns",

@@ -115,6 +115,27 @@ def eventgen_impl(env=None):
     return "python", None
 
 
+def conf_declares_rotation(conf_path):
+    # type: (str) -> bool
+    """Does this conf ask for identity rotation?
+
+    Read rather than passed down from the control plane because the engine
+    implementation is chosen here, on the worker, and only the worker knows
+    which one it will actually run.
+    """
+    try:
+        with open(conf_path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line.startswith("#") or "replacementType" not in line:
+                    continue
+                if line.split("=", 1)[-1].strip().lower() == "rotate":
+                    return True
+    except OSError:
+        return False
+    return False
+
+
 def build_command(conf_path, env=None):
     # type: (str, Optional[Dict[str, str]]) -> List[str]
     """Engine invocation. STOKER_ENGINE_CMD (shell-quoted, `{conf}`
@@ -131,6 +152,18 @@ def build_command(conf_path, env=None):
             return [conf_path if p == "{conf}" else p for p in parts]
         return parts + [conf_path]
     impl, binary = eventgen_impl(env)
+    if impl == "python" and conf_declares_rotation(conf_path):
+        # The vendored eventgen drops an unknown replacementType and emits the
+        # matched text, which here is the stable pseudonym: safe (nothing
+        # leaks) but silently NOT rotated, so every replay would reuse one
+        # identity and the cardinality the pack was built for would not appear.
+        # Failing the run is the only honest outcome.
+        raise EngineError(
+            "this pack rotates identities per replay, which only firebox "
+            "implements. The vendored Python eventgen would emit the stable "
+            "pseudonym instead, so the replay would not rotate and nothing "
+            "would say so. Install firebox on this worker (STOKER_FIREBOX_BIN "
+            "or `firebox` on PATH), or turn rotation off in the pack builder.")
     if impl == "firebox":
         cmd = [binary, "-v", "generate", conf_path]
         threads = (env.get("STOKER_FIREBOX_THREADS") or "").strip()
