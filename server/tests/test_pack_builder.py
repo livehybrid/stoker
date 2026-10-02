@@ -693,3 +693,116 @@ def test_a_whole_sample_pack_declares_its_implied_rate():
     small = pb.validate_config({"name": "small", "events": ["l%02d" % i for i in range(20)],
                                 "tokens": []})
     assert pb.coverage_warnings(small) == []
+
+
+# ---- consistent pseudonyms in the builder ----
+
+PSEUDO_SAMPLE = ["user=123 action=login", "user=456 action=register",
+                 "user=123 action=logout"]
+PSEUDO_TOKEN = {"field": "user", "pattern": r"\buser=(\d+)", "enabled": True,
+                "replacement": {"kind": "pseudonym"}}
+
+
+@pytest.fixture()
+def subkey():
+    from server.packbuilder import pseudonym as _ps
+    return _ps.derive_subkey(bytes(range(32))), _ps.fingerprint(bytes(range(32)))
+
+
+def test_a_pseudonym_field_emits_no_eventgen_token(subkey):
+    cfg = pb.validate_config({"name": "p", "events": PSEUDO_SAMPLE,
+                              "tokens": [PSEUDO_TOKEN]})
+    assert cfg["tokens"][0]["replacement"] == {
+        "kind": "pseudonym", "widen": None, "rotate": False, "rewrite_residuals": False}
+    # The sample text itself is rewritten, so there is nothing for the engines
+    # to do and nothing that can be dropped by an engine that does not know it.
+    assert pb.eventgen_tokens(cfg)[0] == []
+
+
+def test_written_pack_holds_stand_ins_and_no_originals(tmp_path, subkey):
+    sub, fp = subkey
+    cfg = pb.validate_config({"name": "sessions", "events": PSEUDO_SAMPLE,
+                              "tokens": [PSEUDO_TOKEN], "order": "sequential"})
+    dest = str(tmp_path / "pack")
+    pb.write_pack(cfg, dest, subkey=sub, fingerprint=fp)
+
+    sample = open(os.path.join(dest, "samples", "sessions.sample")).read()
+    assert "123" not in sample and "456" not in sample
+    lines = sample.splitlines()
+    assert lines[0].split()[0] == lines[2].split()[0], "the journey must still join"
+    assert lines[0].split()[0] != lines[1].split()[0]
+    assert all(re.match(r"^user=\d{3} action=\w+$", l) for l in lines), "format kept"
+
+    # the stored builder config holds the stand-ins too, so reopening the pack
+    # cannot show an original
+    stored = pb.read_builder_config(dest)
+    assert stored["events"] == lines
+    (row,) = stored["pseudonymised"]
+    assert (row["field"], row["spans"], row["distinct"]) == ("user", 3, 2)
+    assert stored["pseudonym_key"]["fingerprint"] == fp
+
+    yaml = open(os.path.join(dest, "pack.yaml")).read()
+    assert "key_fingerprint: %s" % fp in yaml and "fields: user" in yaml
+    assert bundles.lint_pack(dest).ok
+
+
+def test_the_preview_shows_what_the_pack_will_hold(subkey):
+    sub, _fp = subkey
+    cfg = pb.validate_config({"name": "p", "events": PSEUDO_SAMPLE,
+                              "tokens": [PSEUDO_TOKEN], "order": "sequential"})
+    out = pb.render_preview(cfg, n=3, seed=1, subkey=sub)
+    assert not any("123" in e or "456" in e for e in out["events"])
+    assert out["events"][0].split()[0] == out["events"][2].split()[0]
+    # and the collision risk is stated rather than left to be discovered
+    assert any("same stand-in and merge" in w for w in out["warnings"])
+
+
+def test_building_without_the_key_is_refused(tmp_path):
+    cfg = pb.validate_config({"name": "p", "events": PSEUDO_SAMPLE,
+                              "tokens": [PSEUDO_TOKEN]})
+    with pytest.raises(pb.BuilderError) as exc:
+        pb.write_pack(cfg, str(tmp_path / "p"))
+    assert "pseudonym key" in str(exc.value)
+
+
+def test_a_rebuild_never_pseudonymises_a_stand_in(tmp_path, subkey):
+    """p(p(x)) would silently stop the pack correlating with every other one."""
+    sub, fp = subkey
+    cfg = pb.validate_config({"name": "s", "events": PSEUDO_SAMPLE,
+                              "tokens": [PSEUDO_TOKEN]})
+    first = str(tmp_path / "p1")
+    pb.write_pack(cfg, first, subkey=sub, fingerprint=fp)
+    built = pb.read_builder_config(first)
+
+    # Reopen exactly as the UI does, then rebuild with the server passing the
+    # events it read from disk.
+    second = str(tmp_path / "p2")
+    pb.write_pack(pb.validate_config(built), second, subkey=sub, fingerprint=fp,
+                  already=built["events"])
+    assert pb.read_builder_config(second)["events"] == built["events"]
+
+    # The config a client sends back carries no trustworthy evidence of the
+    # previous build: validate_config strips it, which is why the server must
+    # supply `already` itself.
+    assert "pseudonymised" not in pb.validate_config(built)
+
+
+def test_a_multi_group_pseudonym_pattern_is_refused():
+    with pytest.raises(pb.BuilderError) as exc:
+        pb.validate_config({"name": "p", "events": PSEUDO_SAMPLE, "tokens": [
+            {"field": "u", "pattern": r"(user)=(\d+)",
+             "replacement": {"kind": "pseudonym"}}]})
+    assert "at most one capture group" in str(exc.value)
+
+
+def test_widening_a_field_changes_its_length_in_the_pack(tmp_path, subkey):
+    sub, fp = subkey
+    token = dict(PSEUDO_TOKEN, replacement={"kind": "pseudonym",
+                                            "widen": {"shape": "digits", "length": 15}})
+    cfg = pb.validate_config({"name": "w", "events": PSEUDO_SAMPLE, "tokens": [token]})
+    dest = str(tmp_path / "pack")
+    pb.write_pack(cfg, dest, subkey=sub, fingerprint=fp)
+    lines = open(os.path.join(dest, "samples", "w.sample")).read().splitlines()
+    assert all(re.match(r"^user=\d{15} action=\w+$", l) for l in lines)
+    assert lines[0].split()[0] == lines[2].split()[0]
+    assert bundles.lint_pack(dest).ok

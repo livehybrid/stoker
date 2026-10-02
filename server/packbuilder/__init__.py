@@ -39,6 +39,8 @@ import re
 import time
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from . import pseudonym as _ps
+
 WORDLIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wordlists")
 BUILDER_FILE = "stoker-builder.json"
 BUILDER_TAG = "pack-builder"
@@ -66,7 +68,7 @@ WHOLE_SAMPLE = -1
 WHOLE_SAMPLE_RATE_NOTE = 500
 
 REPLACEMENT_KINDS = ("timestamp", "list", "linked", "values", "ipv4", "guid", "mac",
-                     "integer", "float", "hex", "static", "sequence")
+                     "integer", "float", "hex", "static", "sequence", "pseudonym")
 BREAK_MODES = ("auto", "line", "csv", "regex")
 MAX_BREAKER_LEN = 200
 MAX_CUSTOM_LISTS = 200
@@ -1230,6 +1232,10 @@ def validate_config(cfg):
         except re.error as exc:
             raise BuilderError("%s: invalid regular expression (%s)" % (label, exc))
         rep = _validate_replacement(label, t.get("replacement") or {}, known_lists, tables)
+        if rep["kind"] == "pseudonym" and re.compile(pattern).groups > 1:
+            raise BuilderError(
+                "%s: a consistent-pseudonym pattern must have at most one capture "
+                "group, so there is no doubt which text is the identifier" % label)
         clean_tokens.append({"id": t.get("id") or "t%d" % (i + 1), "field": label[:80],
                              "pattern": pattern, "enabled": bool(t.get("enabled", True)),
                              "replacement": rep})
@@ -1303,6 +1309,28 @@ def _validate_replacement(label, rep, known_lists, tables=None):
         if column not in cols:
             raise BuilderError("%s: table %s has no column %r" % (label, table, column))
         return {"kind": kind, "table": table, "column": column}
+    if kind == "pseudonym":
+        # A stand-in derived from the matched value, applied when the pack is
+        # WRITTEN, so no eventgen token is emitted for this field and the
+        # originals never reach the pack. See server/packbuilder/pseudonym.py.
+        out = {"kind": kind, "widen": None, "rotate": False,
+               "rewrite_residuals": bool(rep.get("rewrite_residuals"))}
+        widen = rep.get("widen")
+        if widen is not None:
+            if not isinstance(widen, dict):
+                raise BuilderError("%s: widen must be an object or null" % label)
+            try:
+                fmt = _ps.widen_format(widen.get("shape"), widen.get("length"))
+            except _ps.PseudonymError as exc:
+                raise BuilderError("%s: %s" % (label, exc))
+            out["widen"] = {"shape": fmt.shape}
+            if fmt.shape != _ps.GUID:
+                out["widen"]["length"] = fmt.width
+        if rep.get("rotate"):
+            raise BuilderError(
+                "%s: 'rotate per replay' needs worker support that is not released "
+                "yet; leave it off to get one stable stand-in per value" % label)
+        return out
     if kind == "values":
         values = rep.get("values") or []
         if not isinstance(values, list) or not values:
@@ -1360,8 +1388,101 @@ def ordered_tokens(cfg):
     list/value/static replacements. Free text goes in last so no earlier
     pattern can match inside an inserted list value (an IPv4 pattern inside
     "Chrome/128.0.0.0", say). Stable within each group."""
-    enabled = [t for t in cfg["tokens"] if t.get("enabled", True)]
+    enabled = [t for t in cfg["tokens"] if t.get("enabled", True)
+               and t["replacement"]["kind"] != "pseudonym"]
     return sorted(enabled, key=lambda t: _ORDER.get(t["replacement"]["kind"], 3))
+
+
+def pseudonym_fields(cfg):
+    # type: (Dict[str, Any]) -> List[Dict[str, Any]]
+    """The enabled pseudonym tokens of a config (possibly none)."""
+    return [t for t in (cfg.get("tokens") or [])
+            if t.get("enabled", True)
+            and (t.get("replacement") or {}).get("kind") == "pseudonym"]
+
+
+def apply_pseudonyms(cfg, subkey=None, fingerprint=None, already=None):
+    # type: (Dict[str, Any], Optional[bytes], Optional[str], Optional[Sequence[str]]) -> Tuple[Dict[str, Any], Optional[Any]]
+    """``(cfg with its events pseudonymised, report)`` - or the cfg unchanged.
+
+    The single path shared by the live preview and ``write_pack``, so what the
+    operator is shown is exactly what the pack will contain. A config with no
+    pseudonym field is returned untouched and needs no key.
+
+    The returned config's ``events`` hold the stand-ins, which is what makes the
+    originals absent from the pack: ``write_pack`` writes these events into both
+    the sample file and ``stoker-builder.json``.
+
+    **Never pseudonymise a stand-in.** Reopening a built pack hands back a
+    config whose events are already stand-ins; hashing them again would give
+    ``p(p(x))``, a different value, so the rebuilt pack would silently stop
+    correlating with the one it replaced and with every other pack on the
+    instance. ``already`` is the list of events the server read from the pack on
+    disk, which are known to be pseudonymised; they are passed through
+    untouched.
+
+    The caller MUST supply it when rebuilding an existing pack. There is
+    deliberately no fallback inferred from the config, because
+    :func:`validate_config` strips the server-written ``pseudonymised`` key from
+    anything a client sends, so a config arriving over the API carries no
+    trustworthy evidence of a previous build. The pack on disk is the only
+    honest source of that, and it is the server that holds it.
+    """
+    fields = pseudonym_fields(cfg)
+    if not fields:
+        return cfg, None
+    if not subkey:
+        raise BuilderError(
+            "this pack has a consistent-pseudonym field, which needs the "
+            "instance's pseudonym key; none was supplied")
+    done = set(already or ())
+    events = list(cfg["events"])
+    fresh = [(i, e) for i, e in enumerate(events) if e not in done]
+    try:
+        report = _ps.pseudonymise_events([e for _i, e in fresh], fields, subkey)
+    except _ps.PseudonymError as exc:
+        raise BuilderError(str(exc))
+    merged = list(events)
+    remap = {}  # type: Dict[int, List[Tuple[int, int]]]
+    for position, (original_index, _text) in enumerate(fresh):
+        merged[original_index] = report.events[position]
+        if position in report.rewritten:
+            remap[original_index] = report.rewritten[position]
+    report.events = merged
+    report.rewritten = remap
+    out = dict(cfg, events=merged)
+    out["pseudonymised"] = [
+        {"field": row.field, "pattern": row.pattern, "widen": row.widen,
+         "spans": row.spans, "distinct": row.distinct, "classes": row.classes}
+        for row in report.rows
+    ]
+    if fingerprint:
+        out["pseudonym_key"] = {"name": "default", "fingerprint": fingerprint,
+                                "algorithm": _ps.ALGORITHM}
+    return out, report
+
+
+def pseudonym_warnings(report):
+    # type: (Optional[Any]) -> List[str]
+    """Operator-facing notes for a pseudonymising build: the collision risk.
+
+    A collision merges two identities, which corrupts exactly the correlation
+    the operator is testing, so the probability is stated rather than left to
+    be discovered. A real collision is refused outright by the pass itself.
+    """
+    if report is None:
+        return []
+    out = list(report.warnings)
+    for row in report.rows:
+        for cls in row.classes:
+            p = cls.get("collision_probability") or 0.0
+            if p >= 0.001 and cls["distinct"] > 1:
+                out.append(
+                    "%s: %d distinct values in a %s space of %d, so there is about a "
+                    "%.1f%% chance two of them would become the same stand-in and merge. "
+                    "Widen this field to a fixed length if that matters."
+                    % (row.field, cls["distinct"], cls["shape"], cls["space"], p * 100.0))
+    return out
 
 
 def _slugify(text):
@@ -1447,9 +1568,16 @@ def _yaml_quote(text):
     return '"%s"' % text.replace("\\", "/").replace('"', "'").replace("\n", " ")
 
 
-def write_pack(cfg, dest):
-    # type: (Dict[str, Any], str) -> str
-    """Write the pack for a validated config into the new directory ``dest``."""
+def write_pack(cfg, dest, subkey=None, fingerprint=None, already=None):
+    # type: (Dict[str, Any], str, Optional[bytes], Optional[str], Optional[Sequence[str]]) -> str
+    """Write the pack for a validated config into the new directory ``dest``.
+
+    A config with a consistent-pseudonym field is rewritten first, so the
+    sample file and the stored builder config both hold stand-ins and the
+    originals are written nowhere.
+    """
+    cfg, report = apply_pseudonyms(cfg, subkey=subkey, fingerprint=fingerprint,
+                                   already=already)
     slug = _slugify(cfg["name"])
     os.makedirs(os.path.join(dest, "default"))
     os.makedirs(os.path.join(dest, "samples", "lists"))
@@ -1494,12 +1622,18 @@ def write_pack(cfg, dest):
         "estimates:",
         "  bytes_per_event: %d" % max(1, round(sum(sizes) / float(len(sizes)))),
     ]
+    if cfg.get("pseudonym_key"):
+        key = cfg["pseudonym_key"]
+        yaml += ["pseudonym:",
+                 "  algorithm: %s" % key["algorithm"],
+                 "  key_fingerprint: %s" % key["fingerprint"],
+                 "  fields: %s" % ", ".join(r["field"] for r in cfg.get("pseudonymised") or [])]
     if cfg.get("sourcetype"):
         yaml += ["defaults:", "  sourcetype: %s" % cfg["sourcetype"]]
     with open(os.path.join(dest, "pack.yaml"), "w", encoding="utf-8") as fh:
         fh.write("\n".join(yaml) + "\n")
     with open(os.path.join(dest, BUILDER_FILE), "w", encoding="utf-8") as fh:
-        json.dump(dict(cfg, builder_version=1), fh, indent=1, ensure_ascii=False)
+        json.dump(dict(cfg, builder_version=2), fh, indent=1, ensure_ascii=False)
         fh.write("\n")
     return dest
 
@@ -1618,7 +1752,7 @@ def coverage_warnings(cfg):
     return out
 
 
-def render_preview(cfg, n=20, seed=None):
+def render_preview(cfg, n=20, seed=None, subkey=None, already=None):
     # type: (Dict[str, Any], int, Optional[int]) -> Dict[str, Any]
     """Render ``n`` events from a validated config without touching disk.
 
@@ -1629,6 +1763,9 @@ def render_preview(cfg, n=20, seed=None):
     """
     n = max(1, min(int(n), PREVIEW_MAX))
     rng = random.Random(seed)
+    # Pseudonymise first so the preview shows the stand-ins the pack will hold,
+    # and so a later token can never match an original that will not be there.
+    cfg, pseudo_report = apply_pseudonyms(cfg, subkey=subkey, already=already)
     tokens = ordered_tokens(cfg)
     compiled = [(t, re.compile(t["pattern"])) for t in tokens]
     events = cfg["events"]
@@ -1636,6 +1773,7 @@ def render_preview(cfg, n=20, seed=None):
     for t, rx in compiled:
         if not any(rx.search(ev) for ev in events):
             warnings.append("%s: the pattern matches none of the sample events" % t["field"])
+    warnings.extend(pseudonym_warnings(pseudo_report))
     warnings.extend(coverage_warnings(cfg))
     now = time.time()
     state = {}  # type: Dict[str, Dict[str, int]]
@@ -1676,7 +1814,8 @@ def render_preview(cfg, n=20, seed=None):
 
 __all__ = [
     "BuilderError", "BUILDER_FILE", "BUILDER_TAG", "analyse", "break_events", "check_breaker",
-    "classify", "coverage_warnings", "delete_custom_wordlist", "detect_breaker", "highlight",
+    "apply_pseudonyms", "classify", "coverage_warnings", "delete_custom_wordlist",
+    "detect_breaker", "highlight", "pseudonym_fields", "pseudonym_warnings",
     "load_wordlist", "WHOLE_SAMPLE",
     "ordered_tokens", "eventgen_tokens", "read_builder_config", "recommend", "render_preview",
     "save_custom_wordlist", "set_custom_dir", "split_events", "split_input", "table_columns",
