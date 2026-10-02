@@ -547,6 +547,103 @@ def test_the_shared_vectors_still_describe_this_implementation():
         fmt = ps.widen_format(widen["shape"], widen.get("length")) if widen else None
         assert ps.pseudonym(entry["span"], sub, widen=fmt) == entry["out"], entry
 
+    # The aligned-rotation half. This one is a true cross-engine contract: the
+    # identity is a function of the stand-in and the clock, so a worker that
+    # disagrees by one bit stops joining across sourcetypes without any error.
+    assert len(v["window_render"]) > 500
+    for entry in v["window_render"]:
+        widen = entry["widen"]
+        fmt = ps.widen_format(widen["shape"], widen.get("length")) if widen else None
+        got = ps.aligned_rotation(entry["text"], int(entry["window"]), widen=fmt)
+        assert got == entry["out"], entry
+
+    for entry in v["window_index"]:
+        assert ps.window_index(int(entry["epoch"]), int(entry["period"])) \
+            == int(entry["window"]), entry
+
+    for entry in v["mixer"]["fnv1a64"]:
+        assert ps.fnv1a64(entry["text"]) == int(entry["out"]), entry
+    for entry in v["mixer"]["mix64"]:
+        assert ps.mix64(int(entry["x"])) == int(entry["out"]), entry
+
+
+# --------------------------------------------------------------------------- #
+# Aligned rotation (rotate.scope = window): joins across sourcetypes
+# --------------------------------------------------------------------------- #
+
+def test_two_sourcetypes_that_share_nothing_still_agree():
+    """The property the option exists for.
+
+    Two packs built separately share neither a sample, a line count, an
+    identity table nor a worker fleet. The only things they have in common are
+    the stand-in and the clock, and that has to be enough, or a correlation
+    search that joins web to auth on the client id returns nothing.
+    """
+    window = ps.window_index(1760000040, 60)
+    assert ps.aligned_rotation("884412", window) \
+        == ps.aligned_rotation("884412", ps.window_index(1760000099, 60))
+
+
+def test_the_window_still_rotates():
+    """Aligned must not mean static, or it is just mode 1 with extra steps."""
+    first = ps.aligned_rotation("123456", 100)
+    assert first == ps.aligned_rotation("123456", 100)
+    assert first != ps.aligned_rotation("123456", 101)
+
+
+def test_aligned_rotation_keeps_the_format_and_the_class():
+    for text in ("123456", "a1b2c3", "ada.smith", "DEADBEEF",
+                 "3f2b1c9e-8a7d-4e21-9b3c-1d2e3f4a5b6c"):
+        for window in range(25):
+            out = ps.aligned_rotation(text, window)
+            assert len(out) == len(text), (text, out)
+            assert ps.infer(out) == ps.infer(text), (text, out)
+            assert ps.case_class(out) == ps.case_class(text), (text, out)
+
+
+def test_aligned_rotation_widens_like_mode_one():
+    wide = ps.widen_format(ps.DIGITS, 15)
+    out = ps.aligned_rotation("123", 7, widen=wide)
+    assert len(out) == 15 and out.isdigit()
+    # The same dial as mode 1, so one widen choice covers both.
+    assert ps.aligned_rotation("123", 7, widen=wide) == out
+
+
+def test_aligned_rotation_leaves_alone_what_it_should():
+    assert ps.aligned_rotation("", 1) is None
+    assert ps.aligned_rotation("---", 1) is None
+    # ...and an empty span stays None even under a widen, which is where the
+    # two engines first disagreed.
+    assert ps.aligned_rotation("", 1, widen=ps.widen_format(ps.DIGITS, 12)) is None
+
+
+def test_aligned_rotation_spreads_over_the_space():
+    """A hash can collide where the counter cannot; it must not CLUSTER.
+
+    2000 windows of a 6-digit field should give close to 2000 distinct
+    identities, at roughly the birthday rate rather than some short cycle.
+    """
+    seen = {ps.aligned_rotation("123456", w) for w in range(2000)}
+    assert len(seen) > 1960, len(seen)
+
+
+def test_the_collision_rate_is_the_one_we_already_warn_about():
+    """So the existing widen advice covers this mode too.
+
+    Within one window the identities are a hash into space(F), which is exactly
+    mode 1's arithmetic, so collision_probability already describes it.
+    """
+    values = ["%06d" % i for i in range(1000)]
+    seen = {}
+    clashes = 0
+    for value in values:
+        out = ps.aligned_rotation(value, 42)
+        if out in seen:
+            clashes += 1
+        seen[out] = value
+    expected = ps.expected_collisions(len(values), ps.space(ps.Format(ps.DIGITS, 6)))
+    assert clashes <= max(5, expected * 6), (clashes, expected)
+
 
 def test_the_engine_copy_of_the_vectors_has_not_drifted():
     """firebox keeps its own copy so its standalone CI can check the contract.

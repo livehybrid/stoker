@@ -56,6 +56,12 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 ALGORITHM = "hmac-sha256-v1"
 ROTATE_ALGORITHM = "rotate-counter-v1"
+# Rotation under "align across sourcetypes": the identity is a function of the
+# stand-in and the clock, not of a position in a pack-local table, which is the
+# only way two independently running streams can agree without coordination.
+ALIGNED_ALGORITHM = "rotate-window-v1"
+ALIGNED_DEFAULT_PERIOD = 60
+_MASK64 = (1 << 64) - 1
 
 # Domain separation: the stored instance key is never used as an HMAC key
 # directly, so a future second purpose cannot be confused with this one.
@@ -298,6 +304,91 @@ def pseudonym(span, subkey, widen=None):
         return None
     digest = hmac.new(subkey, normalised.encode("utf-8"), hashlib.sha256).digest()
     return render(fmt, int.from_bytes(digest, "big"), case_class(normalised))
+
+
+# --------------------------------------------------------------------------- #
+# Aligned rotation: one identity per time window, shared across sourcetypes
+# --------------------------------------------------------------------------- #
+#
+# The pass counter gives the most identities, but ``ordinal`` and the sample's
+# line count are private to one stanza, so two sourcetypes are never on the same
+# pass and an identity cannot be joined across them. The clock is the only thing
+# two independent streams share, so this derives the identity from the stand-in
+# and the window index:
+#
+#     ident = mix(stand-in, window) mod space(F),  window = epoch // period
+#
+# Three properties worth stating, because they are the trade the operator is
+# ticking a box to accept:
+#
+# * It hashes the STAND-IN, not the original. The pack already holds stand-ins,
+#   so there is no key to ship to a worker and a worker too old to know
+#   ``rotate`` emits the stable stand-in rather than leaking an identifier.
+# * A hash collides where the counter cannot, at exactly the birthday rate
+#   ``collision_probability`` already reports for mode 1, so the same widen
+#   option is the answer to both.
+# * Cardinality is ``table x duration / period`` rather than
+#   ``table x passes x workers``, so the period is the dial between a realistic
+#   user count and a joinable one.
+#
+# FNV-1a and splitmix64's finaliser are used rather than SHA-256 because the
+# input is already a stand-in, so this is a mixing function and not a privacy
+# boundary, and both engines can implement it in a few lines with no dependency.
+
+def fnv1a64(text):
+    # type: (str) -> int
+    """FNV-1a over the UTF-8 bytes, 64-bit."""
+    h = 0xCBF29CE484222325
+    for byte in text.encode("utf-8"):
+        h ^= byte
+        h = (h * 0x100000001B3) & _MASK64
+    return h
+
+
+def mix64(x):
+    # type: (int) -> int
+    """splitmix64's finaliser: avalanches, so consecutive windows do not look it."""
+    x &= _MASK64
+    x = ((x ^ (x >> 30)) * 0xBF58476D1CE4E5B9) & _MASK64
+    x = ((x ^ (x >> 27)) * 0x94D049BB133111EB) & _MASK64
+    return x ^ (x >> 31)
+
+
+def window_index(epoch, period):
+    # type: (int, int) -> int
+    """The window an event falls in, anchored on the Unix epoch.
+
+    Anchoring on the epoch means two packs need agree on nothing but the period.
+    Clamped at zero so a pre-1970 replay timestamp cannot wrap.
+    """
+    return max(0, int(epoch)) // max(1, int(period))
+
+
+def aligned_ident(text, window, size):
+    # type: (str, int, int) -> int
+    """The aligned identity for ``text`` in ``window``, in ``[0, size)``."""
+    seeded = fnv1a64(text) ^ ((window * 0x9E3779B97F4A7C15) & _MASK64)
+    lo = mix64(seeded)
+    hi = mix64(lo ^ 0xA5A5A5A5A5A5A5A5)
+    return ((hi << 64) | lo) % max(1, size)
+
+
+def aligned_rotation(span, window, widen=None):
+    # type: (str, int, Optional[Format]) -> Optional[str]
+    """The rotated stand-in for ``span`` in ``window``, in ``span``'s format.
+
+    ``span`` is expected to be a stand-in already (mode 1 rewrote the pack when
+    it was written), so this takes no key: every engine, worker and pack
+    computes the same value from the same stand-in.
+    """
+    if not span:
+        return None
+    normalised = unicodedata.normalize("NFC", span)
+    fmt = widen if widen is not None else infer(normalised)
+    if fmt.shape == NONE:
+        return None
+    ident = aligned_ident(normalised, window, space(fmt))
+    return render(fmt, ident, case_class(normalised))
 
 
 def collision_probability(n, m):
