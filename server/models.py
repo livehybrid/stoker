@@ -416,6 +416,43 @@ class User(Base):
     last_login_at: Mapped[Optional[datetime.datetime]] = _ts_column(nullable=True)
 
 
+class PseudonymKey(Base):
+    """The instance key that consistent pseudonymisation is derived from.
+
+    One row, named ``default``, created the first time an operator saves a pack
+    with a pseudonym field. It is what makes the stand-ins **consistent across
+    packs**: two packs built on this instance give the same stand-in for the
+    same identifier, so they correlate with each other, which a per-save random
+    salt could never do.
+
+    ``key_encrypted`` is Fernet ciphertext of 32 random bytes, exactly like
+    ``targets.token_encrypted``, and is never serialised by any schema.
+    ``fingerprint`` (the first 8 hex of the key's SHA-256) IS public: it goes
+    into every pack built under the key so two packs can be seen to share one,
+    and so a pack built under a key that has since been lost is identifiable.
+
+    Losing this row breaks correlation between packs built before and after,
+    permanently - the stand-ins already written into existing packs keep
+    working, but a new pack cannot reproduce them. It is backed up with the
+    rest of the database, and migration 0006's downgrade deliberately does NOT
+    drop the table.
+    """
+
+    __tablename__ = "pseudonym_keys"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True, nullable=False,
+                                      default="default")
+    # Secret: Fernet ciphertext of the raw key bytes. Never serialised.
+    key_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    # Public label, safe to put in a pack: first 8 hex of SHA-256(raw key).
+    fingerprint: Mapped[str] = mapped_column(String(16), nullable=False)
+    algorithm: Mapped[str] = mapped_column(String(32), nullable=False,
+                                           default="hmac-sha256-v1")
+    created_at: Mapped[datetime.datetime] = _ts_column(nullable=False, default=utcnow)
+    created_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+
 class ApiToken(Base):
     """A non-interactive API token for CI/CD and machine callers.
 
@@ -471,4 +508,5 @@ __all__ = [
     "Fleet",
     "User",
     "ApiToken",
+    "PseudonymKey",
 ]

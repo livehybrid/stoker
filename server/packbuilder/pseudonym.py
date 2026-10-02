@@ -404,3 +404,194 @@ __all__ = [
     "find_residuals", "fingerprint", "infer", "pseudonym", "render",
     "residual_regex", "space", "widen_format",
 ]
+
+
+# --------------------------------------------------------------------------- #
+# Rewriting a whole sample (the build-time pass)
+# --------------------------------------------------------------------------- #
+
+@dataclasses.dataclass
+class TokenRows:
+    """What one pseudonym field did, for the operator and for the pack."""
+
+    field: str
+    pattern: str
+    widen: Optional[Dict[str, Any]]
+    spans: int = 0
+    distinct: int = 0
+    classes: List[Dict[str, Any]] = dataclasses.field(default_factory=list)
+
+
+@dataclasses.dataclass
+class PseudonymReport:
+    """The outcome of one build-time pass."""
+
+    events: List[str]
+    rewritten: Dict[int, List[Tuple[int, int]]]
+    rows: List[TokenRows]
+    originals: List[str]
+    outputs: Dict[str, str]
+    warnings: List[str] = dataclasses.field(default_factory=list)
+
+    def total_spans(self):
+        # type: () -> int
+        return sum(r.spans for r in self.rows)
+
+
+def _json_parses(text):
+    # type: (str) -> bool
+    import json
+    try:
+        json.loads(text)
+        return True
+    except ValueError:
+        return False
+
+
+def pseudonymise_events(events, tokens, subkey, widen_of=None):
+    # type: (Sequence[str], Sequence[Dict[str, Any]], bytes, Optional[Any]) -> PseudonymReport
+    """Rewrite every pseudonym field's spans in ``events``.
+
+    ``tokens`` are the builder's token dicts; only those whose replacement kind
+    is ``pseudonym`` are applied here. Returns the rewritten events plus, per
+    event, the span ranges this pass wrote **in the rewritten text** - which is
+    what the residual scan masks (see :func:`find_residuals`; without it a
+    coincidence between a stand-in and a different original reads as a leak).
+
+    Raises :class:`PseudonymError` for the four ways this can be wrong rather
+    than silently producing a corrupt pack:
+
+    * two distinct originals mapping to one stand-in (a merge, which destroys
+      the correlation the feature exists to preserve);
+    * two pseudonym fields matching overlapping text (one would hash the
+      other's output);
+    * a pattern whose capture group did not participate in a match (the span
+      would silently become the whole match, hashing the field name too);
+    * a JSON event that no longer parses after the rewrite (a non-digit
+      stand-in written into an unquoted number).
+    """
+    out_events = []  # type: List[str]
+    rewritten = {}   # type: Dict[int, List[Tuple[int, int]]]
+    rows = []        # type: List[TokenRows]
+    originals = {}   # type: Dict[str, str]
+    outputs = {}     # type: Dict[str, str]
+    warnings = []    # type: List[str]
+    memo = {}        # type: Dict[Tuple[str, Any], Optional[str]]
+    by_output = {}   # type: Dict[Tuple[str, str], str]
+
+    pseudo = [t for t in tokens
+              if (t.get("replacement") or {}).get("kind") == "pseudonym"]
+    compiled = []
+    for token in pseudo:
+        rep = token["replacement"]
+        widen = None
+        if rep.get("widen"):
+            widen = widen_format(rep["widen"].get("shape"), rep["widen"].get("length"))
+        row = TokenRows(field=token.get("field") or "", pattern=token["pattern"],
+                        widen=rep.get("widen"))
+        rows.append(row)
+        compiled.append((re.compile(token["pattern"]), widen, row, token))
+
+    if not compiled:
+        return PseudonymReport(list(events), {}, [], [], {}, [])
+
+    # field -> format class -> the distinct originals seen in it, collected in
+    # the single rewrite pass below and rolled up afterwards for the operator's
+    # collision figure.
+    seen = {}  # type: Dict[str, Dict[Tuple[str, int], set]]
+    for _rx, _w, row, _t in compiled:
+        seen.setdefault(row.field, {})
+
+    for index, event in enumerate(events):
+        edits = []  # type: List[Tuple[int, int, str, TokenRows]]
+        for rx, widen, row, token in compiled:
+            for m in rx.finditer(event):
+                if rx.groups >= 1:
+                    if m.group(1) is None:
+                        raise PseudonymError(
+                            "%s: the pattern's capture group did not participate in a "
+                            "match on event %d, so the whole match would be "
+                            "pseudonymised; tighten the pattern"
+                            % (row.field or row.pattern, index + 1))
+                    s_i, e_i = m.start(1), m.end(1)
+                else:
+                    s_i, e_i = m.start(0), m.end(0)
+                if e_i <= s_i:
+                    continue
+                span = event[s_i:e_i]
+                policy = (widen.shape, widen.width) if widen is not None else None
+                memo_key = (span, policy)
+                if memo_key not in memo:
+                    memo[memo_key] = pseudonym(span, subkey, widen=widen)
+                stand_in = memo[memo_key]
+                normalised = unicodedata.normalize("NFC", span)
+                fmt = widen if widen is not None else infer(normalised)
+                if stand_in is None:
+                    note = ("%s: %r has no variable character, so it is left as it is"
+                            % (row.field or row.pattern, span))
+                    if note not in warnings:
+                        warnings.append(note)
+                    continue
+                clash = by_output.get((fmt.shape, stand_in))
+                if clash is not None and clash != normalised:
+                    raise PseudonymError(
+                        "%s: two different values would become the same stand-in %r, "
+                        "which would merge them into one identity. Widen this field to "
+                        "a fixed length so the space is large enough."
+                        % (row.field or row.pattern, stand_in))
+                by_output[(fmt.shape, stand_in)] = normalised
+                originals[normalised] = normalised
+                outputs[stand_in] = fmt.shape
+                seen[row.field].setdefault((fmt.shape, fmt.width), set()).add(normalised)
+                edits.append((s_i, e_i, stand_in, row))
+
+        # Two pseudonym fields matching overlapping text would have one hashing
+        # the other's output; refuse rather than produce a corrupt pack.
+        edits.sort(key=lambda t: (t[0], t[1]))
+        for (s1, e1, _o1, r1), (s2, e2, _o2, r2) in zip(edits, edits[1:]):
+            if s2 < e1:
+                raise PseudonymError(
+                    "%s and %s match overlapping text in event %d; one would "
+                    "pseudonymise the other's output. Narrow one of the patterns."
+                    % (r1.field or r1.pattern, r2.field or r2.pattern, index + 1))
+        if not edits:
+            out_events.append(event)
+            continue
+        pieces, pos, spans_out = [], 0, []  # type: List[str], int, List[Tuple[int, int]]
+        written = 0
+        for s_i, e_i, stand_in, row in edits:
+            pieces.append(event[pos:s_i])
+            written += s_i - pos
+            spans_out.append((written, written + len(stand_in)))
+            pieces.append(stand_in)
+            written += len(stand_in)
+            row.spans += 1
+            pos = e_i
+        pieces.append(event[pos:])
+        new_event = "".join(pieces)
+        if _json_parses(event) and not _json_parses(new_event):
+            raise PseudonymError(
+                "event %d is JSON and would no longer parse after pseudonymisation; "
+                "a non-numeric stand-in was written into an unquoted number. Keep the "
+                "format, or widen that field to digits." % (index + 1))
+        out_events.append(new_event)
+        rewritten[index] = spans_out
+
+    for _rx, widen, row, _t in compiled:
+        classes, every = [], set()
+        for (shape, width), values in sorted(seen.get(row.field, {}).items()):
+            if shape == MIXED:
+                # the template varies per value; report the tightest space seen
+                m = min(space(infer(v)) for v in values)
+            else:
+                m = space(Format(shape, width))
+            classes.append({
+                "shape": shape, "width": width, "distinct": len(values), "space": m,
+                "collision_probability": round(collision_probability(len(values), m), 6),
+                "expected_collisions": round(expected_collisions(len(values), m), 6),
+            })
+            every |= values
+        row.classes = classes
+        row.distinct = len(every)
+
+    return PseudonymReport(out_events, rewritten, rows, sorted(originals), outputs, warnings)

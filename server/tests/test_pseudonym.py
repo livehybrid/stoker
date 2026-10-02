@@ -384,3 +384,120 @@ def test_a_real_residual_outside_a_rewritten_span_is_still_found():
 
 def test_find_residuals_with_no_values_is_a_no_op():
     assert ps.find_residuals("anything", None) == []
+
+
+# --------------------------------------------------------------------------- #
+# The build-time pass over a whole sample
+# --------------------------------------------------------------------------- #
+
+def _tok(field="user", pattern=r"\buser=(\d+)", widen=None):
+    return {"field": field, "pattern": pattern, "enabled": True,
+            "replacement": {"kind": "pseudonym", "widen": widen}}
+
+
+CUSTOMER_SAMPLE = [
+    "user=123 action=login",
+    "user=456 action=register",
+    "user=123 action=logout",
+]
+
+
+def test_the_customers_own_example():
+    """The requirement in one test: the journey still joins, the users differ."""
+    rep = ps.pseudonymise_events(CUSTOMER_SAMPLE, [_tok()], SUB)
+    first, second, third = (e.split()[0] for e in rep.events)
+    assert first == third, "login and logout must stay the same user"
+    assert first != second, "a different user must stay different"
+    assert "123" not in " ".join(rep.events), "the original must be gone"
+    assert "456" not in " ".join(rep.events)
+    assert all(re.match(r"^user=\d{3} action=\w+$", e) for e in rep.events)
+    (row,) = rep.rows
+    assert (row.spans, row.distinct) == (3, 2)
+    assert row.classes[0]["space"] == 900
+
+
+def test_the_masked_spans_locate_exactly_the_stand_ins():
+    rep = ps.pseudonymise_events(CUSTOMER_SAMPLE, [_tok()], SUB)
+    for i, event in enumerate(rep.events):
+        for s, e in rep.rewritten[i]:
+            assert event[s:e].isdigit() and len(event[s:e]) == 3
+
+
+def test_widening_keeps_the_span_offsets_right():
+    # The stand-in is longer than the original, so every later offset moves.
+    rep = ps.pseudonymise_events(
+        ["user=123 peer=456 end"],
+        [_tok(pattern=r"\b(?:user|peer)=(\d+)", widen={"shape": "digits", "length": 15})], SUB)
+    event = rep.events[0]
+    spans = rep.rewritten[0]
+    assert len(spans) == 2
+    for s, e in spans:
+        assert len(event[s:e]) == 15 and event[s:e].isdigit()
+    assert event.endswith(" end")
+
+
+def test_a_collision_is_refused_and_names_no_value():
+    # A one-digit field has nine stand-ins, so ten values must collide.
+    events = ["id=%d" % i for i in range(10)]
+    with pytest.raises(ps.PseudonymError) as exc:
+        ps.pseudonymise_events(events, [_tok("id", r"\bid=(\d)")], SUB)
+    message = str(exc.value)
+    assert "merge them into one identity" in message and "Widen" in message
+    assert "id" in message
+
+
+def test_two_pseudonym_fields_that_overlap_are_refused():
+    events = ["client=abc123 x"]
+    tokens = [_tok("client", r"\bclient=(\w+)"), _tok("suffix", r"client=\w{3}(\d+)")]
+    with pytest.raises(ps.PseudonymError) as exc:
+        ps.pseudonymise_events(events, tokens, SUB)
+    assert "overlapping text" in str(exc.value)
+
+
+def test_a_non_participating_group_is_refused():
+    # The alternation can match without group 1 taking part, which would
+    # silently pseudonymise the whole match including the field name.
+    events = ["user=123", "guest"]
+    with pytest.raises(ps.PseudonymError) as exc:
+        ps.pseudonymise_events(events, [_tok("user", r"user=(\d+)|guest")], SUB)
+    assert "did not participate" in str(exc.value)
+
+
+def test_json_events_stay_parseable():
+    import json
+    events = ['{"client_id": 123456, "action": "login"}',
+              '{"client_id": 123456, "action": "logout"}']
+    token = _tok("client_id", r'"client_id":\s*(\d+)')
+    rep = ps.pseudonymise_events(events, [token], SUB)
+    docs = [json.loads(e) for e in rep.events]
+    assert docs[0]["client_id"] == docs[1]["client_id"]
+    assert docs[0]["client_id"] != 123456
+    assert isinstance(docs[0]["client_id"], int)
+
+
+def test_a_stand_in_that_would_break_json_is_refused():
+    # hex into an unquoted JSON number cannot parse.
+    events = ['{"client_id": 123456}']
+    token = _tok("client_id", r'"client_id":\s*(\d+)', widen={"shape": "hex", "length": 16})
+    with pytest.raises(ps.PseudonymError) as exc:
+        ps.pseudonymise_events(events, [token], SUB)
+    assert "no longer parse" in str(exc.value)
+
+
+def test_a_span_with_nothing_to_vary_warns_and_is_left_alone():
+    events = ["ref=--- x"]
+    rep = ps.pseudonymise_events(events, [_tok("ref", r"\bref=(\S+)")], SUB)
+    assert rep.events == events
+    assert rep.warnings and "no variable character" in rep.warnings[0]
+
+
+def test_no_pseudonym_tokens_is_a_no_op():
+    other = {"field": "x", "pattern": "a", "replacement": {"kind": "ipv4"}}
+    rep = ps.pseudonymise_events(CUSTOMER_SAMPLE, [other], SUB)
+    assert rep.events == list(CUSTOMER_SAMPLE) and rep.rows == [] and rep.rewritten == {}
+
+
+def test_the_whole_pass_is_deterministic():
+    a = ps.pseudonymise_events(CUSTOMER_SAMPLE, [_tok()], SUB)
+    b = ps.pseudonymise_events(CUSTOMER_SAMPLE, [_tok()], SUB)
+    assert a.events == b.events

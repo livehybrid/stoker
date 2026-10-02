@@ -130,7 +130,7 @@ def test_delta_0003_adds_specs_extra_pack_ids(tmp_path):
     assert "extra_pack_ids_json" not in _spec_columns()
 
     run_migrations()  # managed at 0002 -> upgrade head applies 0003 (and on)
-    assert _head_rev() == "0005_spec_rate_shape"
+    assert _head_rev() == "0006_pseudonym_keys"
     assert "extra_pack_ids_json" in _spec_columns()
 
 
@@ -180,7 +180,7 @@ def test_delta_0004_adds_specs_eventgen_impl(tmp_path):
     assert not ({"eventgen_impl", "fast_envelope"} & _spec_columns())
 
     run_migrations()  # managed at 0003 -> upgrade head applies 0004 (and on)
-    assert _head_rev() == "0005_spec_rate_shape"
+    assert _head_rev() == "0006_pseudonym_keys"
     assert {"eventgen_impl", "fast_envelope"} <= _spec_columns()
 
 
@@ -209,5 +209,54 @@ def test_delta_0005_adds_specs_rate_shape(tmp_path):
         command.stamp(cfg, "0004_spec_eventgen_impl", purge=True)
     assert "rate_shape" not in _spec_columns()
     run_migrations()
-    assert _head_rev() == "0005_spec_rate_shape"
+    assert _head_rev() == "0006_pseudonym_keys"
     assert "rate_shape" in _spec_columns()
+
+
+def test_delta_0006_adds_pseudonym_keys_and_never_drops_it(tmp_path):
+    """0006 creates ``pseudonym_keys``; its downgrade deliberately keeps it.
+
+    The row is the only copy of the mapping between an operator's real
+    identifiers and the stand-ins already written into their packs, so a
+    rollback that removed it would destroy correlation between packs built
+    before and after, permanently.
+    """
+    _use(tmp_path, "delta0006.db")
+    from alembic import command
+    from alembic.config import Config
+
+    from server.migrate import run_migrations
+    from server.models import PseudonymKey
+
+    run_migrations()
+
+    def _tables():
+        # type: () -> set
+        return set(inspect(db_mod.get_engine()).get_table_names())
+
+    def _cfg(conn):
+        cfg = Config()
+        cfg.set_main_option(
+            "script_location",
+            os.path.join(os.path.dirname(db_mod.__file__), "migrations"))
+        cfg.attributes["connection"] = conn
+        return cfg
+
+    assert "pseudonym_keys" in _tables()
+    cols = {c["name"] for c in inspect(db_mod.get_engine()).get_columns("pseudonym_keys")}
+    assert {"id", "name", "key_encrypted", "fingerprint", "algorithm",
+            "created_at", "created_by"} <= cols
+
+    # A database stamped back at 0005 without the table is repaired by 0006.
+    with db_mod.get_engine().begin() as conn:
+        PseudonymKey.__table__.drop(conn)
+        command.stamp(_cfg(conn), "0005_spec_rate_shape", purge=True)
+    assert "pseudonym_keys" not in _tables()
+    run_migrations()
+    assert _head_rev() == "0006_pseudonym_keys"
+    assert "pseudonym_keys" in _tables()
+
+    # And the downgrade is a no-op: the table survives it.
+    with db_mod.get_engine().begin() as conn:
+        command.downgrade(_cfg(conn), "0005_spec_rate_shape")
+    assert "pseudonym_keys" in _tables(), "the key table must survive a rollback"
