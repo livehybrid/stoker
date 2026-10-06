@@ -83,7 +83,10 @@ export function fleetThroughputSeries(
 ): FleetPoint[] {
   const buckets = new Map<number, Map<string, { eps: number; bps: number }>>();
   list.forEach((m, runIdx) => {
-    if (!m) return;
+    // A run whose metrics come back without samples must not take the whole
+    // dashboard down: this is the page you open when something is already
+    // wrong, so it has to survive one odd payload.
+    if (!m || !Array.isArray(m.samples)) return;
     for (const s of m.samples) {
       const ms = new Date(s.ts).getTime();
       if (!Number.isFinite(ms)) continue;

@@ -40,7 +40,12 @@ export function Badge({
 // a newer server still render (as neutral) rather than breaking.
 export function toneForState(state: string | null | undefined): Tone {
   const s = (state || "").toLowerCase();
-  if (s === "green" || s === "running" || s === "finished" || s === "up") {
+  // `running` is deliberately NOT the same colour as `finished`. They are the
+  // two most common states in a run list and sharing a colour made a live run
+  // and a completed one indistinguishable at a glance, which is the single
+  // thing you scan that list for.
+  if (s === "running") return "sky";
+  if (s === "green" || s === "finished" || s === "up") {
     return "green";
   }
   if (

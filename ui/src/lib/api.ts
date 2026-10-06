@@ -377,6 +377,17 @@ export const runs = {
 // Auth (session lifecycle + first-access setup)
 // --------------------------------------------------------------------------- //
 
+// Configuration backup. A plain URL rather than a fetch: the browser streams
+// the file to disk and sends the session cookie itself, as the pack export
+// link does.
+export const config = {
+  exportUrl: (includeSecrets = true) =>
+    `${API_BASE}/config/export?secrets=${includeSecrets ? "include" : "exclude"}`,
+  import: (doc: unknown) =>
+    request<{ targets: number; repos: number; specs: number; skipped: string[]; warnings: string[] }>(
+      "POST", "/config/import", { body: doc as Record<string, unknown> }),
+};
+
 export const auth = {
   // Public: safe to call while signed out. Reports whether a session/SSO is
   // active, whether first-access setup is needed, and whether SSO is configured.
@@ -416,5 +427,6 @@ export const api = {
   runs,
   auth,
   users,
+  config,
 };
 export default api;

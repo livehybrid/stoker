@@ -2,6 +2,8 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQueries, useQuery } from "@tanstack/react-query";
 
 import { api } from "../lib/api";
+import { useAuth } from "../lib/auth";
+import { Button } from "../components/Button";
 import { POLL_MS } from "../lib/queryClient";
 import type { MetricsOut, RunOut, SpecOut, TargetOut } from "../lib/types";
 import { PageHeader } from "../components/PageHeader";
@@ -25,6 +27,7 @@ import { Between, BigNumber, Grid, GridList, Label, Muted, Panel, Stack, Strong 
 // recent failures. All live data polls at 5 s.
 
 function Dashboard() {
+  const { isAdmin } = useAuth();
   const runsQ = useQuery({
     queryKey: ["runs"],
     queryFn: () => api.runs.list(),
@@ -118,6 +121,21 @@ function Dashboard() {
       <PageHeader
         title="Dashboard"
         subtitle="Fleet health and live runs at a glance."
+        actions={
+          isAdmin && (
+            // A plain link, so the browser streams the file and sends the
+            // session cookie itself. Restoring is STOKER_CONFIG_IMPORT at boot,
+            // which is the path that matters for a rebuilt environment; this is
+            // how you get the file to put there.
+            <a
+              href={api.config.exportUrl()}
+              download
+              title="Targets, pack repos and specs as JSON. Restore with STOKER_CONFIG_IMPORT; needs the same STOKER_MASTER_KEY to decrypt its secrets."
+            >
+              <Button variant="secondary">Download config</Button>
+            </a>
+          )
+        }
       />
 
       {/* Aggregate strip */}

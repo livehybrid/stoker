@@ -97,7 +97,9 @@ function Targets() {
     {
       key: "env",
       header: "Env",
-      cell: (t) => <Badge tone="sky">{t.env_tag}</Badge>,
+      // An untagged target rendered as an empty coloured pill, which reads as
+      // a value you cannot see rather than as no value.
+      cell: (t) => (t.env_tag ? <Badge tone="sky">{t.env_tag}</Badge> : <Muted>—</Muted>),
     },
     {
       key: "health",

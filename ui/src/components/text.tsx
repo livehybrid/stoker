@@ -259,7 +259,11 @@ export const EndRow = styled.div`
   justify-content: flex-end;
   align-items: center;
   gap: ${variables.spacingSmall};
-  flex-wrap: wrap;
+  /* A row of table actions must not wrap: wrapping put Delete on its own line
+     for some rows and not others, so the same button sat in a different place
+     in every row. The table already scrolls horizontally when it has to. */
+  flex-wrap: nowrap;
+  white-space: nowrap;
 `;
 
 /** The action bar that stays put at the foot of a long form. */
