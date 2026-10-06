@@ -40,7 +40,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .. import bundles, packbuilder, packupload, pseudonymkeys
+from .. import bundles, packbuilder, packsource, packupload, pseudonymkeys
 from ..packbuilder import pseudonym
 from ..config import get_settings
 from ..db import get_db
@@ -320,6 +320,10 @@ def create_pack(body: BuildRequest, request: Request, db: Session = Depends(get_
     db.commit()
     db.refresh(pack)
     log.info("pack builder created %s (id=%s) -> %s lint=%s", pack.name, pack.id, final, pack.lint_status)
+    # Mirror to the pack source when one is configured for writing. Best
+    # effort by design: a bucket that refuses the write must not fail the save
+    # and lose the operator's work.
+    packsource.publish_pack(pack, get_settings())
     return pack
 
 
@@ -378,4 +382,5 @@ def update_pack(pack_id: int, body: BuildRequest, request: Request,
     db.commit()
     db.refresh(pack)
     log.info("pack builder rebuilt %s (id=%s) lint=%s", pack.name, pack.id, pack.lint_status)
+    packsource.publish_pack(pack, get_settings())
     return pack

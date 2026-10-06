@@ -31,7 +31,7 @@ from fastapi.responses import JSONResponse
 
 from . import lifecycle
 from .config import get_settings
-from . import configio
+from . import configio, packsource
 from .db import SessionLocal, init_db
 from .drivers.base import ExecutionDriver
 
@@ -233,6 +233,12 @@ async def _lifespan(app):
         # starting, or there is no way in to fix the typo.
         report = configio.import_from_env(db, get_settings())
         if report is not None and not report.get("error"):
+            db.commit()
+        # Packs named by STOKER_PACK_REPOS / STOKER_PACK_SOURCE. Same contract:
+        # idempotent, and it never raises, so a bad bucket or an unreachable
+        # repo degrades to "this instance has fewer packs" rather than "this
+        # instance will not start".
+        if packsource.load_from_env(db, get_settings()) is not None:
             db.commit()
     app.state.drivers = _build_drivers_map()
     task = asyncio.create_task(_supervisor_loop(app), name="stoker-supervisor")

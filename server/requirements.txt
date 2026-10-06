@@ -32,6 +32,10 @@ psycopg[binary]
 # run the driver's conformance + request-shape tests.
 kubernetes>=29,<32
 
+# Optional pack source: STOKER_PACK_SOURCE=s3://bucket/prefix. Imported lazily
+# in server/packsource.py, so a deployment that does not use S3 never loads it.
+boto3>=1.34
+
 # Test dependencies (installed in the same venv for CI/local).
 pytest
 pytest-timeout

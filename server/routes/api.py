@@ -30,8 +30,8 @@ from fastapi import (APIRouter, Depends, File, Form, HTTPException, Query,
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .. import (bundles, crypto, gitsync, lifecycle, packexport, packupload,
-                preview)
+from .. import (bundles, crypto, gitsync, lifecycle, packexport, packsource,
+                packupload, preview)
 from ..config import get_settings
 from ..db import get_db
 from ..drivers.base import DriverError
@@ -531,6 +531,10 @@ async def upload_pack(
     db.refresh(pack)
     log.info("uploaded pack %s (id=%s) -> %s lint=%s stanzas=%d",
              pack.name, pack.id, pack_dir, pack.lint_status, lint.stanza_count)
+    # Mirror to the pack source when one is configured for writing, so a pack
+    # uploaded here reaches the other instances pulling from it. Best effort:
+    # a refused write must not fail the upload.
+    packsource.publish_pack(pack, settings)
     return pack
 
 
