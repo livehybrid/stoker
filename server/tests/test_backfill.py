@@ -55,9 +55,12 @@ def test_backfill_estimate_eventgen(client, db_session, settings, make_pack):
     assert r.status_code == 200, r.text
     b = r.json()
     assert b["engine"] == "eventgen"
-    assert b["deliver_eps"] == 100.0           # honours the spec's eps (< cap)
-    assert b["events"] == 600 * 100            # window x deliver_eps
-    assert b["seconds"] == 600.0               # events / deliver_eps (not / cap)
+    # The spec's eps is the DENSITY (how much history there is); delivery runs
+    # at the cap. These three assertions previously read 100 / 60,000 / 600,
+    # i.e. "a 600 s backfill takes 600 s", which was the bug.
+    assert b["deliver_eps"] == lifecycle.DEFAULT_BACKFILL_CAP_EPS
+    assert b["events"] == 600 * 100            # window x density, unchanged
+    assert b["seconds"] == 60_000 / lifecycle.DEFAULT_BACKFILL_CAP_EPS
     assert b["series"] is None
 
 
@@ -98,7 +101,9 @@ def test_eventgen_backfill_run_provisions(client, db_session, settings, make_pac
     assert run.status_code in (200, 201), run.text
     snap = db_session.get(Run, run.json()["run_id"]).spec_snapshot_json
     assert snap["rate_mode"] == "eps"
-    assert snap["rate_value"] == 100.0         # honours the spec's eps (not forced to the cap)
+    # The run delivers at the cap, not at the spec's eps: the spec's eps says
+    # how dense the history is, not how fast to send it. Was 100.0.
+    assert snap["rate_value"] == lifecycle.DEFAULT_BACKFILL_CAP_EPS
     assert snap["backfill"]["start_s"] < snap["backfill"]["end_s"]
     assert snap["duration_s"] and snap["duration_s"] > 0
 
@@ -275,21 +280,55 @@ def test_a_backfill_that_would_outrun_the_fleet_is_refused(
     backfill does not deliver at, so without a check of its own the cap could be
     raised to anything and flatten the target.
     """
-    pack = make_pack()
-    target = _helpers.make_target(client)
-    spec = _helpers.make_spec(client, pack_id=pack.id, target_id=target,
-                              rate_mode="eps", rate_value=40, workers=1)
+    target = _helpers.make_target(db_session, settings=settings)
+    pack = _helpers.make_pack(db_session, make_pack())
+    spec = _helpers.make_spec(db_session, pack, target, engine="eventgen",
+                              rate_mode="eps", rate_value=40.0, workers=1,
+                              fleet="fake-local")
+    db_session.commit()
 
     # eventgen's per-worker ceiling is 10,000 eps; 200,000 on one worker is well
     # past it, and the spec's own 40 eps would never have caught it.
-    r = client.post("/api/specs/%d/run" % spec,
+    r = client.post("/api/specs/%d/run" % spec.id,
                     json={"backfill_window_s": 3600, "backfill_cap_eps": 200_000})
     assert r.status_code == 422, r.text
     detail = r.json()["detail"]
     assert detail["error"] == "backfill_exceeds_ceiling"
     assert detail["deliver_eps"] == 200_000
 
-    # ...and a sane one is accepted.
-    r = client.post("/api/specs/%d/run" % spec,
-                    json={"backfill_window_s": 3600, "backfill_cap_eps": 5000})
+    # ...and one within the ceiling is accepted.
+    r = client.post("/api/specs/%d/run" % spec.id,
+                    json={"backfill_window_s": 3600, "backfill_cap_eps": 1000})
     assert r.status_code in (200, 201), r.text
+
+
+def test_the_delivery_cap_has_a_deployment_wide_default():
+    """STOKER_BACKFILL_CAP_EPS, so an estate sets it once.
+
+    The right delivery rate is a property of the estate (how much the target
+    will take), not of one job, so requiring it on every launch was the wrong
+    shape. Precedence: this launch > the deployment > the built-in default.
+    """
+    import dataclasses
+
+    from server import config as config_mod
+
+    base = config_mod.get_settings()
+    estate = dataclasses.replace(base, backfill_cap_eps=25_000.0)
+    window = 30 * 86400
+
+    built_in = lifecycle.plan_backfill("eventgen", 0, 40.0, window, None, None, 0.0)
+    assert built_in["deliver_eps"] == lifecycle.DEFAULT_BACKFILL_CAP_EPS
+
+    deployment = lifecycle.plan_backfill("eventgen", 0, 40.0, window, None, None, 0.0,
+                                         settings=estate)
+    assert deployment["deliver_eps"] == 25_000.0
+
+    # A launch still wins over the deployment default, in both directions.
+    for asked in (8_000.0, 60_000.0):
+        launched = lifecycle.plan_backfill("eventgen", 0, 40.0, window, None, asked,
+                                           0.0, settings=estate)
+        assert launched["deliver_eps"] == asked
+
+    # The history itself never changes with the delivery rate.
+    assert built_in["events"] == deployment["events"]

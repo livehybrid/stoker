@@ -129,8 +129,9 @@ def effective_workers(engine, workers):
 DEFAULT_BACKFILL_CAP_EPS = 5000.0
 
 
-def plan_backfill(engine, series_count, live_eps, window_s, resolution_s, cap_eps, now):
-    # type: (str, int, Optional[float], float, Optional[float], Optional[float], float) -> Dict[str, Any]
+def plan_backfill(engine, series_count, live_eps, window_s, resolution_s, cap_eps, now,
+                  settings=None):
+    # type: (str, int, Optional[float], float, Optional[float], Optional[float], float, Optional[Any]) -> Dict[str, Any]
     """Size a backfill run: window, delivery rate, total events, duration backstop.
 
     Two rates, and keeping them apart is the whole point:
@@ -179,7 +180,12 @@ def plan_backfill(engine, series_count, live_eps, window_s, resolution_s, cap_ep
     # Clamping down to the default made a four-year backfill take 11.7 days no
     # matter how large the fleet, while a live run on the same fleet could
     # deliver eight times faster.
-    cap = float(cap_eps) if cap_eps and cap_eps > 0 else DEFAULT_BACKFILL_CAP_EPS
+    # Precedence: this launch's cap, else the deployment's STOKER_BACKFILL_CAP_EPS,
+    # else the built-in default.
+    fallback = getattr(settings, "backfill_cap_eps", None) if settings is not None else None
+    if not (fallback and fallback > 0):
+        fallback = DEFAULT_BACKFILL_CAP_EPS
+    cap = float(cap_eps) if cap_eps and cap_eps > 0 else float(fallback)
     cap = max(1.0, cap)
     # Deliver at the ceiling: the cap is the lever for protecting the target,
     # and anything slower just makes the operator wait for no reason.
@@ -280,7 +286,8 @@ def provision_run(db, spec, driver, overrides=None, started_by=None, settings=No
         live_eps = spec.rate_value if spec.rate_mode == "eps" else None
         res = backfill.get("resolution_s") or pack_res
         plan = plan_backfill(spec.engine, series, live_eps, backfill["window_s"],
-                             res, backfill.get("cap_eps"), time.time())
+                             res, backfill.get("cap_eps"), time.time(),
+                             settings=settings)
         eff_rate_mode, eff_rate_value = "eps", plan["deliver_eps"]
         eff_duration_s = plan["duration_s"]
         backfill_block = {"start_s": plan["start_s"], "end_s": plan["end_s"],

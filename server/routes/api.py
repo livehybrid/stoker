@@ -1017,7 +1017,8 @@ def backfill_estimate(spec_id: int, body: BackfillEstimateRequest,
     live_eps = spec.rate_value if spec.rate_mode == "eps" else None
     res = body.resolution_s or pack_res
     plan = lifecycle.plan_backfill(spec.engine, series, live_eps, body.window_s,
-                                   res, body.cap_eps, time.time())
+                                   res, body.cap_eps, time.time(),
+                                   settings=get_settings())
     bpe = _spec_bytes_per_event(db, spec, pack)
     return BackfillEstimate(
         engine=spec.engine,
@@ -1374,7 +1375,10 @@ def run_spec(spec_id: int, body: RunLaunch, request: Request, db: Session = Depe
         # above (which uses spec.rate_value) says nothing about it. Check the
         # rate it will actually send at, which is what lets the delivery cap be
         # raised above its default for a fleet that can take it.
-        deliver_eps = float(body.backfill_cap_eps or lifecycle.DEFAULT_BACKFILL_CAP_EPS)
+        deliver_eps = float(
+            body.backfill_cap_eps
+            or getattr(get_settings(), "backfill_cap_eps", None)
+            or lifecycle.DEFAULT_BACKFILL_CAP_EPS)
         bf_check = ceilings.check_slice(
             "eps", _per_worker_share("eps", deliver_eps, spec.workers),
             bytes_per_event=bytes_per_event, engine=spec.engine,

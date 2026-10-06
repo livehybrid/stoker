@@ -259,6 +259,13 @@ class Settings:
     max_gb_day_per_worker: Optional[float] = None
     per_engine_ceilings: Tuple[Tuple[str, str, float], ...] = ()
 
+    # How fast a backfill delivers its history, when the launch does not say.
+    # A deployment-wide default rather than a per-launch argument, because the
+    # right value is a property of the estate (how much the target will take)
+    # rather than of one job. A launch may still raise or lower it, and the
+    # per-worker ceilings above are what actually bound it either way.
+    backfill_cap_eps: Optional[float] = None
+
     # --- Target-health backpressure ------------------------------------------ #
     # Opt-in (env STOKER_BACKPRESSURE_DRAIN): when the HEC target is failing to
     # accept data — recent delivery attempts across the fleet failing (5xx /
@@ -655,6 +662,7 @@ def load_settings(env=None):
             env, "STOKER_INPROCESS_MAX_WORKERS", DEFAULT_INPROCESS_MAX_WORKERS)),
         builtin_packs_dir=_get(env, "STOKER_BUILTIN_PACKS_DIR"),
         max_eps_per_worker=_get_opt_float(env, "STOKER_MAX_EPS_PER_WORKER"),
+        backfill_cap_eps=_get_opt_float(env, "STOKER_BACKFILL_CAP_EPS"),
         max_gb_day_per_worker=_get_opt_float(env, "STOKER_MAX_GB_DAY_PER_WORKER"),
         per_engine_ceilings=_parse_engine_ceilings(env),
         backpressure_drain_enabled=_get_bool(env, "STOKER_BACKPRESSURE_DRAIN", False),

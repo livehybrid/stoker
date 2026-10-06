@@ -260,12 +260,18 @@ function JobWizard() {
   // `window` of history then finish. Replay packs cannot backfill.
   const [backfillOn, setBackfillOn] = useState(false);
   const [backfillAmount, setBackfillAmount] = useState("24");
-  const [backfillUnit, setBackfillUnit] = useState<"hours" | "days">("hours");
+  const [backfillUnit, setBackfillUnit] =
+    useState<"hours" | "days" | "weeks" | "years">("hours");
   const [backfillRes, setBackfillRes] = useState(""); // metrics coarse step; blank = pack default
+  // Blank = the deployment's default (STOKER_BACKFILL_CAP_EPS, else 5000).
+  const [backfillCap, setBackfillCap] = useState("");
+  const BACKFILL_UNIT_S: Record<string, number> = {
+    hours: 3600, days: 86400, weeks: 604800, years: 31557600,
+  };
   const backfillWindowS =
     backfillOn && !isReplay
       ? Math.max(1, Math.floor(Number(backfillAmount) || 0)) *
-        (backfillUnit === "days" ? 86400 : 3600)
+        (BACKFILL_UNIT_S[backfillUnit] ?? 3600)
       : null;
   const BACKFILL_CAP = 5000; // matches server DEFAULT_BACKFILL_CAP_EPS
   // Client-side estimate mirroring server plan_backfill (the server recomputes at
@@ -276,7 +282,7 @@ function JobWizard() {
     // how many events the window holds, the delivery rate decides how long
     // pushing them takes. Multiplying by the same number for both is what made
     // a backfill always take exactly as long as the window it covered.
-    const deliverEps = BACKFILL_CAP;
+    const deliverEps = Number(backfillCap) > 0 ? Number(backfillCap) : BACKFILL_CAP;
     const densityEps =
       !isMetrics && form.rate_mode === "eps" && Number(form.rate_value) > 0
         ? Number(form.rate_value)
@@ -304,6 +310,7 @@ function JobWizard() {
     form.rate_mode,
     form.rate_value,
     bytesPerEvent,
+    backfillCap,
   ]);
 
   const workersNum = Math.max(1, Math.floor(numOrNull(form.workers) ?? 1));
@@ -494,6 +501,7 @@ function JobWizard() {
         backfillWindowS != null
           ? {
               backfill_window_s: backfillWindowS,
+              backfill_cap_eps: Number(backfillCap) > 0 ? Number(backfillCap) : null,
               backfill_resolution_s: backfillRes ? Number(backfillRes) : null,
             }
           : {};
@@ -823,12 +831,26 @@ function JobWizard() {
                     <Select
                       value={backfillUnit}
                       onChange={(_e, { value }) =>
-                        setBackfillUnit(value as "hours" | "days")
+                        setBackfillUnit(value as "hours" | "days" | "weeks" | "years")
                       }
                     >
                       <Select.Option value="hours" label="hours" />
                       <Select.Option value="days" label="days" />
+                      <Select.Option value="weeks" label="weeks" />
+                      <Select.Option value="years" label="years" />
                     </Select>
+                  </Field>
+                </div>
+                <div>
+                  <Field
+                    label="Deliver at (eps)"
+                    hint="blank = this instance's default; higher finishes sooner"
+                  >
+                    <TextInput
+                      value={backfillCap}
+                      onChange={(_e, { value }) => setBackfillCap(value)}
+                      placeholder={String(BACKFILL_CAP)}
+                    />
                   </Field>
                 </div>
                 {isMetrics && (
