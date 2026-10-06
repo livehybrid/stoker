@@ -8,11 +8,16 @@ import { Button } from "../../components/Button";
 import { useToast } from "../../components/Toast";
 import { formatBytes, formatGbDay, shortSha } from "../format";
 import { packIsMetrics } from "../metrics/config";
-import { Between, Callout, Grid, Inline, Muted, Panel, Strong, Tags } from "../../components/text";
+import {
+  Between, Callout, Inline, Label, Muted, Panel, PanelFooter, Stat, StatRow, Strong,
+  Tags, TitleBlock,
+} from "../../components/text";
 
-// A pack card: lint + verified badges, sourcetypes, estimated bytes/event and
-// declared GB/day, with Download, Preview and "New job from pack" (design
-// section 10.4). Download exports the pack as the archive another instance's
+// A pack card: what the pack is, what it emits and how big its events are,
+// with Download, Preview and "New job from pack" (design section 10.4).
+// Badges flag exceptions only -- a failed lint, or metadata Stoker measured
+// rather than read from an author's pack.yaml -- because a badge that appears
+// on every card carries no information. Download exports the pack as the archive another instance's
 // "Upload pack" accepts, so a pack built here can move between instances.
 // Local packs (uploaded / registered / built here — no repo) also get Delete;
 // a repo-indexed pack's lifecycle belongs to its repo, so no delete appears
@@ -21,6 +26,9 @@ interface Props {
   pack: PackOut;
   onPreview: (pack: PackOut) => void;
 }
+
+// The card stacks five sections; without a gap they read as one block.
+const SPACING = "12px";
 
 function asStringList(v: unknown): string[] {
   if (!Array.isArray(v)) return [];
@@ -57,68 +65,68 @@ export function PackCard({ pack, onPreview }: Props) {
   }
 
   return (
-    <Panel>
+    <Panel $gap={SPACING}>
       <Between>
-        <div>
-          <Strong title={pack.name}>
-            {pack.name}
-          </Strong>
-          {pack.description && (
-            <Muted $small>
-              {pack.description}
-            </Muted>
-          )}
-        </div>
+        <TitleBlock>
+          <Strong title={pack.name}>{pack.name}</Strong>
+          {pack.description && <Muted $small>{pack.description}</Muted>}
+        </TitleBlock>
         <Tags>
-          {/* Only surface lint state when it is a problem; a clean pack shows the
-              "verified" badge, so an extra "ok" pill was just noise. */}
+          {/* Two badges that were on nearly every card said nothing. What is
+              worth flagging is the exception: a pack that failed lint, and one
+              whose metadata Stoker guessed rather than read from an author's
+              pack.yaml, because then the estimates below are guesses too. */}
           {pack.lint_status !== "ok" && <StatusBadge state={pack.lint_status} />}
-          {pack.verified ? (
-            <Badge tone="green">verified</Badge>
-          ) : (
-            <Badge tone="slate">unverified</Badge>
+          {!pack.verified && (
+            <Badge tone="amber">
+              <span title="No author pack.yaml: the figures below are measured by Stoker, not declared by the pack">
+                estimated
+              </span>
+            </Badge>
           )}
         </Tags>
       </Between>
 
-      {(sourcetypes.length > 0 || engines.length > 0 || tags.length > 0) && (
-        <Tags>
-          {engines.map((e) => (
-            <Badge key={`e-${e}`} tone="sky">
-              {e}
-            </Badge>
-          ))}
-          {sourcetypes.map((s) => (
-            <Badge key={`s-${s}`} tone="neutral">
-              {s}
-            </Badge>
-          ))}
-          {tags.map((t) => (
-            <Badge key={`t-${t}`} tone="amber">
-              {t}
-            </Badge>
-          ))}
-        </Tags>
+      {(engines.length > 0 || sourcetypes.length > 0 || tags.length > 0) && (
+        <Stat>
+          <Tags>
+            {/* One colour family, ordered by what you actually scan for: the
+                engine decides how the pack behaves, the sourcetype is what you
+                search by, and free tags are last. Three competing colours just
+                made the card loud without saying which was which. */}
+            {engines.map((e) => (
+              <Badge key={`e-${e}`} tone="sky">
+                {e}
+              </Badge>
+            ))}
+            {sourcetypes.map((s) => (
+              <Badge key={`s-${s}`} tone="neutral">
+                {s}
+              </Badge>
+            ))}
+          </Tags>
+          {tags.length > 0 && (
+            <Muted $small title="Pack tags">
+              {tags.join(" · ")}
+            </Muted>
+          )}
+        </Stat>
       )}
 
-      <Grid $min="140px">
-        <div>
-          <Muted>Stanzas</Muted>
+      <StatRow>
+        <Stat>
+          <Label>Stanzas</Label>
           <Strong>{pack.stanza_count ?? "—"}</Strong>
-        </div>
-        <div>
-          <Muted>Bytes/event</Muted>
-          <Strong>
-            {formatBytes(pack.est_bytes_per_event)}
-          </Strong>
-        </div>
-        <div>
-          <Muted>Declared</Muted>
-          <Strong>
-            {formatGbDay(pack.declared_per_day_gb)}
-          </Strong>
-        </div>
-      </Grid>
+        </Stat>
+        <Stat>
+          <Label>Bytes/event</Label>
+          <Strong>{formatBytes(pack.est_bytes_per_event)}</Strong>
+        </Stat>
+        <Stat>
+          <Label>Declared</Label>
+          <Strong>{formatGbDay(pack.declared_per_day_gb)}</Strong>
+        </Stat>
+      </StatRow>
 
       {pack.lint_status !== "ok" &&
         Array.isArray(pack.lint_errors_json) &&
@@ -131,7 +139,7 @@ export function PackCard({ pack, onPreview }: Props) {
           </Callout>
         )}
 
-      <Between>
+      <PanelFooter>
         <Muted $small>
           {pack.indexed_sha ? `indexed ${shortSha(pack.indexed_sha)}` : "local pack"}
         </Muted>
@@ -177,7 +185,7 @@ export function PackCard({ pack, onPreview }: Props) {
             <Button variant="primary">New job</Button>
           </Link>
         </Inline>
-      </Between>
+      </PanelFooter>
     </Panel>
   );
 }

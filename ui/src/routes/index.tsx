@@ -18,7 +18,7 @@ import {
   recentFailures,
 } from "../features/dashboard/metrics";
 import { FleetThroughputChart } from "../features/dashboard/FleetThroughputChart";
-import { Between, BigNumber, Grid, Label, Muted, Panel, Stack, Strong } from "../components/text";
+import { Between, BigNumber, Grid, GridList, Label, Muted, Panel, Stack, Strong } from "../components/text";
 
 // Dashboard: fleet health and live runs at a glance. Active-run cards (live EPS,
 // target, workers), an aggregate strip, a target-health strip and the most
@@ -203,11 +203,9 @@ function Dashboard() {
         ) : (targetsQ.data ?? []).length === 0 ? (
           <Muted>No targets registered.</Muted>
         ) : (
-          <Grid $min="260px">
+          <GridList $min="260px">
             {(targetsQ.data ?? []).map((t) => (
-              <li
-                key={t.id}
-              >
+              <li key={t.id}>
                 <Between>
                   <Strong>
                     {t.name}
@@ -221,7 +219,7 @@ function Dashboard() {
                 )}
               </li>
             ))}
-          </Grid>
+          </GridList>
         )}
       </Card>
 

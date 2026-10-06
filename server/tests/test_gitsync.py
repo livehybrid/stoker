@@ -951,3 +951,45 @@ def _read_count_from_pack_dir(pack_dir):
         except (OSError, ValueError):
             continue
     return None
+
+
+# --------------------------------------------------------------------------- #
+# pack.yaml tags
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("line,expected", [
+    # The two spellings a pack author might reasonably write. The subset YAML
+    # parser hands a flow sequence back as a plain string, so without unwrapping
+    # the brackets the first and last tag keep the punctuation -- which is what
+    # put "[linux" and "ssh]" on the Packs page.
+    ("tags: web, access, nginx", ["web", "access", "nginx"]),
+    ("tags: [linux, security, auth, ssh]", ["linux", "security", "auth", "ssh"]),
+    ("tags: [solo]", ["solo"]),
+    ('tags: ["web", \'auth\']', ["web", "auth"]),
+    ("tags: one", ["one"]),
+    ("tags:", None),
+])
+def test_pack_tags_survive_both_yaml_spellings(tmp_path, line, expected):
+    from server.gitsync.sync import _pack_tags
+
+    pack = tmp_path / "p"
+    pack.mkdir()
+    (pack / "pack.yaml").write_text("name: p\n%s\n" % line, encoding="utf-8")
+    assert _pack_tags(str(pack)) == expected
+
+
+def test_a_tag_never_keeps_stray_punctuation(tmp_path):
+    """The bug this guards is cosmetic but it reached every repo-synced pack.
+
+    A tag is used as a filter term as well as a label, so "[linux" does not
+    match a search for "linux" either.
+    """
+    from server.gitsync.sync import _pack_tags
+
+    pack = tmp_path / "q"
+    pack.mkdir()
+    (pack / "pack.yaml").write_text(
+        "name: q\ntags: [ linux , security ,  auth ]\n", encoding="utf-8")
+    tags = _pack_tags(str(pack))
+    assert tags == ["linux", "security", "auth"]
+    assert not any(c in t for t in tags for c in "[]'\" ")

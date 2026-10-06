@@ -69,6 +69,25 @@ export const Grid = styled.div<{ $min?: string }>`
   gap: ${variables.spacingMedium};
 `;
 
+/**
+ * A Grid whose children are list items, for a genuine list of things (targets,
+ * packs). Rendering bare `<li>` inside a plain Grid keeps `display: list-item`,
+ * so the browser draws its own bullet next to every card; this keeps the list
+ * semantics for a screen reader and drops the marker.
+ */
+export const GridList = styled(Grid).attrs({ as: "ul" })`
+  list-style: none;
+  margin: 0;
+  padding: 0;
+
+  > li {
+    display: flex;
+    flex-direction: column;
+    gap: ${variables.spacingXSmall};
+    min-width: 0;
+  }
+`;
+
 /** A flex row that pushes its two halves apart: title on the left, actions right. */
 export const Between = styled.div`
   display: flex;
@@ -131,11 +150,75 @@ export const Bullets = styled.ul`
 `;
 
 /** An inset surface inside a Card: a preview, a summary, a nested detail. */
-export const Panel = styled.div`
+export const Panel = styled.div<{ $gap?: string }>`
   border: 1px solid ${variables.borderColor};
   border-radius: ${variables.borderRadius};
   background-color: ${variables.backgroundColorSection};
   padding: ${variables.spacingMedium};
+  /* A column, so a card in a grid can push its actions to the bottom with
+     PanelFooter: without it the buttons sit wherever the content happens to
+     end, and a row of cards has them at four different heights. No gap, so
+     every existing panel keeps the spacing it already had; a card that wants
+     breathing room sets its own ($gap). */
+  display: flex;
+  flex-direction: column;
+  gap: ${(props) => props.$gap || "0"};
+  min-width: 0;
+`;
+
+/**
+ * The action row of a [[Panel]], pinned to the bottom so every card in a row
+ * lines its buttons up regardless of how much content sits above them.
+ */
+export const PanelFooter = styled.div`
+  margin-top: auto;
+  padding-top: ${variables.spacingSmall};
+  border-top: 1px solid ${variables.borderColor};
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: ${variables.spacingXSmall};
+`;
+
+/**
+ * A compact row of labelled stats for a card. A Grid of minmax(120px, 1fr)
+ * fits only one column in a ~240px card, which stacked three stats vertically
+ * and made every card needlessly tall.
+ */
+export const StatRow = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  gap: ${variables.spacingSmall} ${variables.spacingMedium};
+
+  > * {
+    flex: 0 1 auto;
+  }
+`;
+
+/**
+ * A label above a value, as a stat is set. The label is a block so the value
+ * starts on its own line: `Declared` and `2.00 GB/day` ran together when both
+ * were inline spans.
+ */
+export const Stat = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+`;
+
+/** A title with its description beneath, rather than running on after it. */
+export const TitleBlock = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+
+  /* Strong and Muted are inline spans, so without this the description starts
+     immediately after the title instead of on a new line. */
+  > * {
+    display: block;
+  }
 `;
 
 /** A warning-coloured value inside a line of prose. */

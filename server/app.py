@@ -31,6 +31,7 @@ from fastapi.responses import JSONResponse
 
 from . import lifecycle
 from .config import get_settings
+from . import configio
 from .db import SessionLocal, init_db
 from .drivers.base import ExecutionDriver
 
@@ -226,6 +227,13 @@ async def _lifespan(app):
     with SessionLocal() as db:
         auth_mod.bootstrap_admin(db, get_settings())
         _warn_if_bootstrap_open(db, get_settings())
+        # Restore operator configuration (targets, pack repos, specs) from
+        # STOKER_CONFIG_IMPORT when it is set. Idempotent, and it never raises:
+        # a typo in a mounted ConfigMap must not stop the control plane
+        # starting, or there is no way in to fix the typo.
+        report = configio.import_from_env(db, get_settings())
+        if report is not None and not report.get("error"):
+            db.commit()
     app.state.drivers = _build_drivers_map()
     task = asyncio.create_task(_supervisor_loop(app), name="stoker-supervisor")
     app.state.supervisor_task = task
@@ -389,14 +397,17 @@ def _install_auth_middleware(app):
         # "operator" when this is absent (bootstrap / auth-disabled paths).
         role, username = outcome
         request.state.actor = username
-        # Role gate: /api/users and /api/tokens are admin-only (managing users
-        # or API tokens is a strictly higher privilege than holding one); any
-        # other mutating request needs operator+ (so a read-only `viewer` cannot
-        # delete targets, launch runs or register repos); safe methods need only
-        # an authenticated viewer.
+        # Role gate: /api/users, /api/tokens and /api/config are admin-only
+        # (managing users or API tokens is a strictly higher privilege than
+        # holding one, and a config export carries every target's encrypted HEC
+        # token while an import rewrites the whole instance); any other mutating
+        # request needs operator+ (so a read-only `viewer` cannot delete targets,
+        # launch runs or register repos); safe methods need only an
+        # authenticated viewer.
         path, method = request.url.path, request.method
         if (path == "/api/users" or path.startswith("/api/users/")
-                or path == "/api/tokens" or path.startswith("/api/tokens/")):
+                or path == "/api/tokens" or path.startswith("/api/tokens/")
+                or path == "/api/config" or path.startswith("/api/config/")):
             if role != "admin":
                 return JSONResponse({"detail": "admin role required"},
                                     status_code=403)
@@ -449,6 +460,7 @@ def create_app():
     from .routes.auth import users_router
     from .routes.metrics import router as metric_packs_router
     from .routes.packbuilder import router as pack_builder_router
+    from .routes.config import router as config_router
     from .routes.tokens import router as tokens_router
 
     app.include_router(agent_router)
@@ -456,6 +468,7 @@ def create_app():
     app.include_router(auth_router)
     app.include_router(users_router)
     app.include_router(tokens_router)
+    app.include_router(config_router)
     app.include_router(metric_packs_router)
     app.include_router(pack_builder_router)
 

@@ -603,16 +603,38 @@ def _pack_description(pack_dir):
 
 def _pack_tags(pack_dir):
     # type: (str) -> Optional[Any]
-    """Tags from pack.yaml if present (the subset parser drops list-shaped values,
-    so this is usually ``None``); returns a list or ``None``.
+    """Tags from pack.yaml if present; returns a list or ``None``.
+
+    Both spellings a pack author might reasonably use have to work, because the
+    subset YAML parser hands back a flow sequence as a plain string:
+
+        tags: web, access, nginx        -> "web, access, nginx"
+        tags: [web, access, nginx]      -> "[web, access, nginx]"
+
+    Splitting the second on commas without unwrapping the brackets is what put
+    ``[linux`` and ``ssh]`` on the Packs page: the first and last tag kept the
+    punctuation. Quotes get stripped for the same reason.
     """
     doc = _read_pack_yaml(pack_dir)
     tags = doc.get("tags") if isinstance(doc, dict) else None
     if isinstance(tags, list):
-        return tags
-    if isinstance(tags, str) and tags:
-        return [t.strip() for t in tags.split(",") if t.strip()]
+        return [t for t in (_clean_tag(x) for x in tags) if t] or None
+    if isinstance(tags, str) and tags.strip():
+        text = tags.strip()
+        # A flow sequence: unwrap before splitting, or the brackets ride along.
+        if text.startswith("[") and text.endswith("]"):
+            text = text[1:-1]
+        return [t for t in (_clean_tag(x) for x in text.split(",")) if t] or None
     return None
+
+
+def _clean_tag(value):
+    # type: (Any) -> str
+    """One tag, with the punctuation a subset YAML parser leaves behind removed."""
+    text = str(value).strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+        text = text[1:-1].strip()
+    return text.strip("[]").strip()
 
 
 # --------------------------------------------------------------------------- #

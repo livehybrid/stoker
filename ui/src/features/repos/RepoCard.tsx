@@ -7,7 +7,9 @@ import { Badge } from "../../components/Badge";
 import { Button } from "../../components/Button";
 import { useToast } from "../../components/Toast";
 import { absoluteTime, relativeTime, shortSha } from "../format";
-import { Between, Callout, Grid, Inline, Mono, Muted, Panel, Strong } from "../../components/text";
+import {
+  Between, Callout, Inline, Label, Mono, Muted, Panel, Stat, StatRow, Strong, TitleBlock,
+} from "../../components/text";
 
 // A repo card: URL, auth kind, head SHA, last-synced, trusted-code badge, and
 // any sync error, plus the per-repo Sync now + Delete actions and a link to its
@@ -66,9 +68,9 @@ export function RepoCard({ repo, onDeleted }: Props) {
   }
 
   return (
-    <Panel>
+    <Panel $gap="12px">
       <Between>
-        <div>
+        <TitleBlock>
           <Inline>
             <Mono title={repo.url}>
               {repo.url}
@@ -84,7 +86,7 @@ export function RepoCard({ repo, onDeleted }: Props) {
             {" · "}auth <span>{authLabel(repo.auth_kind)}</span>
             {repo.has_secret ? " (credential set)" : ""}
           </Muted>
-        </div>
+        </TitleBlock>
         <Inline>
           <Button
             variant="secondary"
@@ -99,29 +101,26 @@ export function RepoCard({ repo, onDeleted }: Props) {
         </Inline>
       </Between>
 
-      <Grid $min="160px">
-        <div>
-          <Muted>Head SHA</Muted>
+      {/* Label above value, not beside it: Muted and Mono/Strong are both
+          inline spans, so these read as "Head SHA128bb5741db6" without it. */}
+      <StatRow>
+        <Stat>
+          <Label>Head SHA</Label>
           <Mono>{shortSha(repo.head_sha)}</Mono>
-        </div>
-        <div>
-          <Muted>Last synced</Muted>
+        </Stat>
+        <Stat>
+          <Label>Last synced</Label>
           <Strong title={absoluteTime(repo.last_synced_at)}>
             {relativeTime(repo.last_synced_at)}
           </Strong>
-        </div>
-        <div>
-          <Muted>Packs</Muted>
-          <div>
-            <Link
-              to="/packs"
-              search={{ repo: repo.id }}
-            >
-              View indexed packs →
-            </Link>
-          </div>
-        </div>
-      </Grid>
+        </Stat>
+        <Stat>
+          <Label>Packs</Label>
+          <Link to="/packs" search={{ repo: repo.id }}>
+            View indexed packs →
+          </Link>
+        </Stat>
+      </StatRow>
 
       {repo.sync_error && (
         <Callout $tone="error">
