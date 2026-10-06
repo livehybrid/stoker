@@ -84,3 +84,19 @@ export async function copyToClipboard(text: string): Promise<boolean> {
     return false;
   }
 }
+
+/**
+ * A duration in seconds, in the largest unit that keeps it readable.
+ *
+ * Capping the scale at hours is how a four-year backfill came to be presented
+ * as "35064.0 h": technically a warning, and one nobody reads as four years.
+ */
+export function formatDuration(seconds: number | null | undefined): string {
+  const s = Number(seconds);
+  if (!Number.isFinite(s) || s <= 0) return "—";
+  if (s < 60) return `${Math.max(1, Math.round(s))} s`;
+  if (s < 3600) return `${(s / 60).toFixed(1)} min`;
+  if (s < 86400) return `${(s / 3600).toFixed(1)} h`;
+  if (s < 86400 * 365.25) return `${(s / 86400).toFixed(1)} days`;
+  return `${(s / (86400 * 365.25)).toFixed(1)} years`;
+}

@@ -133,24 +133,58 @@ def plan_backfill(engine, series_count, live_eps, window_s, resolution_s, cap_ep
     # type: (str, int, Optional[float], float, Optional[float], Optional[float], float) -> Dict[str, Any]
     """Size a backfill run: window, delivery rate, total events, duration backstop.
 
-    ``deliver_eps`` is the rate the backfill is delivered at: the spec's OWN eps
-    (honoured, not overridden), clamped to the ceiling ``cap_eps`` (itself capped
-    at DEFAULT_BACKFILL_CAP_EPS). A spec with no eps (metrics / count_interval)
-    delivers at the ceiling. ``events``: metrics = ceil(window/resolution) x
-    series (the fixed grid); eventgen = window x deliver_eps (the volume that rate
-    fills the window with). ``duration_s`` is a backstop deadline (1.5x the
-    delivery time + margin) so an eventgen backfill (bounded by the deadline, not
-    engine-exit) completes; metrics exits on its own when the window is done.
+    Two rates, and keeping them apart is the whole point:
+
+    ``density_eps``
+        How dense the history should be - the spec's own eps, i.e. "fill the
+        window as though the system had been running at my configured rate".
+        This sets how many events exist: ``events = window x density``.
+
+    ``deliver_eps``
+        How fast to push them out: ``cap_eps``, defaulting to
+        DEFAULT_BACKFILL_CAP_EPS. This sets how long it takes:
+        ``seconds = events / deliver_eps``. The launch route checks it against
+        the per-worker ceiling, so a larger fleet can genuinely backfill faster.
+
+    These used to be the same number, which made the arithmetic cancel: with
+    ``events = window x eps`` the delivery time was ``events / eps == window``,
+    so **a backfill always took exactly as long as the period it covered** and
+    no setting could change that. Backfilling four years took four years, and
+    raising the rate did not help, because it raised the event count in lockstep
+    (at 5000 eps it generated 631 billion events and still took four years).
+    That is why backfill appeared never to work: only a window short enough that
+    nobody noticed the wait ever finished.
+
+    Separating them restores the documented behaviour, that a backfill delivers
+    as fast as the target accepts. Four years at 40 eps is still 5.05 billion
+    events, because that is genuinely what four years at 40 eps contains, but it
+    now delivers in about 12 days at the 5000 eps cap instead of four years, and
+    the estimate says so before you launch.
+
+    ``events``: metrics = ceil(window/resolution) x series (a fixed grid, which
+    was always independent of the delivery rate and so was never affected by the
+    bug); eventgen = window x density. ``duration_s`` is a backstop deadline
+    (1.5x the delivery time + margin) so an eventgen backfill, which is bounded
+    by the deadline rather than by engine exit, completes.
+
+    A spec with no eps (metrics, count_interval, per_day_gb) has no density to
+    read, so it falls back to the cap, which is the previous behaviour for those
+    modes.
     """
     window_s = float(window_s)
+    # The default is a safe starting point, not a hard limit: an operator who
+    # asks for more gets it, because the real protection is the per-worker
+    # submit ceiling, which the launch route now checks against THIS rate rather
+    # than against the spec's (a backfill does not deliver at the spec's rate).
+    # Clamping down to the default made a four-year backfill take 11.7 days no
+    # matter how large the fleet, while a live run on the same fleet could
+    # deliver eight times faster.
     cap = float(cap_eps) if cap_eps and cap_eps > 0 else DEFAULT_BACKFILL_CAP_EPS
-    cap = max(1.0, min(cap, DEFAULT_BACKFILL_CAP_EPS))
-    # Honour the spec's configured eps as the delivery rate, clamped to the
-    # ceiling; a spec with no eps (metrics/count_interval) uses the ceiling.
-    if live_eps and live_eps > 0:
-        deliver_eps = max(1.0, min(float(live_eps), cap))
-    else:
-        deliver_eps = cap
+    cap = max(1.0, cap)
+    # Deliver at the ceiling: the cap is the lever for protecting the target,
+    # and anything slower just makes the operator wait for no reason.
+    deliver_eps = cap
+    density_eps = float(live_eps) if live_eps and live_eps > 0 else cap
     bf_res = None
     if engine == "metrics":
         res = float(resolution_s) if resolution_s and resolution_s > 0 else 10.0
@@ -158,17 +192,19 @@ def plan_backfill(engine, series_count, live_eps, window_s, resolution_s, cap_ep
         ticks = int(math.ceil(window_s / res)) if res > 0 else 0
         events = ticks * max(1, int(series_count or 1))
     else:
-        events = int(math.ceil(window_s * deliver_eps))
-    duration_s = max(15.0, math.ceil(events / deliver_eps * 1.5) + 15.0)
+        events = int(math.ceil(window_s * density_eps))
+    seconds = float(events) / deliver_eps if deliver_eps else 0.0
+    duration_s = max(15.0, math.ceil(seconds * 1.5) + 15.0)
     return {
         "start_s": now - window_s,
         "end_s": now,
         "resolution_s": bf_res,
         "cap_eps": cap,
         "deliver_eps": deliver_eps,
+        "density_eps": density_eps,
         "events": int(events),
         "duration_s": float(duration_s),
-        "seconds": float(events / deliver_eps) if deliver_eps else 0.0,
+        "seconds": seconds,
     }
 
 

@@ -1370,6 +1370,29 @@ def run_spec(spec_id: int, body: RunLaunch, request: Request, db: Session = Depe
         backfill = {"window_s": body.backfill_window_s,
                     "resolution_s": body.backfill_resolution_s,
                     "cap_eps": body.backfill_cap_eps}
+        # A backfill does NOT deliver at the spec's rate, so the ceiling check
+        # above (which uses spec.rate_value) says nothing about it. Check the
+        # rate it will actually send at, which is what lets the delivery cap be
+        # raised above its default for a fleet that can take it.
+        deliver_eps = float(body.backfill_cap_eps or lifecycle.DEFAULT_BACKFILL_CAP_EPS)
+        bf_check = ceilings.check_slice(
+            "eps", _per_worker_share("eps", deliver_eps, spec.workers),
+            bytes_per_event=bytes_per_event, engine=spec.engine,
+            ceilings=resolved_ceilings)
+        if not bf_check.ok:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "backfill_exceeds_ceiling",
+                    "detail": ("a backfill delivering %g eps across %d worker(s) "
+                               "exceeds this engine's per-worker ceiling; lower "
+                               "backfill_cap_eps or add workers"
+                               % (deliver_eps, spec.workers)),
+                    "deliver_eps": deliver_eps,
+                    "suggested_workers": bf_check.suggested_workers,
+                    "limiting_factor": bf_check.limiting_factor,
+                },
+            )
 
     # Resolve the spec's fleet NAME through the fleets table (falling back to a
     # cache-registered or bare driver name), so named fleets ("swarm-local",

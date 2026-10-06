@@ -1,6 +1,8 @@
 """Backfill: control-plane provisioning, the estimate endpoint, and the slice."""
 from __future__ import annotations
 
+import pytest
+
 from sqlalchemy import select
 
 from server import lifecycle
@@ -101,22 +103,81 @@ def test_eventgen_backfill_run_provisions(client, db_session, settings, make_pac
     assert snap["duration_s"] and snap["duration_s"] > 0
 
 
-def test_plan_backfill_honours_and_clamps_rate():
-    """The delivery-rate policy, unit-tested directly (submit-time ceilings make a
-    high-total-eps spec awkward to build via the API, so assert the sizer here)."""
+def test_plan_backfill_separates_density_from_delivery():
+    """The spec's eps sets how dense the history is, the cap sets how fast.
+
+    This test previously asserted ``seconds == window``, which encoded the bug:
+    the two rates were the same number, so ``events / eps`` cancelled to the
+    window and a backfill always took exactly as long as the period it covered.
+    The assertions are changed deliberately.
+    """
     now = 1_000_000.0
-    # eventgen, eps below the cap -> delivered at the spec eps
+    # eventgen, eps below the cap: 10 eps of density over an hour is 36,000
+    # events, pushed out at the 5000 eps cap in 7.2 s.
     p = lifecycle.plan_backfill("eventgen", 0, 10.0, 3600, None, None, now)
-    assert p["deliver_eps"] == 10.0
-    assert p["events"] == 3600 * 10            # window x deliver_eps
-    assert p["seconds"] == 3600.0              # events / deliver_eps (not / cap)
-    # eps above the cap -> clamped down, never exceeded
-    p = lifecycle.plan_backfill("eventgen", 0, 50_000.0, 3600, None, None, now)
+    assert p["density_eps"] == 10.0
     assert p["deliver_eps"] == lifecycle.DEFAULT_BACKFILL_CAP_EPS
-    # no eps (metrics / count_interval) -> fills at the cap
+    assert p["events"] == 3600 * 10                     # window x density
+    assert p["seconds"] == 36000 / lifecycle.DEFAULT_BACKFILL_CAP_EPS
+
+    # A density above the cap is legitimate (it describes the data, not the
+    # wire), so it is NOT clamped; the delivery rate still is.
+    p = lifecycle.plan_backfill("eventgen", 0, 50_000.0, 3600, None, None, now)
+    assert p["density_eps"] == 50_000.0
+    assert p["deliver_eps"] == lifecycle.DEFAULT_BACKFILL_CAP_EPS
+    assert p["events"] == 3600 * 50_000
+
+    # no eps (metrics / count_interval / per_day_gb) -> density falls back to
+    # the cap, which is the previous behaviour for those modes.
     p = lifecycle.plan_backfill("metrics", 3, None, 3600, 60, None, now)
     assert p["deliver_eps"] == lifecycle.DEFAULT_BACKFILL_CAP_EPS
     assert p["events"] == 60 * 3               # 60 ticks x 3 series
+
+
+def test_a_backfill_no_longer_takes_as_long_as_the_window():
+    """The regression that made backfill look broken.
+
+    With density and delivery conflated the delivery time was
+    ``(window x eps) / eps == window`` for every input, so a four-year backfill
+    took four years and no setting could change it. The giveaway is that raising
+    the rate did not help: it raised the event count in lockstep.
+    """
+    year = 365.25 * 86400
+    four_years = 4 * year
+    p = lifecycle.plan_backfill("eventgen", 0, 40.0, four_years, None, None, 0.0)
+
+    assert p["events"] == int(four_years * 40)          # genuinely 5.05 billion
+    # The old behaviour: seconds == window. The fix must be far below it.
+    assert p["seconds"] < four_years / 100
+    assert p["seconds"] == pytest.approx(12 * 86400, rel=0.1)   # ~12 days
+
+    # Raising the density raises the volume and so the time, which is the
+    # honest relationship; it used to make no difference at all.
+    denser = lifecycle.plan_backfill("eventgen", 0, 400.0, four_years, None, None, 0.0)
+    assert denser["events"] == 10 * p["events"]
+    assert denser["seconds"] == pytest.approx(10 * p["seconds"], rel=1e-6)
+
+
+def test_the_cap_is_the_lever_for_how_fast_a_backfill_lands():
+    """Lowering the cap must slow delivery without changing the data.
+
+    The cap exists to protect the target; it must not quietly change how much
+    history you get.
+    """
+    window = 30 * 86400
+    fast = lifecycle.plan_backfill("eventgen", 0, 40.0, window, None, None, 0.0)
+    slow = lifecycle.plan_backfill("eventgen", 0, 40.0, window, None, 500.0, 0.0)
+
+    assert fast["events"] == slow["events"]             # same history either way
+    assert slow["deliver_eps"] == 500.0
+    assert slow["seconds"] == pytest.approx(fast["seconds"] * 10, rel=1e-6)
+
+
+def test_the_duration_backstop_covers_the_delivery():
+    """An eventgen backfill stops on the deadline, so it must outlast the work."""
+    p = lifecycle.plan_backfill("eventgen", 0, 40.0, 30 * 86400, None, None, 0.0)
+    assert p["duration_s"] > p["seconds"]
+    assert p["duration_s"] >= p["seconds"] * 1.5
 
 
 def test_backfill_survives_the_claim_response_model(client, db_session, settings, make_pack, fake_driver):
@@ -186,3 +247,49 @@ def test_every_build_slice_key_is_declared_on_the_claim_response_model(
         "build_slice emits %s, which SpecSliceOut does not declare; the claim "
         "response_model will silently DROP these keys from every claim. Add "
         "them to SpecSliceOut." % sorted(undeclared))
+
+
+def test_the_delivery_cap_can_be_raised_for_a_fleet_that_can_take_it():
+    """The cap used to clamp DOWN only, so it was a hard 5000 eps ceiling.
+
+    That made a four-year backfill take 11.7 days no matter how many workers
+    were available, while a live run on the same fleet could deliver eight times
+    faster. It is a default now; the per-worker submit ceiling is the real
+    protection, and the launch route checks the backfill's own rate against it.
+    """
+    window = 4 * 365.25 * 86400
+    default = lifecycle.plan_backfill("eventgen", 0, 40.0, window, None, None, 0.0)
+    raised = lifecycle.plan_backfill("eventgen", 0, 40.0, window, None, 40_000.0, 0.0)
+
+    assert default["deliver_eps"] == lifecycle.DEFAULT_BACKFILL_CAP_EPS
+    assert raised["deliver_eps"] == 40_000.0
+    assert raised["events"] == default["events"]       # same history
+    assert raised["seconds"] == pytest.approx(default["seconds"] / 8, rel=1e-6)
+
+
+def test_a_backfill_that_would_outrun_the_fleet_is_refused(
+        client, db_session, settings, make_pack, fake_driver):
+    """The guard that makes raising the cap safe.
+
+    The launch-time ceiling check validates ``spec.rate_value``, which a
+    backfill does not deliver at, so without a check of its own the cap could be
+    raised to anything and flatten the target.
+    """
+    pack = make_pack()
+    target = _helpers.make_target(client)
+    spec = _helpers.make_spec(client, pack_id=pack.id, target_id=target,
+                              rate_mode="eps", rate_value=40, workers=1)
+
+    # eventgen's per-worker ceiling is 10,000 eps; 200,000 on one worker is well
+    # past it, and the spec's own 40 eps would never have caught it.
+    r = client.post("/api/specs/%d/run" % spec,
+                    json={"backfill_window_s": 3600, "backfill_cap_eps": 200_000})
+    assert r.status_code == 422, r.text
+    detail = r.json()["detail"]
+    assert detail["error"] == "backfill_exceeds_ceiling"
+    assert detail["deliver_eps"] == 200_000
+
+    # ...and a sane one is accepted.
+    r = client.post("/api/specs/%d/run" % spec,
+                    json={"backfill_window_s": 3600, "backfill_cap_eps": 5000})
+    assert r.status_code in (200, 201), r.text

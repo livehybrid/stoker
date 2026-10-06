@@ -27,6 +27,7 @@ import { parseApiError } from "../features/specs/errors";
 import { packLooksReplay } from "../features/specs/replay";
 import { packIsMetrics } from "../features/metrics/config";
 import { RATE_MODE_LABEL } from "../features/specs/format";
+import { formatDuration } from "../features/format";
 import { Between, Bullets, Callout, Grid, Inline, Muted, Negative, Panel, Stack, StickyBar, Strong, Tags, Warn } from "../components/text";
 import Switch from "@splunk/react-ui/Switch";
 import CollapsiblePanel from "@splunk/react-ui/CollapsiblePanel";
@@ -271,16 +272,15 @@ function JobWizard() {
   // launch and is the authority). No spec id needed, so it works before saving.
   const backfillEstimate = useMemo(() => {
     if (!backfillWindowS) return null;
-    // Delivery rate honours the configured eps (clamped to the cap); a metrics
-    // pack (no eps) fills at the cap. Mirrors server plan_backfill.
-    const deliverEps = isMetrics
-      ? BACKFILL_CAP
-      : Math.min(
-          form.rate_mode === "eps"
-            ? Number(form.rate_value) || BACKFILL_CAP
-            : BACKFILL_CAP,
-          BACKFILL_CAP,
-        );
+    // Two different rates, mirroring server plan_backfill: the density decides
+    // how many events the window holds, the delivery rate decides how long
+    // pushing them takes. Multiplying by the same number for both is what made
+    // a backfill always take exactly as long as the window it covered.
+    const deliverEps = BACKFILL_CAP;
+    const densityEps =
+      !isMetrics && form.rate_mode === "eps" && Number(form.rate_value) > 0
+        ? Number(form.rate_value)
+        : BACKFILL_CAP;
     let events: number;
     let series: number | null = null;
     if (isMetrics) {
@@ -289,10 +289,13 @@ function JobWizard() {
         Number(backfillRes) || metricDetailQ.data?.config.resolution_s || 10;
       events = Math.ceil(backfillWindowS / res) * series;
     } else {
-      events = Math.ceil(backfillWindowS * deliverEps);
+      events = Math.ceil(backfillWindowS * densityEps);
     }
     const bytes = bytesPerEvent ? Math.round(events * bytesPerEvent) : null;
-    return { events, series, bytes, deliverEps, seconds: events / deliverEps };
+    return {
+      events, series, bytes, deliverEps, densityEps,
+      seconds: events / deliverEps,
+    };
   }, [
     backfillWindowS,
     isMetrics,
@@ -856,14 +859,7 @@ function JobWizard() {
                     <> {"·"} {backfillEstimate.series} series</>
                   )}
                   {" · ~"}
-                  <Strong>
-                    {backfillEstimate.seconds >= 3600
-                      ? (backfillEstimate.seconds / 3600).toFixed(1) + " h"
-                      : backfillEstimate.seconds >= 60
-                        ? (backfillEstimate.seconds / 60).toFixed(1) + " min"
-                        : Math.max(1, Math.round(backfillEstimate.seconds)) +
-                          " s"}
-                  </Strong>{" "}
+                  <Strong>{formatDuration(backfillEstimate.seconds)}</Strong>{" "}
                   to deliver at {backfillEstimate.deliverEps.toLocaleString()} eps
                   {backfillEstimate.bytes != null && (
                     <>
