@@ -348,3 +348,38 @@ def test_whole_sample_count_is_left_unsplit_and_counts_as_work(tmp_path):
     confrewrite._rewrite_count_interval(p2, ["a.sample"], 2, 3)
     assert p2.get("a.sample", "count") == "0"
     assert confrewrite.assigned_stanza_count(p2, "count_interval") == 0
+
+
+def test_a_historical_range_does_not_end_at_now(tmp_path):
+    """Both bounds are offsets back from now, so a past window stays in the past.
+
+    `latest` was pinned to "now", so asking for January to April still produced
+    events stamped up to the present. Expressing both ends as negative offsets
+    keeps the window where it was asked for, and Splunk relative time parses a
+    negative `latest` the same way the engines do.
+    """
+    import configparser
+
+    src = tmp_path / "eventgen.conf"
+    src.write_text("[s.sample]\nmode = sample\ninterval = 60\ncount = 10\n"
+                   "earliest = -60s\nlatest = now\n", encoding="utf-8")
+    dst = tmp_path / "out.conf"
+
+    # A 90-day window that ended 190 days ago (i.e. ~Jan to ~Apr, seen in Oct).
+    confrewrite.rewrite_file(str(src), str(dst), "eps", 100.0, 1.0, str(tmp_path),
+                             backfill_window_s=90 * 86400,
+                             backfill_end_offset_s=190 * 86400)
+    p = configparser.RawConfigParser(delimiters=("=",), strict=False)
+    p.optionxform = str
+    p.read(str(dst))
+    assert p.get("s.sample", "earliest") == "-%ds" % (280 * 86400)
+    assert p.get("s.sample", "latest") == "-%ds" % (190 * 86400)
+
+    # The "last N" form still runs up to the present.
+    confrewrite.rewrite_file(str(src), str(dst), "eps", 100.0, 1.0, str(tmp_path),
+                             backfill_window_s=7 * 86400)
+    p2 = configparser.RawConfigParser(delimiters=("=",), strict=False)
+    p2.optionxform = str
+    p2.read(str(dst))
+    assert p2.get("s.sample", "earliest") == "-%ds" % (7 * 86400)
+    assert p2.get("s.sample", "latest") == "now"

@@ -130,8 +130,8 @@ DEFAULT_BACKFILL_CAP_EPS = 5000.0
 
 
 def plan_backfill(engine, series_count, live_eps, window_s, resolution_s, cap_eps, now,
-                  settings=None):
-    # type: (str, int, Optional[float], float, Optional[float], Optional[float], float, Optional[Any]) -> Dict[str, Any]
+                  settings=None, start_s=None, end_s=None):
+    # type: (str, int, Optional[float], Optional[float], Optional[float], Optional[float], float, Optional[Any], Optional[float], Optional[float]) -> Dict[str, Any]
     """Size a backfill run: window, delivery rate, total events, duration backstop.
 
     Two rates, and keeping them apart is the whole point:
@@ -172,7 +172,19 @@ def plan_backfill(engine, series_count, live_eps, window_s, resolution_s, cap_ep
     read, so it falls back to the cap, which is the previous behaviour for those
     modes.
     """
-    window_s = float(window_s)
+    # Two ways to say which history to generate: the last N seconds, or an
+    # explicit range ("January to April"). The range wins when both are given,
+    # because it is the more specific statement.
+    if start_s is not None and end_s is not None:
+        start_s, end_s = float(start_s), float(end_s)
+        if end_s <= start_s:
+            raise ValueError("backfill end must be after start")
+        window_s = end_s - start_s
+    else:
+        window_s = float(window_s or 0)
+        if window_s <= 0:
+            raise ValueError("a backfill needs a window, or a start and end")
+        start_s, end_s = now - window_s, now
     # The default is a safe starting point, not a hard limit: an operator who
     # asks for more gets it, because the real protection is the per-worker
     # submit ceiling, which the launch route now checks against THIS rate rather
@@ -202,8 +214,9 @@ def plan_backfill(engine, series_count, live_eps, window_s, resolution_s, cap_ep
     seconds = float(events) / deliver_eps if deliver_eps else 0.0
     duration_s = max(15.0, math.ceil(seconds * 1.5) + 15.0)
     return {
-        "start_s": now - window_s,
-        "end_s": now,
+        "start_s": start_s,
+        "end_s": end_s,
+        "window_s": window_s,
         "resolution_s": bf_res,
         "cap_eps": cap,
         "deliver_eps": deliver_eps,
@@ -272,7 +285,9 @@ def provision_run(db, spec, driver, overrides=None, started_by=None, settings=No
     eff_rate_value = spec.rate_value
     eff_duration_s = spec.duration_s
     backfill_block = None
-    if backfill and backfill.get("window_s"):
+    if backfill and (backfill.get("window_s")
+                     or (backfill.get("start_s") is not None
+                         and backfill.get("end_s") is not None)):
         from .models import Pack
 
         pack = spec.pack if spec.pack is not None else db.get(Pack, spec.pack_id)
@@ -285,9 +300,10 @@ def provision_run(db, spec, driver, overrides=None, started_by=None, settings=No
             pack_res = (pack.builder_config_json or {}).get("resolution_s")
         live_eps = spec.rate_value if spec.rate_mode == "eps" else None
         res = backfill.get("resolution_s") or pack_res
-        plan = plan_backfill(spec.engine, series, live_eps, backfill["window_s"],
+        plan = plan_backfill(spec.engine, series, live_eps, backfill.get("window_s"),
                              res, backfill.get("cap_eps"), time.time(),
-                             settings=settings)
+                             settings=settings, start_s=backfill.get("start_s"),
+                             end_s=backfill.get("end_s"))
         eff_rate_mode, eff_rate_value = "eps", plan["deliver_eps"]
         eff_duration_s = plan["duration_s"]
         backfill_block = {"start_s": plan["start_s"], "end_s": plan["end_s"],

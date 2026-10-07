@@ -332,3 +332,59 @@ def test_the_delivery_cap_has_a_deployment_wide_default():
 
     # The history itself never changes with the delivery rate.
     assert built_in["events"] == deployment["events"]
+
+
+# --------------------------------------------------------------------------- #
+# An explicit historical range
+# --------------------------------------------------------------------------- #
+
+def test_a_backfill_can_name_an_explicit_range():
+    """"January to April", not only "the last 90 days".
+
+    The window used to be a duration anchored to now, so any range you asked
+    for still ended at the present.
+    """
+    import datetime as dt
+
+    jan = dt.datetime(2026, 1, 1).timestamp()
+    apr = dt.datetime(2026, 4, 1).timestamp()
+    now = dt.datetime(2026, 10, 7).timestamp()
+
+    p = lifecycle.plan_backfill("eventgen", 0, 40.0, None, None, None, now,
+                                start_s=jan, end_s=apr)
+    assert p["start_s"] == jan and p["end_s"] == apr
+    assert p["window_s"] == pytest.approx(apr - jan)
+    assert p["events"] == int((apr - jan) * 40)
+    # Crucially it does NOT end at now.
+    assert p["end_s"] < now
+
+
+def test_the_last_n_form_still_ends_now():
+    now = 1_000_000.0
+    p = lifecycle.plan_backfill("eventgen", 0, 40.0, 3600, None, None, now)
+    assert p["end_s"] == now
+    assert p["start_s"] == now - 3600
+    assert p["window_s"] == 3600
+
+
+def test_an_explicit_range_wins_over_a_window():
+    """The range is the more specific statement, so it takes precedence."""
+    now = 1_000_000.0
+    p = lifecycle.plan_backfill("eventgen", 0, 40.0, 99999, None, None, now,
+                                start_s=now - 7200, end_s=now - 3600)
+    assert p["window_s"] == 3600
+    assert p["end_s"] == now - 3600
+
+
+@pytest.mark.parametrize("start,end", [(100.0, 100.0), (200.0, 100.0)])
+def test_a_backwards_range_is_refused(start, end):
+    with pytest.raises(ValueError) as exc:
+        lifecycle.plan_backfill("eventgen", 0, 40.0, None, None, None, 1000.0,
+                                start_s=start, end_s=end)
+    assert "after start" in str(exc.value)
+
+
+def test_no_window_and_no_range_is_refused():
+    with pytest.raises(ValueError) as exc:
+        lifecycle.plan_backfill("eventgen", 0, 40.0, None, None, None, 1000.0)
+    assert "needs a window" in str(exc.value)

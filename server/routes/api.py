@@ -1016,9 +1016,14 @@ def backfill_estimate(spec_id: int, body: BackfillEstimateRequest,
         pack_res = (pack.builder_config_json or {}).get("resolution_s")
     live_eps = spec.rate_value if spec.rate_mode == "eps" else None
     res = body.resolution_s or pack_res
-    plan = lifecycle.plan_backfill(spec.engine, series, live_eps, body.window_s,
-                                   res, body.cap_eps, time.time(),
-                                   settings=get_settings())
+    try:
+        plan = lifecycle.plan_backfill(spec.engine, series, live_eps, body.window_s,
+                                       res, body.cap_eps, time.time(),
+                                       settings=get_settings(),
+                                       start_s=body.start_s, end_s=body.end_s)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={
+            "error": "bad_backfill_window", "detail": str(exc)})
     bpe = _spec_bytes_per_event(db, spec, pack)
     return BackfillEstimate(
         engine=spec.engine,
@@ -1367,8 +1372,12 @@ def run_spec(spec_id: int, body: RunLaunch, request: Request, db: Session = Depe
 
     # --- Provision (delegates to the Core lifecycle) ----------------------- #
     backfill = None
-    if body.backfill_window_s and body.backfill_window_s > 0:
+    _has_range = (body.backfill_start_s is not None
+                  and body.backfill_end_s is not None)
+    if (body.backfill_window_s and body.backfill_window_s > 0) or _has_range:
         backfill = {"window_s": body.backfill_window_s,
+                    "start_s": body.backfill_start_s,
+                    "end_s": body.backfill_end_s,
                     "resolution_s": body.backfill_resolution_s,
                     "cap_eps": body.backfill_cap_eps}
         # A backfill does NOT deliver at the spec's rate, so the ceiling check

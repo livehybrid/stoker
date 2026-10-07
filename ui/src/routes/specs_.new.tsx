@@ -259,6 +259,11 @@ function JobWizard() {
   // Backfill is a per-run option (not stored on the spec): generate the last
   // `window` of history then finish. Replay packs cannot backfill.
   const [backfillOn, setBackfillOn] = useState(false);
+  // "last N" is the common case; a range answers "January to April", which a
+  // duration anchored to now cannot express at all.
+  const [backfillMode, setBackfillMode] = useState<"last" | "range">("last");
+  const [backfillFrom, setBackfillFrom] = useState("");
+  const [backfillTo, setBackfillTo] = useState("");
   const [backfillAmount, setBackfillAmount] = useState("24");
   const [backfillUnit, setBackfillUnit] =
     useState<"hours" | "days" | "weeks" | "years">("hours");
@@ -268,10 +273,26 @@ function JobWizard() {
   const BACKFILL_UNIT_S: Record<string, number> = {
     hours: 3600, days: 86400, weeks: 604800, years: 31557600,
   };
+  const backfillRange =
+    backfillOn && !isReplay && backfillMode === "range" && backfillFrom && backfillTo
+      ? {
+          start: Math.floor(new Date(backfillFrom).getTime() / 1000),
+          end: Math.floor(new Date(backfillTo).getTime() / 1000),
+        }
+      : null;
+  const rangeValid =
+    backfillRange != null &&
+    Number.isFinite(backfillRange.start) &&
+    Number.isFinite(backfillRange.end) &&
+    backfillRange.end > backfillRange.start;
   const backfillWindowS =
     backfillOn && !isReplay
-      ? Math.max(1, Math.floor(Number(backfillAmount) || 0)) *
-        (BACKFILL_UNIT_S[backfillUnit] ?? 3600)
+      ? backfillMode === "range"
+        ? rangeValid
+          ? backfillRange!.end - backfillRange!.start
+          : null
+        : Math.max(1, Math.floor(Number(backfillAmount) || 0)) *
+          (BACKFILL_UNIT_S[backfillUnit] ?? 3600)
       : null;
   const BACKFILL_CAP = 5000; // matches server DEFAULT_BACKFILL_CAP_EPS
   // Client-side estimate mirroring server plan_backfill (the server recomputes at
@@ -500,7 +521,9 @@ function JobWizard() {
       const runBody =
         backfillWindowS != null
           ? {
-              backfill_window_s: backfillWindowS,
+              backfill_window_s: backfillMode === "range" ? null : backfillWindowS,
+              backfill_start_s: rangeValid ? backfillRange!.start : null,
+              backfill_end_s: rangeValid ? backfillRange!.end : null,
               backfill_cap_eps: Number(backfillCap) > 0 ? Number(backfillCap) : null,
               backfill_resolution_s: backfillRes ? Number(backfillRes) : null,
             }
@@ -810,14 +833,14 @@ function JobWizard() {
               selected={backfillOn}
               onClick={() => setBackfillOn(!backfillOn)}
             >
-              Backfill historical data (generate the last N of history, then
+              Backfill historical data (generate a period of history, then
               finish)
             </Switch>
           </Inline>
           {backfillOn && (
             <Stack>
               <Inline>
-                <div>
+                <div style={{ display: backfillMode === "range" ? "none" : undefined }}>
                   <Field label="Amount">
                     <TextInput
                       type="number"
@@ -827,6 +850,48 @@ function JobWizard() {
                   </Field>
                 </div>
                 <div>
+                  <Field label="Period">
+                    <Select
+                      value={backfillMode}
+                      onChange={(_e, { value }) =>
+                        setBackfillMode(value as "last" | "range")
+                      }
+                    >
+                      <Select.Option value="last" label="the last…" />
+                      <Select.Option value="range" label="a date range" />
+                    </Select>
+                  </Field>
+                </div>
+                {backfillMode === "range" && (
+                  <>
+                    <div>
+                      <Field label="From">
+                        <TextInput
+                          type="date"
+                          value={backfillFrom}
+                          onChange={(_e, { value }) => setBackfillFrom(value)}
+                        />
+                      </Field>
+                    </div>
+                    <div>
+                      <Field
+                        label="To"
+                        error={
+                          backfillFrom && backfillTo && !rangeValid
+                            ? "must be after From"
+                            : undefined
+                        }
+                      >
+                        <TextInput
+                          type="date"
+                          value={backfillTo}
+                          onChange={(_e, { value }) => setBackfillTo(value)}
+                        />
+                      </Field>
+                    </div>
+                  </>
+                )}
+                <div style={{ display: backfillMode === "range" ? "none" : undefined }}>
                   <Field label="Unit">
                     <Select
                       value={backfillUnit}

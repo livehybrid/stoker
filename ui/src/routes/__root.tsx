@@ -121,6 +121,7 @@ const NAV: NavItem[] = [
   { to: "/repos", label: "Repos" },
   { to: "/targets", label: "Targets" },
   { to: "/users", label: "Users", adminOnly: true },
+  { to: "/config", label: "Configuration", adminOnly: true },
 ];
 
 function UserMenu() {

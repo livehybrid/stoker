@@ -222,13 +222,19 @@ class Agent(object):
                     # eventgen: rewrite the pack's conf for this worker's share.
                     # A backfill window turns it into an eventgen backfill run.
                     backfill_window_s = None
+                    backfill_end_offset_s = None
                     if sl.backfill_start_s is not None and sl.backfill_end_s is not None:
                         backfill_window_s = sl.backfill_end_s - sl.backfill_start_s
+                        # How far back the window ENDS. Zero for the common
+                        # "last N" case; positive for a historical range, which
+                        # is what stops every window being pinned to now.
+                        backfill_end_offset_s = max(0.0, self._clock() - sl.backfill_end_s)
                     confrewrite.rewrite_file(
                         pack.conf_path, conf_path, sl.rate_mode, self._engine_share(sl),
                         cfg.overdrive, pack.samples_dir,
                         slot=sl.slot, total_workers=sl.total_workers,
-                        backfill_window_s=backfill_window_s)
+                        backfill_window_s=backfill_window_s,
+                        backfill_end_offset_s=backfill_end_offset_s)
                     self._record_assigned_eventgen(conf_path, sl)
                 # PISTON / metrics: the conf-rewrite is skipped entirely; those
                 # engines read their config from the pack (replay / metricgen).

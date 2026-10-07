@@ -516,20 +516,31 @@ class SpecEstimate(BaseModel):
 class RunLaunch(BaseModel):
     """Body for POST /specs/{id}/run: last-minute override values.
 
-    ``backfill_window_s`` (when set) launches a **backfill** run: generate the
-    last ``window`` seconds of history (events stamped at their historical time),
-    delivered at the spec's own eps clamped to ``backfill_cap_eps`` (the ceiling,
-    default DEFAULT_BACKFILL_CAP_EPS), then finish.
+    A **backfill** run generates history (events stamped at their historical
+    time) then finishes. Give it a window one of two ways:
+
+    * ``backfill_window_s`` - the last N seconds, ending now.
+    * ``backfill_start_s`` + ``backfill_end_s`` - an explicit epoch range, for
+      "January to April" rather than "the last 90 days". Supplying both wins.
+
+    Delivery runs at ``backfill_cap_eps``, defaulting to the instance's
+    ``STOKER_BACKFILL_CAP_EPS`` and then to DEFAULT_BACKFILL_CAP_EPS. That is a
+    whole-run rate shared across the fleet, not a per-worker one.
     """
 
     overrides: Optional[Dict[str, str]] = None
     backfill_window_s: Optional[int] = None
+    # An explicit historical range (epoch seconds). Both or neither.
+    backfill_start_s: Optional[float] = None
+    backfill_end_s: Optional[float] = None
     backfill_resolution_s: Optional[float] = None   # metrics coarse step
     backfill_cap_eps: Optional[float] = None         # delivery ceiling (not a forced rate)
 
 
 class BackfillEstimateRequest(BaseModel):
-    window_s: int
+    window_s: Optional[int] = None
+    start_s: Optional[float] = None
+    end_s: Optional[float] = None
     resolution_s: Optional[float] = None
     cap_eps: Optional[float] = None
 
