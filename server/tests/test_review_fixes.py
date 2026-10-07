@@ -158,3 +158,33 @@ def test_status_reports_live_desired():
     driver = _swarm_with(200, replicas=5)
     status = driver.status(_ref())
     assert status.desired == 5
+
+
+# --------------------------------------------------------------------------- #
+# SPA cache headers
+# --------------------------------------------------------------------------- #
+
+def test_index_html_is_never_cached_but_hashed_assets_are(client, tmp_path, monkeypatch):
+    """The deploy bug that made an operator see yesterday's UI.
+
+    index.html is the only unhashed file the SPA serves and it names every
+    hashed chunk, so a stale copy loads the whole previous build from cache.
+    It used to go out with an ETag but no Cache-Control, which lets a browser
+    apply heuristic freshness and skip revalidating entirely. Assets are the
+    opposite case: their names carry a content hash, so they are safe for ever.
+    """
+    r = client.get("/")
+    if r.status_code == 404:
+        pytest.skip("ui/dist not built in this environment")
+    assert r.status_code == 200
+    cc = r.headers.get("cache-control", "")
+    assert "no-cache" in cc, "index.html must revalidate: %r" % cc
+
+    # Find a hashed asset the page references and check the opposite policy.
+    import re as _re
+    m = _re.search(r'/assets/([A-Za-z0-9_.-]+\.js)', r.text)
+    if not m:
+        pytest.skip("no hashed asset referenced by index.html")
+    a = client.get("/assets/%s" % m.group(1))
+    assert a.status_code == 200
+    assert "immutable" in a.headers.get("cache-control", "")

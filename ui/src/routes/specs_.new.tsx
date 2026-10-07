@@ -27,7 +27,7 @@ import { parseApiError } from "../features/specs/errors";
 import { packLooksReplay } from "../features/specs/replay";
 import { packIsMetrics } from "../features/metrics/config";
 import { RATE_MODE_LABEL } from "../features/specs/format";
-import { formatDuration } from "../features/format";
+import { formatDuration, formatVolume } from "../features/format";
 import { Between, Bullets, Callout, Grid, Inline, Muted, Negative, Panel, Stack, StickyBar, Strong, Tags, Warn } from "../components/text";
 import Switch from "@splunk/react-ui/Switch";
 import CollapsiblePanel from "@splunk/react-ui/CollapsiblePanel";
@@ -843,8 +843,8 @@ function JobWizard() {
                 </div>
                 <div>
                   <Field
-                    label="Deliver at (eps)"
-                    hint="blank = this instance's default; higher finishes sooner"
+                    label="Deliver at (eps), total"
+                    hint="across the whole fleet, not per worker; blank = this instance's default"
                   >
                     <TextInput
                       value={backfillCap}
@@ -882,15 +882,27 @@ function JobWizard() {
                   )}
                   {" · ~"}
                   <Strong>{formatDuration(backfillEstimate.seconds)}</Strong>{" "}
-                  to deliver at {backfillEstimate.deliverEps.toLocaleString()} eps
+                  {/* Say "total", and show the per-worker split. The delivery
+                      rate is a whole-run figure apportioned across the fleet,
+                      so adding workers does NOT speed a backfill up on its own
+                      -- you have to raise this. Reading it as a per-worker rate
+                      is the obvious mistake and the label invited it. */}
+                  to deliver at{" "}
+                  <Strong>{backfillEstimate.deliverEps.toLocaleString()} eps</Strong>{" "}
+                  total
+                  {workersNum > 1 && (
+                    <>
+                      {" ("}
+                      {Math.round(backfillEstimate.deliverEps / workersNum).toLocaleString()}
+                      {" per worker across "}
+                      {workersNum}
+                      {")"}
+                    </>
+                  )}
                   {backfillEstimate.bytes != null && (
                     <>
                       {" · "}
-                      {backfillEstimate.bytes > 1e9
-                        ? (backfillEstimate.bytes / 1e9).toFixed(1) + " GB"
-                        : backfillEstimate.bytes > 1e6
-                          ? (backfillEstimate.bytes / 1e6).toFixed(1) + " MB"
-                          : Math.round(backfillEstimate.bytes / 1e3) + " KB"}
+                      <Strong>{formatVolume(backfillEstimate.bytes)}</Strong>
                     </>
                   )}
                 </Muted>

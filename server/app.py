@@ -27,7 +27,8 @@ import os
 from typing import Dict
 
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from . import lifecycle
 from .config import get_settings
@@ -500,6 +501,34 @@ def create_app():
     return app
 
 
+# index.html is the only unhashed file the SPA serves, and it is the pointer to
+# every hashed chunk, so it must never be cached. It previously went out with an
+# ETag but no Cache-Control, which lets a browser apply RFC 7234 heuristic
+# freshness (roughly 10% of the file's age) and serve a stale index.html without
+# asking. That index names old chunk filenames, which are themselves cached, so
+# the whole previous build keeps running after a deploy and the operator sees
+# yesterday's UI with no way to tell. "no-cache" still allows the cache to store
+# it; it just has to revalidate, which the ETag answers with a cheap 304.
+_NO_CACHE = {"Cache-Control": "no-cache, must-revalidate"}
+
+#: A year, which for content-hashed filenames is effectively for ever.
+_ASSET_CACHE = "public, max-age=31536000, immutable"
+
+
+class _ImmutableStatics(StaticFiles):
+    """Static assets whose filenames carry a content hash.
+
+    Marked immutable so a browser reuses them without revalidating; correctness
+    comes from the filename changing whenever the bytes do.
+    """
+
+    def file_response(self, *args, **kwargs):
+        # type: (...) -> Any
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = _ASSET_CACHE
+        return response
+
+
 def _mount_ui(app):
     # type: (FastAPI) -> None
     """Serve the built single-page UI from ``ui/dist`` when present.
@@ -517,16 +546,15 @@ def _mount_ui(app):
         log.debug("ui/dist not present (%s); UI not mounted this stage", _UI_DIST)
         return
 
-    from fastapi.responses import FileResponse
-    from fastapi.staticfiles import StaticFiles
-
     assets_dir = os.path.join(_UI_DIST, "assets")
     index_html = os.path.join(_UI_DIST, "index.html")
 
     # Hashed JS/CSS: served verbatim; a missing file is a real 404 (not the SPA
     # fallback) so a stale/incorrect asset reference never masquerades as HTML.
+    # Their names contain a content hash, so they can be cached for ever: a new
+    # build produces new names rather than new contents under an old name.
     if os.path.isdir(assets_dir):
-        app.mount("/assets", StaticFiles(directory=assets_dir), name="ui-assets")
+        app.mount("/assets", _ImmutableStatics(directory=assets_dir), name="ui-assets")
 
     # Prefixes that must NOT be swallowed by the SPA fallback. These already have
     # registered handlers (so they resolve first), but we still refuse to serve
@@ -549,8 +577,8 @@ def _mount_ui(app):
             candidate = os.path.normpath(os.path.join(_UI_DIST, full_path))
             # Guard against path traversal escaping the dist directory.
             if candidate.startswith(_UI_DIST + os.sep) and os.path.isfile(candidate):
-                return FileResponse(candidate)
-        return FileResponse(index_html)
+                return FileResponse(candidate, headers=_NO_CACHE)
+        return FileResponse(index_html, headers=_NO_CACHE)
 
     log.info("serving SPA from %s (client-route fallback -> index.html)", _UI_DIST)
 

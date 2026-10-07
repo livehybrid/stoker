@@ -49,6 +49,26 @@ export function formatBytes(n: number | null | undefined): string {
   return `${mb.toFixed(mb < 10 ? 1 : 0)} MB`;
 }
 
+/**
+ * A total volume in bytes, scaled to the largest sensible unit.
+ *
+ * Distinct from [[formatBytes]], which sizes a single event and so stops at MB.
+ * A backfill total is routinely terabytes, and "36288.0 GB" is the same failure
+ * as showing four years as "35064.0 h": technically correct, and not a number
+ * anyone reads as "this will not fit".
+ */
+export function formatVolume(n: number | null | undefined): string {
+  const b = Number(n);
+  if (!Number.isFinite(b) || b <= 0) return "—";
+  const units: [number, string][] = [
+    [1e15, "PB"], [1e12, "TB"], [1e9, "GB"], [1e6, "MB"], [1e3, "KB"],
+  ];
+  for (const [scale, unit] of units) {
+    if (b >= scale) return `${(b / scale).toFixed(1)} ${unit}`;
+  }
+  return `${Math.round(b)} B`;
+}
+
 /** Format a GB/day figure with a fixed unit, or "—" when null. */
 export function formatGbDay(n: number | null | undefined): string {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
