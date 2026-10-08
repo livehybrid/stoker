@@ -306,8 +306,15 @@ def provision_run(db, spec, driver, overrides=None, started_by=None, settings=No
                              end_s=backfill.get("end_s"))
         eff_rate_mode, eff_rate_value = "eps", plan["deliver_eps"]
         eff_duration_s = plan["duration_s"]
+        # density_eps travels with the window because the two rates are for
+        # different things and the worker needs both: the engine generates at
+        # the density (how dense the history is), the token bucket releases at
+        # the delivery rate (rate_value, above). An ordered sweep makes the
+        # density structural rather than a by-product of how long the run was
+        # allowed to last, so it has to be stated.
         backfill_block = {"start_s": plan["start_s"], "end_s": plan["end_s"],
-                          "resolution_s": plan["resolution_s"]}
+                          "resolution_s": plan["resolution_s"],
+                          "density_eps": plan["density_eps"]}
 
     # 1. Freeze the non-secret snapshot (target embedded by id + non-secret fields).
     snapshot = build_spec_snapshot(spec, target, overrides=overrides,

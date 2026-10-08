@@ -43,6 +43,11 @@ BASE_CONF = textwrap.dedent("""\
     """)
 
 
+def _stanza_eps(conf, section):
+    """What a rewritten stanza actually generates, in events per second."""
+    return conf.getint(section, "count") / conf.getint(section, "interval")
+
+
 def write_base_conf(tmp_path, text=BASE_CONF):
     path = tmp_path / "eventgen.conf"
     path.write_text(text)
@@ -136,6 +141,105 @@ class TestBackfill:
             assert conf.get(section, "latest") == "now"
             # still paced (the rate rewrite ran)
             assert conf.getint(section, "interval") == 1
+
+    def test_sweep_mode_hands_the_range_to_the_engine(self, tmp_path):
+        # firebox sweeps the range itself, so the engine is told the bounds
+        # rather than being given one wide timestamp window to scatter inside.
+        src = write_base_conf(tmp_path, BASE_CONF)
+        dst = str(tmp_path / "sweep.conf")
+        rewrite_file(src, dst, "eps", 100, 1.0, "/bundle/samples",
+                     backfill_window_s=3600, backfill_end_offset_s=7200,
+                     backfill_mode="sweep", backfill_density_eps=4.0)
+        conf = load_conf(dst)
+        for section in ("sample1.csv", "sample2.csv"):
+            assert conf.get(section, "backfill") == "-10800s"
+            assert conf.get(section, "backfillEnd") == "-7200s"
+            assert conf.get(section, "backfillOnly") == "true"
+            # earliest/latest are never read during a sweep, but they should
+            # still describe the range for anyone reading the rewritten conf.
+            assert conf.get(section, "earliest") == "-10800s"
+            assert conf.get(section, "latest") == "-7200s"
+
+    def test_sweep_up_to_now_sets_no_end_bound(self, tmp_path):
+        src = write_base_conf(tmp_path, BASE_CONF)
+        dst = str(tmp_path / "sweep-now.conf")
+        rewrite_file(src, dst, "eps", 100, 1.0, "/bundle/samples",
+                     backfill_window_s=3600, backfill_mode="sweep",
+                     backfill_density_eps=4.0)
+        conf = load_conf(dst)
+        for section in ("sample1.csv", "sample2.csv"):
+            assert conf.get(section, "backfill") == "-3600s"
+            assert conf.has_option(section, "backfillEnd") is False
+            assert conf.get(section, "latest") == "now"
+
+    def test_sweep_counts_are_the_density_not_the_delivery_rate(self, tmp_path):
+        # The spec runs at 4 eps and delivers at 100: the history must come out
+        # 4 eps dense, apportioned by the pack's declared 1:3 split, while the
+        # token bucket does the pushing at 100. Under the old widening these
+        # were one number, which is exactly why the arithmetic cancelled.
+        src = write_base_conf(tmp_path, BASE_CONF)
+        dst = str(tmp_path / "density.conf")
+        rewrite_file(src, dst, "eps", 100, 1.0, "/bundle/samples",
+                     backfill_window_s=86400, backfill_mode="sweep",
+                     backfill_density_eps=4.0)
+        conf = load_conf(dst)
+        assert _stanza_eps(conf, "sample1.csv") == pytest.approx(1.0, rel=0.02)
+        assert _stanza_eps(conf, "sample2.csv") == pytest.approx(3.0, rel=0.02)
+        # Emphatically not the delivery rate, which the eps rewrite had just
+        # written as 25 and 75.
+        assert conf.getint("sample1.csv", "count") != 25
+        assert conf.getint("sample2.csv", "count") != 75
+
+    def test_sweep_stretches_the_interval_for_a_sparse_stanza(self, tmp_path):
+        # A wide fleet gives each worker a fraction of an event per second, and
+        # a one-second interval can only express a whole number of them. The
+        # interval stretches until the count is big enough to carry the rate.
+        src = write_base_conf(tmp_path, BASE_CONF)
+        dst = str(tmp_path / "sparse.conf")
+        rewrite_file(src, dst, "eps", 100, 1.0, "/bundle/samples",
+                     backfill_window_s=86400, backfill_mode="sweep",
+                     backfill_density_eps=0.5)
+        conf = load_conf(dst)
+        assert conf.getint("sample1.csv", "interval") > 1
+        assert _stanza_eps(conf, "sample1.csv") == pytest.approx(0.125, rel=0.02)
+        assert _stanza_eps(conf, "sample2.csv") == pytest.approx(0.375, rel=0.02)
+
+    @pytest.mark.parametrize("eps", [0.125, 0.5, 1.0, 1.4, 3.0, 9.9, 40.0, 2500.0])
+    def test_the_density_survives_integer_count_and_interval(self, eps):
+        # The rate asked for is rarely a whole number of events per second once
+        # it is split across a fleet and then across stanzas. Rounding it to one
+        # would have written a history up to 29 % thinner than the estimate said
+        # (1.4 eps rounding to 1), and the estimate is what an operator plans
+        # against.
+        interval, count = confrewrite._density_count_interval(eps)
+        assert interval >= 1 and count >= 1
+        assert count / interval == pytest.approx(eps, rel=0.05)
+
+    def test_sweep_without_a_density_keeps_the_delivery_counts(self, tmp_path):
+        # A spec with no eps of its own (per_day_gb, count_interval, metrics)
+        # states no density, so the sweep runs at the delivery rate: the
+        # behaviour those modes already had.
+        src = write_base_conf(tmp_path, BASE_CONF)
+        dst = str(tmp_path / "nodensity.conf")
+        rewrite_file(src, dst, "eps", 100, 1.0, "/bundle/samples",
+                     backfill_window_s=86400, backfill_mode="sweep")
+        conf = load_conf(dst)
+        assert conf.getint("sample1.csv", "count") == 25
+        assert conf.getint("sample2.csv", "count") == 75
+
+    def test_window_mode_sets_no_engine_backfill_keys(self, tmp_path):
+        # The Python fallback cannot sweep, so it must not be told to: its
+        # native backfill rater is non-functional in the vendored tree.
+        src = write_base_conf(tmp_path, BASE_CONF)
+        dst = str(tmp_path / "window.conf")
+        rewrite_file(src, dst, "eps", 100, 1.0, "/bundle/samples",
+                     backfill_window_s=3600, backfill_mode="window",
+                     backfill_density_eps=4.0)
+        conf = load_conf(dst)
+        for section in ("sample1.csv", "sample2.csv"):
+            assert conf.has_option(section, "backfill") is False
+            assert conf.has_option(section, "backfillOnly") is False
+            assert conf.getint(section, "count") in (25, 75)
 
     def test_no_backfill_leaves_timestamp_window_untouched(self, tmp_path):
         conf = rewritten(tmp_path, "eps", 100)

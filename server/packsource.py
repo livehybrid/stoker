@@ -229,6 +229,36 @@ def writes_enabled(env=None):
     return (env.get(WRITE_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def describe(env=None):
+    # type: (Optional[Dict[str, str]]) -> Dict[str, Any]
+    """What the pack source is, for the UI to show.
+
+    The whole feature was invisible: a pack was mirrored on save when both env
+    vars happened to be set, and nothing in the UI said so, which is no use to
+    an operator asking "did that reach the bucket?". This answers that, and the
+    kind lets the Packs page name the destination rather than say "the source".
+
+    ``location`` carries no credentials by construction: an ``s3://`` url names
+    a bucket and prefix, and boto3 takes the credentials from its own chain. A
+    source that cannot even be parsed reports ``error`` rather than raising, so
+    a typo in a ConfigMap shows up on the page instead of 500ing it.
+    """
+    env = env if env is not None else os.environ
+    source = (env.get(SOURCE_ENV) or "").strip()
+    out = {"configured": bool(source), "writable": False, "kind": None,
+           "location": source or None, "error": None}  # type: Dict[str, Any]
+    if not source:
+        return out
+    try:
+        store = open_store(source)
+    except PackSourceError as exc:
+        out["error"] = str(exc)
+        return out
+    out["kind"] = "s3" if isinstance(store, S3Store) else "directory"
+    out["writable"] = writes_enabled(env)
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Pull
 # --------------------------------------------------------------------------- #

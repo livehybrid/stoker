@@ -14,7 +14,7 @@ import { Modal } from "../features/ui/Modal";
 import { PackCard } from "../features/packs/PackCard";
 import { PackPreviewDrawer } from "../features/packs/PackPreviewDrawer";
 import { UploadPackForm } from "../features/packs/UploadPackForm";
-import { Grid, Inline, Muted, Stack } from "../components/text";
+import { Callout, Grid, Inline, Muted, Stack, Strong } from "../components/text";
 
 // Packs page: a filterable grid of indexed sample packs (filter by repo, wired
 // to the URL so a "View indexed packs" link from a repo card deep-links here),
@@ -40,6 +40,16 @@ function Packs() {
   });
   // Repos populate the filter dropdown (and let us label a pack's origin).
   const reposQ = useQuery({ queryKey: ["repos"], queryFn: () => api.repos.list() });
+  // The shared pack source, if one is configured. Deployment environment, so it
+  // never goes stale within a session. Stated on the page because the feature
+  // was otherwise invisible: packs were mirrored on save and nothing said where
+  // to, or that a misconfigured source was silently doing nothing.
+  const sourceQ = useQuery({
+    queryKey: ["pack-source"],
+    queryFn: api.packSource,
+    staleTime: Infinity,
+    retry: false,
+  });
 
   const repoOptions = useMemo(() => reposQ.data ?? [], [reposQ.data]);
 
@@ -86,6 +96,24 @@ function Packs() {
           </Inline>
         }
       />
+
+      {sourceQ.data?.configured && (
+        <Callout $tone={sourceQ.data.error ? "warning" : "info"}>
+          {sourceQ.data.error ? (
+            <>
+              <Strong>Pack source unusable.</Strong> {sourceQ.data.error}
+            </>
+          ) : (
+            <>
+              <Strong>Shared pack source:</Strong>{" "}
+              <code>{sourceQ.data.location}</code>.{" "}
+              {sourceQ.data.writable
+                ? "Packs are pushed here when they are saved, and each card has a Push button to send one again."
+                : "Read-only: packs are pulled from here at startup. Set STOKER_PACK_SOURCE_WRITE=1 to push as well."}
+            </>
+          )}
+        </Callout>
+      )}
 
       <Card>
         <Inline>

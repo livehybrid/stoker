@@ -200,3 +200,45 @@ def test_metrics_run_is_never_watched(monkeypatch):
     agent, engine, control = _silent(monkeypatch, stop_after=3)
     _run_slice(agent, control, _slice_for("metrics", {"eps": 5000}))
     engine.restart.assert_not_called()
+
+
+def test_a_stalled_backfill_sweep_is_failed_rather_than_restarted(monkeypatch):
+    """A firebox sweep walks the range from the start and cannot be resumed.
+
+    Restarting it would re-send the history already written AND still leave the
+    end of the range unreached inside the deadline, so a stall there is a
+    failure to report, not something to retry. (A sweep that finishes normally
+    exits, which the engine-exit branch handles before this one.)
+    """
+    agent, engine, control = _silent(monkeypatch, stop_after=3)
+    monkeypatch.setattr(agent, "_backfill_mode", lambda: "sweep")
+    sl = SpecSlice.from_claim({
+        "run_id": 1, "slot": 0, "total_workers": 3, "lease_id": "le",
+        "engine": "eventgen",
+        "bundle": {"url": "/tmp/pack"}, "share": {"eps": 5000},
+        "hec": {"url": "http://h:8088", "index": "loadtest"},
+        "telemetry": {"interval_s": 0.01}, "released": True,
+        "backfill": {"start_s": 1.0, "end_s": 601.0, "density_eps": 40.0},
+    })
+    _run_slice(agent, control, sl)
+    engine.restart.assert_not_called()
+    assert agent._exit_code == EXIT_NO_OUTPUT
+    assert agent._drain_reason == "no-engine-output"
+
+
+def test_a_stalled_window_backfill_still_restarts(monkeypatch):
+    """The Python fallback's widening is stateless: every event is an
+    independent random time in the range, so a restart loses nothing and the
+    ordinary recovery still applies."""
+    agent, engine, control = _silent(monkeypatch)
+    monkeypatch.setattr(agent, "_backfill_mode", lambda: "window")
+    sl = SpecSlice.from_claim({
+        "run_id": 1, "slot": 0, "total_workers": 3, "lease_id": "le",
+        "engine": "eventgen",
+        "bundle": {"url": "/tmp/pack"}, "share": {"eps": 5000},
+        "hec": {"url": "http://h:8088", "index": "loadtest"},
+        "telemetry": {"interval_s": 0.01}, "released": True,
+        "backfill": {"start_s": 1.0, "end_s": 601.0, "density_eps": 40.0},
+    })
+    _run_slice(agent, control, sl)
+    engine.restart.assert_called_once()

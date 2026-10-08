@@ -72,6 +72,11 @@ class SpecSlice:
     backfill_start_s: Optional[float] = None   # epoch (window start)
     backfill_end_s: Optional[float] = None     # epoch (window end)
     backfill_resolution_s: Optional[float] = None  # metrics step (default: pack resolution)
+    # How dense the history should be, in eps across the whole fleet: the
+    # spec's own live rate. Distinct from rate_value, which is this worker's
+    # share of the DELIVERY cap. The engine generates at the density; the
+    # bucket releases at the delivery share.
+    backfill_density_eps: Optional[float] = None
     # "pack": an eps run follows the pack's time-of-day maps (see shaping.py);
     # None/"flat": the classic flat rate.
     rate_shape: Optional[str] = None
@@ -127,6 +132,7 @@ class SpecSlice:
         bf_start = backfill.get("start_s")
         bf_end = backfill.get("end_s")
         bf_res = backfill.get("resolution_s")
+        bf_density = backfill.get("density_eps")
 
         return cls(
             run_id=doc.get("run_id"),
@@ -153,6 +159,7 @@ class SpecSlice:
             backfill_start_s=float(bf_start) if bf_start is not None else None,
             backfill_end_s=float(bf_end) if bf_end is not None else None,
             backfill_resolution_s=float(bf_res) if bf_res is not None else None,
+            backfill_density_eps=float(bf_density) if bf_density is not None else None,
             rate_shape=(doc.get("rate_shape") or None),
         )
 
@@ -209,6 +216,7 @@ class SpecSlice:
             backfill_start_s=_envf("STOKER_BACKFILL_START_S"),
             backfill_end_s=_envf("STOKER_BACKFILL_END_S"),
             backfill_resolution_s=_envf("STOKER_BACKFILL_RESOLUTION_S"),
+            backfill_density_eps=_envf("STOKER_BACKFILL_DENSITY_EPS"),
             rate_shape=((__import__("os").environ.get("STOKER_RATE_SHAPE") or "").strip().lower() or None),
         )
 

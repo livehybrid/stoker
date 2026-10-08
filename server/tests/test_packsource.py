@@ -267,3 +267,92 @@ def test_boot_with_nothing_configured_does_nothing(db_session, settings, monkeyp
     monkeypatch.delenv(packsource.SOURCE_ENV, raising=False)
     monkeypatch.delenv(packsource.REPOS_ENV, raising=False)
     assert packsource.load_from_env(db_session, settings) is None
+
+
+# --------------------------------------------------------------------------- #
+# Describe / push by hand
+# --------------------------------------------------------------------------- #
+
+def test_describe_reports_nothing_when_unconfigured(monkeypatch):
+    monkeypatch.delenv(packsource.SOURCE_ENV, raising=False)
+    monkeypatch.delenv(packsource.WRITE_ENV, raising=False)
+    info = packsource.describe()
+    assert info == {"configured": False, "writable": False, "kind": None,
+                    "location": None, "error": None}
+
+
+def test_describe_names_the_destination(monkeypatch, tmp_path):
+    monkeypatch.setenv(packsource.SOURCE_ENV, "s3://my-bucket/my-packs")
+    monkeypatch.setenv(packsource.WRITE_ENV, "1")
+    info = packsource.describe()
+    assert info["configured"] and info["writable"]
+    assert info["kind"] == "s3"
+    assert info["location"] == "s3://my-bucket/my-packs"
+    assert info["error"] is None
+    # Read-only is the default, and is a distinct state from unconfigured: the
+    # Push button must not appear for it.
+    monkeypatch.delenv(packsource.WRITE_ENV)
+    monkeypatch.setenv(packsource.SOURCE_ENV, str(tmp_path))
+    info = packsource.describe()
+    assert info["configured"] and not info["writable"]
+    assert info["kind"] == "directory"
+
+
+def test_describe_reports_a_bad_source_instead_of_raising(monkeypatch):
+    # A typo in a ConfigMap belongs on the Packs page, not in a 500.
+    monkeypatch.setenv(packsource.SOURCE_ENV, "ftp://nope/packs")
+    info = packsource.describe()
+    assert info["configured"] and info["error"]
+    assert info["kind"] is None
+
+
+def test_publish_endpoint_refuses_a_read_only_source(
+        client, db_session, uploads, tmp_path, monkeypatch):
+    """Both "no source" and "read-only source" are configuration, so they are
+    409s an operator can act on rather than a silently successful no-op."""
+    store = packsource.DirectoryStore(str(tmp_path / "bucket"))
+    store.put("demo.tar.gz", _archive("demo"))
+    packsource.sync_from_store(db_session, store, uploads)
+    db_session.commit()
+    pack = db_session.scalar(select(Pack).where(Pack.name == "demo"))
+
+    monkeypatch.delenv(packsource.SOURCE_ENV, raising=False)
+    monkeypatch.delenv(packsource.WRITE_ENV, raising=False)
+    assert client.get("/api/pack-source").json()["configured"] is False
+    r = client.post("/api/packs/%d/publish" % pack.id)
+    assert r.status_code == 409 and "STOKER_PACK_SOURCE" in r.json()["detail"]
+
+    monkeypatch.setenv(packsource.SOURCE_ENV, str(tmp_path / "bucket"))
+    r = client.post("/api/packs/%d/publish" % pack.id)
+    assert r.status_code == 409 and "read-only" in r.json()["detail"]
+
+
+def test_publish_endpoint_writes_the_archive(
+        client, db_session, uploads, tmp_path, monkeypatch):
+    bucket = tmp_path / "bucket"
+    store = packsource.DirectoryStore(str(bucket))
+    store.put("demo.tar.gz", _archive("demo"))
+    packsource.sync_from_store(db_session, store, uploads)
+    db_session.commit()
+    pack = db_session.scalar(select(Pack).where(Pack.name == "demo"))
+
+    out = tmp_path / "push-target"
+    monkeypatch.setenv(packsource.SOURCE_ENV, str(out))
+    monkeypatch.setenv(packsource.WRITE_ENV, "1")
+    info = client.get("/api/pack-source").json()
+    assert info["writable"] is True and info["location"] == str(out)
+
+    r = client.post("/api/packs/%d/publish" % pack.id)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["published"] is True
+    # The same filename Download produces, so a key in the bucket and a file on
+    # disk are one artefact.
+    assert body["key"].endswith(packsource.ARCHIVE_SUFFIX)
+    assert (out / body["key"]).is_file()
+
+
+def test_publish_endpoint_404s_an_unknown_pack(client, monkeypatch, tmp_path):
+    monkeypatch.setenv(packsource.SOURCE_ENV, str(tmp_path))
+    monkeypatch.setenv(packsource.WRITE_ENV, "1")
+    assert client.post("/api/packs/999999/publish").status_code == 404

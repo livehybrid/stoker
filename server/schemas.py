@@ -692,17 +692,50 @@ class TelemetrySlice(BaseModel):
     interval_s: float = 5
 
 
+class PackSourceInfo(BaseModel):
+    """Where packs are mirrored to and from (``STOKER_PACK_SOURCE``).
+
+    Reported so the Packs page can say whether pushing is possible at all,
+    instead of the whole feature being an invisible side effect of two
+    environment variables. ``location`` is an ``s3://bucket/prefix`` or a
+    directory and never carries credentials: boto3 takes those from its own
+    chain. ``error`` is set when the source is configured but unusable (a typo,
+    an s3 source in an image without boto3), which belongs on the page rather
+    than in a log nobody reads.
+    """
+
+    configured: bool
+    writable: bool
+    kind: Optional[str] = None          # s3 | directory
+    location: Optional[str] = None
+    error: Optional[str] = None
+
+
+class PackPublishResult(BaseModel):
+    """The outcome of pushing one pack to the pack source."""
+
+    published: bool
+    key: Optional[str] = None
+    location: Optional[str] = None
+    detail: Optional[str] = None
+
+
 class BackfillSlice(BaseModel):
     """The ``backfill`` object in a slice: the historical window the worker fills.
 
-    Present only on a backfill run. ``start_s`` / ``end_s`` are epoch seconds;
+    Present only on a backfill run. ``start_s`` / ``end_s`` are epoch seconds and
+    need not end at now (an arbitrary historical range is the point);
     ``resolution_s`` is the metrics step (null for eventgen, which derives its
-    window from ``end_s - start_s``). Declared here so the claim's response_model
-    does not strip it (see :func:`server.lifecycle.build_slice`)."""
+    window from ``end_s - start_s``). ``density_eps`` is how dense the history
+    should be, fleet-wide, which is NOT the delivery rate in ``share``: the
+    engine generates at the density, the token bucket releases at the share.
+    Every field is declared here or the claim's response_model strips it (see
+    :func:`server.lifecycle.build_slice`)."""
 
     start_s: float
     end_s: float
     resolution_s: Optional[float] = None
+    density_eps: Optional[float] = None
 
 
 class SpecSliceOut(BaseModel):

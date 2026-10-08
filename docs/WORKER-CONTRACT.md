@@ -197,15 +197,24 @@ The metrics engine generates synthetic Splunk **metric** data points over a shap
 Backfill generates a window of **history** (events/points stamped at their past time) as fast as the target accepts, up to a delivery cap. It is a per-run option: the control plane launches a **gated eps run at the cap** (so the token bucket paces delivery and a large window does not overwhelm Splunk) and carries the window in the claim slice:
 
 ```json
-"backfill": {"start_s": <epoch>, "end_s": <epoch>, "resolution_s": <float|null>}
+"backfill": {"start_s": <epoch>, "end_s": <epoch>, "resolution_s": <float|null>, "density_eps": <float|null>}
 ```
+
+`start_s`/`end_s` are an arbitrary range, not necessarily ending now: a range that ended months ago is how "backfill January to April" reaches the worker.
+
+**Two rates, deliberately different.** `share` (as always) is this worker's slice of the **delivery** cap: how fast bytes are pushed, which is what protects the target. `density_eps` is the spec's own live rate across the **whole fleet**: how dense the history should be, which is what decides how many events exist. Conflating them is what used to make a backfill take exactly as long as the period it covered, because `events = window x eps` divided by a delivery rate of the same `eps` cancels to `window`.
 
 Both engines re-use the normal delivery path (the agent stamps nothing new; the engine sets the historical `time`):
 
 - **metrics** — the engine (`STOKER_METRICS_BACKFILL_START_S`/`END_S`/`RESOLUTION_S`, set by the `MetricsRunner` from the slice) walks the window **in time order** (stateful `random_walk`/`counter` evolve correctly), stamps each point at its historical time, emits hot (the bucket paces), then **exits**. The agent's engine-exit path drains the run. Preserves the daily shape across the window.
-- **eventgen** — `confrewrite` widens each stanza's timestamp window to `earliest = -<window>s`, `latest = now` so the sample's timestamp token stamps every event a historical time across `[now-window, now]` (text timestamp and `_time` agree). The run is bounded by the **duration deadline** (the control plane sizes it to the volume). Uniform density; the diurnal shape is not reproduced. (eventgen's native `backfill` rater is non-functional in the vendored tree, hence this approach.)
+- **eventgen / firebox (`backfill_mode = sweep`)** — the engine's own ordered backfill. `confrewrite` sets `backfill = -<start>s`, `backfillEnd = -<end>s` (omitted when the range runs to now) and `backfillOnly = true`, and sets `count`/`interval` from `density_eps / total_workers`, so the engine walks the range from its start one interval at a time, each with its own timestamp window. The window therefore **fills in order**: a run cut short by the duration deadline leaves a shorter *complete* history instead of a sparse smear, and `backfillOnly` stops the engine at the end of the range rather than letting it carry on stamping present-time events. Every worker sweeps the same range at its own share of the density. The engine exits when done and the agent's engine-exit path drains the run.
+- **eventgen / the vendored Python engine (`backfill_mode = window`)** — the fallback, because that engine's native `backfill` rater is non-functional in the vendored tree. `confrewrite` widens each stanza's window to `earliest = -<start>s`, `latest = -<end>s` (or `now`), so every event gets a uniformly random historical time across the range. Density is then a by-product of `duration x delivery rate`, so the run depends on the **duration deadline** and part-finished progress reads as scatter.
 
-Standalone: `STOKER_BACKFILL_START_S` / `STOKER_BACKFILL_END_S` / `STOKER_BACKFILL_RESOLUTION_S`. **Caveat:** re-running a backfill appends duplicate points/events (Splunk metrics/`mstats` double-count) — run once, or clear the window first.
+A sweep is **stateful** in a way the widening was not: it walks the range from the start and cannot resume from where it stopped. The agent therefore does not apply the zero-output engine restart to one — a restart would re-send the history already written and still never reach the end of the range within the deadline — and drains the run as failed instead (`EXIT_NO_OUTPUT`). A clean exit at the end of the sweep is the normal, successful ending and is handled by the engine-exit path, which is checked first.
+
+Which mode applies is decided **on the worker**, by `Agent._backfill_mode()`, for the same reason as `conf_declares_rotation`: only the worker knows which engine binary it will actually run (`STOKER_EVENTGEN_IMPL`, a `STOKER_ENGINE_CMD` override, whether the firebox binary is present). Neither eventgen mode reproduces the diurnal shape across the window; metrics backfill does.
+
+Standalone: `STOKER_BACKFILL_START_S` / `STOKER_BACKFILL_END_S` / `STOKER_BACKFILL_RESOLUTION_S` / `STOKER_BACKFILL_DENSITY_EPS`. **Caveat:** re-running a backfill appends duplicate points/events (Splunk metrics/`mstats` double-count) — run once, or clear the window first.
 
 ## Unix socket protocol (engine -> agent)
 

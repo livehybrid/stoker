@@ -211,6 +211,13 @@ def test_backfill_survives_the_claim_response_model(client, db_session, settings
     body = resp.json()
     assert body.get("backfill"), "claim response_model stripped the backfill window"
     assert body["backfill"]["start_s"] < body["backfill"]["end_s"]
+    # The density has to survive the same allowlist. Without it the worker falls
+    # back to generating at the DELIVERY rate, which is the bug that made a
+    # backfill take exactly as long as the window it covered.
+    assert body["backfill"]["density_eps"] == 50.0, \
+        "claim response_model stripped the backfill density"
+    # And it is genuinely a different number from the delivery share.
+    assert body["share"]["eps"] != body["backfill"]["density_eps"]
 
 
 def test_normal_run_carries_no_backfill(client, db_session, settings, make_pack, fake_driver):

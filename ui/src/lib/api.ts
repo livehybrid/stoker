@@ -29,6 +29,8 @@ import type {
   WordlistInfo,
   PackPreview,
   PackPreviewRun,
+  PackPublishResult,
+  PackSourceInfo,
   PseudonymKeyInfo,
   PackUploadMeta,
   RepoCreate,
@@ -266,6 +268,12 @@ export const packs = {
   // either way), giving a fast copy that needs network on the receiving side.
   exportUrl: (id: number, includeDataset = true) =>
     `${API_BASE}/packs/${id}/export${includeDataset ? "" : "?include_dataset=false"}`,
+  // Push this pack to the configured pack source (s3:// or a directory) now.
+  // Packs are mirrored on save already; this is the "did that land, and send it
+  // again" affordance, and the only way to mirror a pack that predates the
+  // source being configured. 409 when no source is set or it is read-only.
+  publish: (id: number) =>
+    request<PackPublishResult>("POST", `/packs/${id}/publish`),
   preview: (id: number) =>
     request<PackPreview>("GET", `/packs/${id}/preview`),
   // Render a few sample events in-process (no fleet, no HEC target). `n` is
@@ -295,6 +303,11 @@ export const metricPacks = {
 // --------------------------------------------------------------------------- //
 // Pack builder (sample events -> eventgen pack with shipped word lists)
 // --------------------------------------------------------------------------- //
+
+// Where packs are mirrored to and from. Cached hard by the caller: it reflects
+// deployment environment variables, which cannot change without a restart.
+export const packSource = () =>
+  request<PackSourceInfo>("GET", "/pack-source");
 
 export const packBuilder = {
   wordlists: () => request<WordlistInfo[]>("GET", "/pack-builder/wordlists"),
@@ -421,6 +434,7 @@ export const api = {
   fleets,
   repos,
   packs,
+  packSource,
   metricPacks,
   packBuilder,
   specs,

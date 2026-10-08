@@ -13,7 +13,7 @@ from __future__ import annotations
 import configparser
 import logging
 import math
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 log = logging.getLogger("stoker.confrewrite")
 
@@ -173,22 +173,39 @@ def _fmt_number(value):
 
 def rewrite(parser, rate_mode, share_value, overdrive, sample_dir,
             slot=0, total_workers=1, weights=None, backfill_window_s=None,
-            backfill_end_offset_s=None):
-    # type: (configparser.RawConfigParser, str, Optional[float], float, str, int, int, Optional[Sequence[float]], Optional[float], Optional[float]) -> configparser.RawConfigParser
+            backfill_end_offset_s=None, backfill_mode="window",
+            backfill_density_eps=None):
+    # type: (configparser.RawConfigParser, str, Optional[float], float, str, int, int, Optional[Sequence[float]], Optional[float], Optional[float], str, Optional[float]) -> configparser.RawConfigParser
     """Apply the contract's rewrite rules in place and return the parser.
 
     ``backfill_window_s`` (when set) turns this into an eventgen **backfill**
-    run: each paced stanza's timestamp window is widened so the sample's
-    timestamp token stamps every generated event a historical time across the
-    requested range. ``backfill_end_offset_s`` (seconds back from now that the
-    window ENDS, 0 or None meaning "up to now") is what allows an arbitrary
-    range such as January to April rather than only "the last N" (the event text timestamp and
-    the HEC ``_time`` agree). The run generates at the paced cap and is bounded by
-    the agent's duration deadline (the control plane sizes it to the backfill
-    volume). This populates the window uniformly; the diurnal shape across the
-    window is not reproduced (metrics backfill does that). We use this rather than
-    eventgen's native ``backfill`` rater, which is non-functional in this vendored
-    tree.
+    run over a historical range. ``backfill_end_offset_s`` (seconds back from now
+    that the window ENDS, 0 or None meaning "up to now") is what allows an
+    arbitrary range such as January to April rather than only "the last N". Both
+    bounds are written as offsets back from now, which both engines parse the
+    same way, and the event text timestamp and the HEC ``_time`` agree either way.
+
+    ``backfill_mode`` picks how the history is produced, because the two engines
+    can do very different things with it:
+
+    ``"sweep"`` (firebox)
+        The engine's own ordered backfill: it walks the range from the start,
+        one interval at a time, each with its own timestamp window. The window
+        therefore FILLS, in order, and a run that is cut short leaves a shorter
+        complete history. ``backfill_density_eps`` (fleet-wide eps) sets the
+        count/interval, so the history is exactly as dense as the spec asks
+        while the agent's token bucket still paces delivery.
+
+    ``"window"`` (the vendored Python eventgen)
+        Its native ``backfill`` rater is non-functional in that tree, so
+        instead: widen each paced stanza's timestamp window across the range, so
+        every event gets a uniformly random historical time. Density is then a
+        by-product of ``duration x delivery rate``, which is why a part-finished
+        run reads as a sparse smear across the range rather than a filled
+        window. Kept as the fallback because it is all that engine can do.
+
+    Neither mode reproduces the diurnal shape across the window (metrics
+    backfill does that).
     """
     _strip_output_keys(parser)
 
@@ -197,6 +214,15 @@ def rewrite(parser, rate_mode, share_value, overdrive, sample_dir,
         parser.set(section, "sampleDir", sample_dir)
 
     paced = [s for s in sample_sections(parser) if not _is_replay(parser, s)]
+
+    # Read while the stanzas still carry their DECLARED count/interval: the rate
+    # rewrite below replaces both with this worker's delivery share, and a sweep
+    # apportions the historical density by the pack's own proportions, not by
+    # numbers the rewrite has already put there.
+    sweep_weights = None  # type: Optional[Sequence[float]]
+    if backfill_mode == "sweep" and backfill_window_s and backfill_window_s > 0:
+        sweep_weights = weights if weights is not None \
+            else declared_eps_weights(parser, paced)
 
     if rate_mode == "eps":
         if share_value is None or share_value <= 0:
@@ -227,12 +253,99 @@ def rewrite(parser, rate_mode, share_value, overdrive, sample_dir,
         if backfill_end_offset_s and backfill_end_offset_s > 0:
             back_to_end = int(backfill_end_offset_s)
             back_to_start = back_to_end + int(backfill_window_s)
-        for section in paced:
-            parser.set(section, "earliest", "-%ds" % back_to_start)
-            parser.set(section, "latest",
-                       "now" if back_to_end == 0 else "-%ds" % back_to_end)
+        if backfill_mode == "sweep":
+            _rewrite_backfill_sweep(parser, paced, back_to_start, back_to_end,
+                                    backfill_density_eps, sweep_weights)
+        else:
+            for section in paced:
+                parser.set(section, "earliest", "-%ds" % back_to_start)
+                parser.set(section, "latest",
+                           "now" if back_to_end == 0 else "-%ds" % back_to_end)
 
     return parser
+
+
+def _rewrite_backfill_sweep(parser, sections, back_to_start, back_to_end,
+                            density_eps, weights):
+    # type: (configparser.RawConfigParser, List[str], int, int, Optional[float], Optional[Sequence[float]]) -> None
+    """Hand the range to firebox's ordered sweep instead of widening the window.
+
+    Two things are being set, and they are deliberately different numbers:
+
+    * ``backfill`` / ``backfillEnd`` bound the range, and ``backfillOnly`` stops
+      the engine when it reaches the end instead of carrying on live. Without
+      that last one a January-to-April backfill would start stamping
+      present-time events the moment it caught up.
+    * ``count`` / ``interval`` are the historical DENSITY, not the delivery
+      rate. Delivery is still paced by the agent's token bucket, so the sweep
+      advances at whatever the target accepts while the history it writes stays
+      exactly as dense as the spec asks. Under the widening these were the
+      delivery rate and density was left to fall out of the run's duration,
+      which is why the arithmetic used to cancel.
+
+    No overdrive is applied for the same reason: overdriving the engine exists
+    to stop the bucket starving on a live run, and here it would simply write a
+    denser history than was asked for.
+    """
+    for section in sections:
+        parser.set(section, "backfill", "-%ds" % back_to_start)
+        if back_to_end > 0:
+            parser.set(section, "backfillEnd", "-%ds" % back_to_end)
+        else:
+            parser.remove_option(section, "backfillEnd")
+        parser.set(section, "backfillOnly", "true")
+        # The sweep supplies each interval's own window, so earliest/latest are
+        # never read. Set them to the range anyway: a human reading the
+        # rewritten conf should not have to know that to see what it covers.
+        parser.set(section, "earliest", "-%ds" % back_to_start)
+        parser.set(section, "latest",
+                   "now" if back_to_end == 0 else "-%ds" % back_to_end)
+    if density_eps is None or density_eps <= 0:
+        # Nothing said how dense the history should be (a spec with no eps of
+        # its own). Leave the paced counts as the eps rewrite set them, which is
+        # the delivery rate: the previous behaviour for those modes.
+        return
+    if weights is None:
+        weights = declared_eps_weights(parser, sections)
+    if len(weights) != len(sections):
+        raise ConfRewriteError("weights length %d != stanza count %d"
+                               % (len(weights), len(sections)))
+    total_weight = sum(weights)
+    if total_weight <= 0:
+        raise ConfRewriteError("backfill density needs a positive stanza weight")
+    for section, weight in zip(sections, weights):
+        eps = density_eps * weight / total_weight
+        if eps <= 0:
+            # This stanza contributes no history. `end = 0` is how eventgen says
+            # "generate nothing", and is honest in a way count = 0 is not.
+            parser.set(section, "end", "0")
+            continue
+        interval, count = _density_count_interval(eps)
+        parser.set(section, "interval", str(interval))
+        parser.set(section, "count", str(count))
+        parser.remove_option(section, "randomizeCount")
+
+
+# A one-second interval can only express a whole number of events per second, so
+# a stanza at 1.4 eps would round to 1 and write a history 29 % thinner than
+# asked. Stretching the interval until the count is at least this big keeps the
+# rounding error under about 5 %, and the wider window is the natural spacing for
+# that rate anyway (events land uniformly inside their own interval).
+DENSITY_MIN_COUNT = 10
+# ...but not indefinitely: an interval longer than this coarsens the sweep's
+# ordering for no gain, and below roughly one event per five minutes per stanza
+# no integer count/interval pair represents the rate at all.
+DENSITY_MAX_INTERVAL_S = 3600
+
+
+def _density_count_interval(eps):
+    # type: (float) -> Tuple[int, int]
+    """``(interval, count)`` whose ratio is as close to ``eps`` as integers get."""
+    if eps >= DENSITY_MIN_COUNT:
+        return 1, max(1, int(round(eps)))
+    interval = min(DENSITY_MAX_INTERVAL_S,
+                   int(math.ceil(DENSITY_MIN_COUNT / eps)))
+    return interval, max(1, int(round(eps * interval)))
 
 
 def _rewrite_eps(parser, sections, share_eps, overdrive, weights):
@@ -303,11 +416,16 @@ def assigned_stanza_count(parser, rate_mode):
       always counts as assigned.
     * ``mode = replay`` stanzas always emit (engine-paced, never split) and
       count as assigned regardless of mode.
+    * ``end = 0`` is eventgen for "generate nothing", which a backfill sweep
+      writes for a stanza that holds no share of the history. It emits in no
+      mode, so it is never assigned.
     """
     replay = [s for s in sample_sections(parser) if _is_replay(parser, s)]
     paced = [s for s in sample_sections(parser) if not _is_replay(parser, s)]
     assigned = len(replay)
     for section in paced:
+        if (parser.get(section, "end", fallback="") or "").strip() == "0":
+            continue
         if rate_mode != "count_interval":
             assigned += 1
             continue
@@ -322,13 +440,16 @@ def assigned_stanza_count(parser, rate_mode):
 
 def rewrite_file(src, dst, rate_mode, share_value, overdrive, sample_dir,
                  slot=0, total_workers=1, weights=None, backfill_window_s=None,
-                 backfill_end_offset_s=None):
-    # type: (str, str, str, Optional[float], float, str, int, int, Optional[Sequence[float]], Optional[float]) -> str
+                 backfill_end_offset_s=None, backfill_mode="window",
+                 backfill_density_eps=None):
+    # type: (str, str, str, Optional[float], float, str, int, int, Optional[Sequence[float]], Optional[float], Optional[float], str, Optional[float]) -> str
     """Load src, rewrite, write the private copy to dst. Returns dst."""
     parser = load_conf(src)
     rewrite(parser, rate_mode, share_value, overdrive, sample_dir,
             slot=slot, total_workers=total_workers, weights=weights,
             backfill_window_s=backfill_window_s,
-            backfill_end_offset_s=backfill_end_offset_s)
+            backfill_end_offset_s=backfill_end_offset_s,
+            backfill_mode=backfill_mode,
+            backfill_density_eps=backfill_density_eps)
     write_conf(parser, dst)
     return dst

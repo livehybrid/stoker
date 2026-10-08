@@ -977,7 +977,9 @@ function JobWizard() {
                 double-count. Run once, or clear the window first.
                 {isMetrics
                   ? " Metrics backfill preserves the daily shape across the window."
-                  : " Eventgen backfill fills the window to now with uniform density."}
+                  : " Eventgen backfill sweeps the range in order from its start" +
+                    " at an even density, so stopping it early leaves a shorter" +
+                    " complete history rather than a sparse one."}
               </Callout>
             </Stack>
           )}

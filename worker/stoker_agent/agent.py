@@ -223,18 +223,36 @@ class Agent(object):
                     # A backfill window turns it into an eventgen backfill run.
                     backfill_window_s = None
                     backfill_end_offset_s = None
+                    backfill_mode = "window"
+                    backfill_density_eps = None
                     if sl.backfill_start_s is not None and sl.backfill_end_s is not None:
                         backfill_window_s = sl.backfill_end_s - sl.backfill_start_s
                         # How far back the window ENDS. Zero for the common
                         # "last N" case; positive for a historical range, which
                         # is what stops every window being pinned to now.
                         backfill_end_offset_s = max(0.0, self._clock() - sl.backfill_end_s)
+                        backfill_mode = self._backfill_mode()
+                        # Every worker sweeps the SAME range, each writing its
+                        # own share of the density, so the window fills in order
+                        # whatever the fleet size.
+                        if sl.backfill_density_eps:
+                            backfill_density_eps = (
+                                float(sl.backfill_density_eps)
+                                / max(1, int(sl.total_workers or 1)))
+                        log.info("backfill: %.0fs window ending %.0fs ago, %s mode"
+                                 ", density %s eps for this worker",
+                                 backfill_window_s, backfill_end_offset_s,
+                                 backfill_mode,
+                                 "unstated" if backfill_density_eps is None
+                                 else "%.4g" % backfill_density_eps)
                     confrewrite.rewrite_file(
                         pack.conf_path, conf_path, sl.rate_mode, self._engine_share(sl),
                         cfg.overdrive, pack.samples_dir,
                         slot=sl.slot, total_workers=sl.total_workers,
                         backfill_window_s=backfill_window_s,
-                        backfill_end_offset_s=backfill_end_offset_s)
+                        backfill_end_offset_s=backfill_end_offset_s,
+                        backfill_mode=backfill_mode,
+                        backfill_density_eps=backfill_density_eps)
                     self._record_assigned_eventgen(conf_path, sl)
                 # PISTON / metrics: the conf-rewrite is skipped entirely; those
                 # engines read their config from the pack (replay / metricgen).
@@ -427,6 +445,28 @@ class Agent(object):
             backfill_end_s=sl.backfill_end_s,
             backfill_resolution_s=sl.backfill_resolution_s,
             cwd=pack.pack_dir, log_dir=log_dir)
+
+    def _backfill_mode(self):
+        # type: () -> str
+        """How a backfill produces its history.
+
+        ``sweep`` is firebox's native ordered backfill: it walks the range from
+        the start, so the window fills and a run that is cut short leaves a
+        shorter complete history. ``window`` is the widening every other
+        eventgen can manage, where each event gets a uniformly random time
+        across the whole range and a part-finished run reads as a sparse smear.
+
+        Decided on the worker rather than in the control plane for the same
+        reason as ``conf_declares_rotation``: only the worker knows which engine
+        binary it will actually run.
+        """
+        if os.environ.get("STOKER_ENGINE_CMD"):
+            return "window"  # a custom launcher: implementation unknown
+        try:
+            impl, _binary = eventgen_impl()
+        except EngineError:
+            return "window"
+        return "sweep" if impl == "firebox" else "window"
 
     def _eventgen_envelope(self, cfg, sl, other_engine):
         # type: (Config, SpecSlice, bool) -> tuple
@@ -648,6 +688,11 @@ class Agent(object):
         last_received = self._sock.received if self._sock else 0
         last_progress = time.monotonic()
         engine_restarts = 0
+        # A firebox backfill walks the range in order and cannot be resumed from
+        # where it stopped, which changes what a stall means (see below).
+        sweeping = (sl.backfill_start_s is not None
+                    and sl.engine not in ("rawreplay", "metrics")
+                    and self._backfill_mode() == "sweep")
         while not self._drain_event.is_set():
             now_wall = self._clock()
             if deadline is not None and now_wall >= deadline:
@@ -664,6 +709,20 @@ class Agent(object):
                     last_received = received
                     last_progress = time.monotonic()
                 elif time.monotonic() - last_progress >= zero_out_s:
+                    if sweeping:
+                        # A sweep is stateful: it walks the range from the
+                        # start, so a restart re-sends the part it has already
+                        # written and can no longer reach the end within the
+                        # deadline. Restarting would turn a stall into
+                        # duplicated history plus an unfinished window, so say
+                        # what happened instead of papering over it.
+                        log.error("no engine output for %.0fs during a backfill "
+                                  "sweep; restarting would re-send the history "
+                                  "already written, so draining as failed",
+                                  zero_out_s)
+                        self._exit_code = EXIT_NO_OUTPUT
+                        self.request_drain("no-engine-output")
+                        break
                     if engine_restarts < self._cfg.zero_output_max_restarts:
                         engine_restarts += 1
                         log.warning("no engine output for %.0fs (0 eps); "

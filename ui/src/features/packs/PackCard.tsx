@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api } from "../../lib/api";
 import type { PackOut } from "../../lib/types";
@@ -18,7 +18,9 @@ import {
 // Badges flag exceptions only -- a failed lint, or metadata Stoker measured
 // rather than read from an author's pack.yaml -- because a badge that appears
 // on every card carries no information. Download exports the pack as the archive another instance's
-// "Upload pack" accepts, so a pack built here can move between instances.
+// "Upload pack" accepts, so a pack built here can move between instances; Push
+// sends that same archive to the configured pack source (s3:// or a directory),
+// and appears only when one is configured for writing.
 // Local packs (uploaded / registered / built here — no repo) also get Delete;
 // a repo-indexed pack's lifecycle belongs to its repo, so no delete appears
 // for those (the server refuses it anyway).
@@ -43,6 +45,26 @@ export function PackCard({ pack, onPreview }: Props) {
   const tags = asStringList(pack.tags_json);
   const isMetric = packIsMetrics(pack);
   const isLocal = pack.repo_id === null || pack.repo_id === undefined;
+
+  // Whether pushing is possible at all. Deployment environment variables, so it
+  // cannot change without a restart: fetched once and never refetched, and a
+  // failure simply hides the button rather than breaking the card.
+  const source = useQuery({
+    queryKey: ["pack-source"],
+    queryFn: api.packSource,
+    staleTime: Infinity,
+    retry: false,
+  });
+  const canPush = source.data?.writable === true;
+
+  const push = useMutation({
+    mutationFn: () => api.packs.publish(pack.id),
+    onSuccess: (r) =>
+      toast.success(
+        r.key ? `Pushed "${pack.name}" as ${r.key}` : `Pushed "${pack.name}"`,
+      ),
+    onError: (e) => toast.error(e instanceof Error ? e.message : "Push failed"),
+  });
 
   const del = useMutation({
     mutationFn: () => api.packs.delete(pack.id),
@@ -163,6 +185,20 @@ export function PackCard({ pack, onPreview }: Props) {
           >
             <Button variant="secondary">Download</Button>
           </a>
+          {/* Saving a pack already mirrors it, but nothing said so and a pack
+              that predates the source being configured was never mirrored at
+              all. Shown only when a source is configured for writing, so it
+              never appears as a button that cannot work. */}
+          {canPush && (
+            <Button
+              variant="secondary"
+              onClick={() => push.mutate()}
+              disabled={push.isPending}
+              title={`Push this pack to ${source.data?.location ?? "the pack source"}`}
+            >
+              {push.isPending ? "Pushing…" : "Push"}
+            </Button>
+          )}
           {isMetric ? (
             // A metric pack has no eventgen stanzas to preview; edit it in the
             // builder instead.

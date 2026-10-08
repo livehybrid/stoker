@@ -58,6 +58,8 @@ from ..schemas import (
     PackOut,
     PackPreview,
     PackPreviewRun,
+    PackPublishResult,
+    PackSourceInfo,
     RepoCreate,
     RepoCreated,
     RepoOut,
@@ -536,6 +538,60 @@ async def upload_pack(
     # a refused write must not fail the upload.
     packsource.publish_pack(pack, settings)
     return pack
+
+
+@router.get("/pack-source", response_model=PackSourceInfo)
+def get_pack_source():
+    # type: (...) -> Any
+    """Where packs are mirrored to and from, so the UI can say so.
+
+    Mirroring already happened on every pack save when ``STOKER_PACK_SOURCE``
+    and ``STOKER_PACK_SOURCE_WRITE`` were both set, but nothing in the product
+    reported it, so an operator had no way to tell a configured push from a
+    silent no-op. Read-only and credential-free (see
+    :func:`server.packsource.describe`).
+    """
+    return PackSourceInfo(**packsource.describe())
+
+
+@router.post("/packs/{pack_id}/publish", response_model=PackPublishResult)
+def publish_pack_to_source(pack_id: int, db: Session = Depends(get_db)):
+    # type: (...) -> Any
+    """Push one pack to the configured pack source, now.
+
+    The same export the Download button produces, under the same filename, so a
+    key in the bucket and a file on an operator's disk are one artefact. Packs
+    are already mirrored automatically when they are saved; this exists because
+    "did that reach the bucket?" and "push this one again" had no answer in the
+    UI, and because a pack that predates the source being configured would
+    otherwise never be mirrored at all.
+
+    ``409`` when no source is configured, or when it is configured read-only:
+    both are configuration the operator must change, not a transient failure,
+    and saying so is more use than a silent success.
+    """
+    pack = db.get(Pack, pack_id)
+    if pack is None:
+        raise HTTPException(status_code=404, detail="unknown pack")
+    info = packsource.describe()
+    if not info["configured"]:
+        raise HTTPException(
+            status_code=409,
+            detail="no pack source is configured (set STOKER_PACK_SOURCE)")
+    if info.get("error"):
+        raise HTTPException(status_code=409, detail=info["error"])
+    if not info["writable"]:
+        raise HTTPException(
+            status_code=409,
+            detail="the pack source is read-only (set STOKER_PACK_SOURCE_WRITE=1)")
+    key = packsource.publish_pack(pack, get_settings())
+    if key is None:
+        # publish_pack never raises, so an operator-initiated push has to turn
+        # its None back into something the page can show.
+        raise HTTPException(
+            status_code=502,
+            detail="the pack source refused the write; see the control-plane log")
+    return PackPublishResult(published=True, key=key, location=info["location"])
 
 
 @router.delete("/packs/{pack_id}", status_code=204)

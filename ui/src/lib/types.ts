@@ -139,6 +139,23 @@ export interface PackPreviewRun {
   events: string[];
 }
 
+// Where packs are mirrored to and from (STOKER_PACK_SOURCE). `location` never
+// carries credentials; `error` is set when a source is configured but unusable.
+export interface PackSourceInfo {
+  configured: boolean;
+  writable: boolean;
+  kind: string | null;          // s3 | directory
+  location: string | null;
+  error: string | null;
+}
+
+export interface PackPublishResult {
+  published: boolean;
+  key: string | null;
+  location: string | null;
+  detail: string | null;
+}
+
 // --------------------------------------------------------------------------- //
 // Metric packs (UI-authored `metricgen` config -> engine: metrics)
 // --------------------------------------------------------------------------- //
