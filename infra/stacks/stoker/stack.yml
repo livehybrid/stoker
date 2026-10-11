@@ -41,6 +41,13 @@ services:
       - STOKER_ADMIN_USER=${STOKER_ADMIN_USER:-}
       - STOKER_ADMIN_PASSWORD=${STOKER_ADMIN_PASSWORD:-}
       - STOKER_TRUSTED_PROXIES=${STOKER_TRUSTED_PROXIES:-}
+      # A customer's HEC behind a private or internal CA: point this at a PEM
+      # bundle mounted into the container. Used only where the target's own
+      # verify_tls is on, and projected to fleet workers automatically, so they
+      # need no mount of their own. Without it the only setting that works
+      # against a private CA is verify_tls off, which ships a HEC token over a
+      # connection nothing checked.
+      - STOKER_CA_BUNDLE=${STOKER_CA_BUNDLE:-}
       - STOKER_AUTH_HEADER=${STOKER_AUTH_HEADER:-X-Forwarded-User}
       - STOKER_PROXY_DEFAULT_ROLE=${STOKER_PROXY_DEFAULT_ROLE:-operator}
       - STOKER_SESSION_TTL=${STOKER_SESSION_TTL:-43200}

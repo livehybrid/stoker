@@ -159,6 +159,12 @@ class Settings:
     # so existing Settings(...) call sites stay valid; a per-fleet ``verify_tls``
     # still overrides it in SwarmDriver.from_fleet_config.
     portainer_verify_tls: bool = DEFAULT_PORTAINER_VERIFY_TLS
+    # PEM bundle (file, or a directory of them) that verifies a target's
+    # certificate where the public trust store will not: a customer's Splunk
+    # behind a private CA. Used only where the target's own verify_tls is on,
+    # and projected to fleet workers as PEM text because a control-plane path
+    # means nothing inside a worker container. See server/catrust.py.
+    ca_bundle: Optional[str] = None
 
     # --- Auth (all defaulted so existing Settings(...) call sites stay valid) --
     # Bootstrap admin from the environment: if both are set and the user is
@@ -499,6 +505,23 @@ def _backpressure_action(env):
     return raw
 
 
+def _resolve_ca_bundle(env):
+    # type: (Mapping[str, str]) -> Optional[str]
+    """Validate STOKER_CA_BUNDLE at boot, or raise.
+
+    Deliberately fatal. A deployment that was handed a certificate path and
+    silently fell back to the public trust store is the exact failure this
+    setting exists to prevent, and it would only surface later as every target
+    reading "down" for a reason nothing names.
+    """
+    from .catrust import CaBundleError, resolve_bundle  # noqa: PLC0415 - import cycle
+
+    try:
+        return resolve_bundle(env)
+    except CaBundleError as exc:
+        raise ConfigError(str(exc))
+
+
 def _get_bool(env, key, default=False):
     # type: (Mapping[str, str], str, bool) -> bool
     """Parse a boolean env var (1/true/yes/on are true; unset -> default)."""
@@ -604,6 +627,7 @@ def load_settings(env=None):
         portainer_host=_get(env, "PORTAINER_HOST"),
         portainer_token=_get(env, "PORTAINER_TOKEN"),
         portainer_endpoint=_get_int(env, "PORTAINER_ENDPOINT", DEFAULT_PORTAINER_ENDPOINT),
+        ca_bundle=_resolve_ca_bundle(env),
         portainer_verify_tls=_get_bool(env, "PORTAINER_VERIFY_TLS",
                                        DEFAULT_PORTAINER_VERIFY_TLS),
         bundle_dir=_get(env, "BUNDLE_DIR", DEFAULT_BUNDLE_DIR) or DEFAULT_BUNDLE_DIR,

@@ -30,7 +30,7 @@ from fastapi import (APIRouter, Depends, File, Form, HTTPException, Query,
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .. import (bundles, crypto, gitsync, lifecycle, packexport, packsource,
+from .. import (bundles, catrust, crypto, gitsync, lifecycle, packexport, packsource,
                 packupload, preview)
 from ..config import get_settings
 from ..db import get_db
@@ -2198,7 +2198,11 @@ def _probe_target(hec_url, token, verify_tls):
     auth = None  # type: Optional[str]
     detail_bits = []  # type: List[str]
     started = time.monotonic()
-    verify = bool(verify_tls)
+    # A customer's HEC behind a private CA verifies only against their bundle,
+    # so the probe has to use it too: a target that reads "down" here because
+    # of a certificate the deployment was told about would send the operator
+    # looking for a network fault that is not there.
+    verify = catrust.httpx_verify_arg(bool(verify_tls), get_settings().ca_bundle)
 
     try:
         with httpx.Client(timeout=_PROBE_TIMEOUT_S, verify=verify) as http:

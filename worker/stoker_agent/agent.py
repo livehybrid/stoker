@@ -46,11 +46,11 @@ _HEARTBEAT_KEYS = ("events_total", "bytes_total", "hec_2xx", "hec_4xx",
                    "hec_5xx", "hec_timeouts", "retries", "queue_depth")
 
 
-def _default_hec_factory(url, token, gzip_enabled, verify_tls, ack):
+def _default_hec_factory(url, token, gzip_enabled, verify_tls, ack, ca_bundle=None):
     # Imported lazily: hec_client needs requests wiring only at runtime.
     from .hec_client import HecClient
     return HecClient(url, token, gzip_enabled=gzip_enabled,
-                     verify_tls=verify_tls, ack=ack)
+                     verify_tls=verify_tls, ack=ack, ca_bundle=ca_bundle)
 
 
 def _default_engine_factory(conf_path, socket_path, cwd=None, extra_env=None):
@@ -257,9 +257,13 @@ class Agent(object):
                 # PISTON / metrics: the conf-rewrite is skipped entirely; those
                 # engines read their config from the pack (replay / metricgen).
 
+                # ca_bundle is passed on the one and only path, never
+                # conditionally: a seam whose fakes take fewer arguments than
+                # the real factory is how the fleet-position bug stayed hidden.
                 self._hec = self._hec_factory(
                     sl.hec_url, cfg.hec_token, gzip_enabled=sl.hec_gzip,
-                    verify_tls=cfg.hec_verify_tls, ack=sl.hec_ack)
+                    verify_tls=cfg.hec_verify_tls, ack=sl.hec_ack,
+                    ca_bundle=cfg.hec_ca_bundle)
                 self._bucket = TokenBucket(share_eps or 1.0, cfg.catchup_s,
                                            self._clock)
                 self._bucket.pause()  # nothing flows before T0

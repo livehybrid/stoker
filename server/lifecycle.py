@@ -39,6 +39,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from . import catrust
 from . import crypto
 from .config import Settings, get_settings
 from .drivers.base import DriverError, DriverRef, ExecutionDriver, RunSnapshot
@@ -2631,6 +2632,18 @@ def build_run_snapshot(run, spec, target, hec_token, settings=None, workers=None
     # TLS handshake against any self-signed HEC.
     if not target.verify_tls:
         env["STOKER_HEC_VERIFY_TLS"] = "0"
+    # The CA bundle travels as PEM TEXT, not as a path. A worker is its own
+    # container, so the control plane's path means nothing there, and asking
+    # the deployment to mount the same file into every worker service is a
+    # step that gets forgotten exactly once. A CA certificate is public
+    # material, so an env var is the right carrier. Only projected for a
+    # target that actually verifies: there is nothing for a bundle to do when
+    # verification is off, and an absent var keeps that env byte-for-byte
+    # unchanged.
+    if target.verify_tls:
+        pem = catrust.bundle_pem(settings)
+        if pem:
+            env[catrust.CA_BUNDLE_PEM_ENV] = pem
     driver_opts = dict(spec.driver_opts_json or {})
     # Surface the bounded duration to the driver (for a hard workload deadline).
     # Unbounded runs (duration_s falsy) leave it absent so no deadline is set. A

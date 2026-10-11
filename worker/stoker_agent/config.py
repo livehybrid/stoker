@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 import os
 import socket as _socket
+import tempfile
 from typing import Mapping, Optional
 
 RATE_MODES = ("eps", "per_day_gb", "count_interval")
@@ -79,12 +80,63 @@ class Config:
     deadman_s: float
     drain_budget_s: float
     hec_verify_tls: bool
+    # Path to a PEM bundle that verifies the target's certificate, when the
+    # public trust store will not: a customer's Splunk behind a private CA. Used
+    # only where hec_verify_tls is on, so it composes with that switch rather
+    # than replacing it. May arrive as STOKER_CA_BUNDLE (a path mounted into
+    # this container) or as STOKER_CA_BUNDLE_PEM (the text, which the control
+    # plane projects to a fleet worker because a path from the control plane's
+    # filesystem means nothing in a worker's).
+    hec_ca_bundle: Optional[str] = None
     zero_output_s: float = DEFAULT_ZERO_OUTPUT_S
     zero_output_max_restarts: int = DEFAULT_ZERO_OUTPUT_MAX_RESTARTS
     # firebox emits final HEC lines and the agent forwards bytes (see
     # docs/WORKER-CONTRACT.md "HEC-line envelope"); STOKER_FAST_ENVELOPE=0
     # keeps the classic envelope even with firebox.
     fast_envelope: bool = True
+
+
+CA_BUNDLE_ENV = "STOKER_CA_BUNDLE"
+CA_BUNDLE_PEM_ENV = "STOKER_CA_BUNDLE_PEM"
+
+
+def _resolve_ca_bundle(env):
+    # type: (Mapping[str, str]) -> Optional[str]
+    """A usable CA bundle path, from either spelling, or None.
+
+    A fleet worker is a separate container, so the control plane cannot hand it
+    a path: it projects the PEM text instead and this writes it to a file the
+    HTTP client can open. The inline form therefore wins when both are present,
+    because that is the one the control plane deliberately sent for this run.
+
+    A path that does not exist raises: a deployment that looks configured but
+    quietly verifies against the public trust store is the failure this whole
+    setting exists to prevent.
+    """
+    pem = env.get(CA_BUNDLE_PEM_ENV)
+    if pem and pem.strip():
+        if "-----BEGIN CERTIFICATE-----" not in pem:
+            raise ConfigError(
+                "%s is set but holds no PEM certificate" % CA_BUNDLE_PEM_ENV)
+        handle = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".pem", prefix="stoker-ca-", delete=False)
+        try:
+            handle.write(pem if pem.endswith("\n") else pem + "\n")
+        finally:
+            handle.close()
+        # Left behind on purpose: the file must outlive this function for the
+        # whole life of the process, and the container is thrown away after the
+        # run, which is a shorter life than any cleanup we could schedule.
+        return handle.name
+    path = (env.get(CA_BUNDLE_ENV) or "").strip()
+    if not path:
+        return None
+    if not os.path.exists(path):
+        raise ConfigError(
+            "%s points at %r, which does not exist in this container. Mount the "
+            "PEM there, or let the control plane project it as %s."
+            % (CA_BUNDLE_ENV, path, CA_BUNDLE_PEM_ENV))
+    return path
 
 
 def _get(env, key):
@@ -167,6 +219,7 @@ def load_config(env=None):
                                minimum=1.0)
     hec_verify_tls = _as_bool("STOKER_HEC_VERIFY_TLS",
                               _get(env, "STOKER_HEC_VERIFY_TLS") or "1")
+    hec_ca_bundle = _resolve_ca_bundle(env)
     zero_output_s = _as_float("STOKER_ZERO_OUTPUT_S",
                               _get(env, "STOKER_ZERO_OUTPUT_S")
                               or str(DEFAULT_ZERO_OUTPUT_S), minimum=0.0)
@@ -241,6 +294,7 @@ def load_config(env=None):
             deadman_s=deadman_s,
             drain_budget_s=drain_budget_s,
             hec_verify_tls=hec_verify_tls,
+            hec_ca_bundle=hec_ca_bundle,
             zero_output_s=zero_output_s,
             zero_output_max_restarts=zero_output_max_restarts,
             fast_envelope=fast_envelope,
@@ -282,6 +336,7 @@ def load_config(env=None):
         deadman_s=deadman_s,
         drain_budget_s=drain_budget_s,
         hec_verify_tls=hec_verify_tls,
+        hec_ca_bundle=hec_ca_bundle,
         zero_output_s=zero_output_s,
         zero_output_max_restarts=zero_output_max_restarts,
         fast_envelope=fast_envelope,

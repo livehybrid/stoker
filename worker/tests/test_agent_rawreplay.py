@@ -92,7 +92,7 @@ def make_rate_agent(tmp_path, rate=100, duration="3"):
     cfg = load_config(env)
     sinks = []
 
-    def hec_factory(url, token, gzip_enabled, verify_tls, ack):
+    def hec_factory(url, token, gzip_enabled, verify_tls, ack, ca_bundle=None):
         sink = FakeHec(url, token, gzip_enabled, verify_tls, ack)
         sinks.append(sink)
         return sink
@@ -159,7 +159,7 @@ def test_rawreplay_cadence_replays_dataset_once_engine_paced(tmp_path):
     cfg = load_config(env)
     sinks = []
 
-    def hec_factory(url, token, gzip_enabled, verify_tls, ack):
+    def hec_factory(url, token, gzip_enabled, verify_tls, ack, ca_bundle=None):
         sink = FakeHec(url, token, gzip_enabled, verify_tls, ack)
         sinks.append(sink)
         return sink
@@ -213,7 +213,7 @@ def test_rawreplay_missing_replay_config_fails_config(tmp_path):
         "STOKER_HEARTBEAT_S": "1",
     }
     agent = Agent(load_config(env),
-                  hec_factory=lambda url, token, gzip_enabled, verify_tls, ack:
+                  hec_factory=lambda url, token, gzip_enabled, verify_tls, ack, ca_bundle=None:
                   FakeHec(url, token, gzip_enabled, verify_tls, ack))
     rc = agent.run()
     assert rc == 2  # EXIT_CONFIG
@@ -285,7 +285,7 @@ except OSError:
     cfg = load_config(env)
     sinks = []
     agent = Agent(cfg,
-                  hec_factory=lambda url, token, gzip_enabled, verify_tls, ack:
+                  hec_factory=lambda url, token, gzip_enabled, verify_tls, ack, ca_bundle=None:
                   sinks.append(FakeHec(url, token, gzip_enabled, verify_tls, ack))
                   or sinks[-1],
                   rawreplay_engine_factory=stub_factory)
@@ -358,7 +358,7 @@ def test_gated_rawreplay_starts_at_t0_not_warmed_pre_release(tmp_path):
     sinks = []
     agent = Agent(
         cfg,
-        hec_factory=lambda url, token, gzip_enabled, verify_tls, ack:
+        hec_factory=lambda url, token, gzip_enabled, verify_tls, ack, ca_bundle=None:
             sinks.append(FakeHec(url, token, gzip_enabled, verify_tls, ack)) or sinks[-1],
         rawreplay_engine_factory=rr_factory)
     holder["agent"] = agent

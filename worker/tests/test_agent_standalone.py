@@ -53,11 +53,12 @@ class StubEngine(EngineRunner):
 
 
 class FakeHec(object):
-    def __init__(self, url, token, gzip_enabled, verify_tls, ack):
+    def __init__(self, url, token, gzip_enabled, verify_tls, ack, ca_bundle=None):
         self.url = url
         self.token = token
         self.gzip_enabled = gzip_enabled
         self.verify_tls = verify_tls
+        self.ca_bundle = ca_bundle
         self.ack = ack
         self.events = []
         self.flush_timeout = None
@@ -138,7 +139,7 @@ def make_agent(tmp_path, rate=100, duration="4", extra_env=None):
     cfg = load_config(env)
     sinks = []
 
-    def hec_factory(url, token, gzip_enabled, verify_tls, ack):
+    def hec_factory(url, token, gzip_enabled, verify_tls, ack, ca_bundle=None):
         sink = FakeHec(url, token, gzip_enabled, verify_tls, ack)
         sinks.append(sink)
         return sink
@@ -341,7 +342,7 @@ def test_metrics_backfill_delivers_full_sweep(tmp_path, monkeypatch):
     cfg = load_config(env)
     sinks = []
 
-    def hec_factory(url, token, gzip_enabled, verify_tls, ack):
+    def hec_factory(url, token, gzip_enabled, verify_tls, ack, ca_bundle=None):
         sink = FakeHec(url, token, gzip_enabled, verify_tls, ack)
         sinks.append(sink)
         return sink
@@ -412,7 +413,7 @@ def test_firebox_gets_the_hec_envelope_policy(tmp_path, monkeypatch):
     }
     sinks = []
 
-    def hec_factory(url, token, gzip_enabled, verify_tls, ack):
+    def hec_factory(url, token, gzip_enabled, verify_tls, ack, ca_bundle=None):
         sink = FakeHec(url, token, gzip_enabled, verify_tls, ack)
         sinks.append(sink)
         return sink

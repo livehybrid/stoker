@@ -41,6 +41,8 @@ ENV_KEYS = [
     # basic-auth was removed: Stoker's own app-level auth guards the UI/ops API.)
     "STOKER_ADMIN_USER", "STOKER_ADMIN_PASSWORD",
     "STOKER_TRUSTED_PROXIES", "STOKER_AUTH_HEADER", "STOKER_PROXY_DEFAULT_ROLE",
+    # A PEM bundle for a target behind a private CA (see server/catrust.py).
+    "STOKER_CA_BUNDLE",
     "STOKER_SESSION_TTL",
     # Advanced overrides (all optional; server/config.py holds the defaults).
     "STOKER_JWT_TTL_S",

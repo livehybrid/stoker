@@ -77,6 +77,7 @@ class HecClient(object):
         *,
         gzip_enabled=True,
         verify_tls=True,
+        ca_bundle=None,
         batch_bytes=512 * 1024,
         batch_ms=200,
         queue_max=5000,
@@ -95,7 +96,13 @@ class HecClient(object):
         self._gzip_enabled = bool(gzip_enabled)
         if self._gzip_enabled:
             self._headers["Content-Encoding"] = "gzip"
+        # requests takes a CA bundle PATH in the same argument as the boolean,
+        # so the two collapse into one value here: False to skip verification,
+        # the bundle when one is configured, else True for the public trust
+        # store. Resolved once rather than per request, which is also what
+        # keeps the connection pool from being rebuilt mid-run.
         self._verify_tls = verify_tls
+        self._verify = (ca_bundle or True) if verify_tls else False
         self._batch_bytes = int(batch_bytes)
         self._batch_s = batch_ms / 1000.0
         self._request_timeout_s = request_timeout_s
@@ -332,7 +339,7 @@ class HecClient(object):
                     data=payload,
                     headers=self._headers,
                     timeout=self._request_timeout_s,
-                    verify=self._verify_tls,
+                    verify=self._verify,
                 )
             except requests.exceptions.RequestException:
                 # timeouts and connection resets are equally transient
