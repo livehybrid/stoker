@@ -67,5 +67,21 @@ Generator plugins kept: `default`, `replay`, `jinja`, `windbag`, `counter`, `per
 ## Verification
 
 - Every file byte-compiles on py3.12 (`python -m compileall`).
+
+## Python 3.9 is end of life
+
+The worker image is `python:3.9-slim` and CI's 3.9 leg exists to exercise this
+vendored tree on that interpreter. 3.9 reached end of life in October 2025, so
+it receives no security patches, and `actions/python-versions` publishes no
+3.9 build beyond Ubuntu 24.04 (which is why ci.yml pins that leg's runner
+rather than using ubuntu-latest).
+
+Moving the worker to 3.12 looks plausible rather than proven: the patches
+above were made precisely because the camelCase threading aliases and similar
+were removed in newer pythons, the whole tree byte-compiles on 3.12, and
+`worker/tests` already passes on 3.12 in CI. What is NOT yet proven is the
+real engine end to end on 3.12: the vendored import check and the standalone
+smoke are both gated to the 3.9 leg. Run those on 3.12 before changing the
+Dockerfile.
 - No remaining imports of any deleted module (AST-scanned, enforced by `worker/tests/test_eventgen_vendor.py`).
 - Smoke-verified on py3.12 with `jinja2==3.1.6`: windbag, default generator with timestamp token, jinja generator with a template, replay mode with replaytimestamp token, perDayVolume rater with file output and randomizeCount rating.

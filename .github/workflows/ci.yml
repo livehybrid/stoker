@@ -29,14 +29,33 @@ env:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Runner pinned, NOT ubuntu-latest. ubuntu-latest moved to 26.04 and
+    # actions/python-versions publishes no 3.9 build for it, so the 3.9 leg
+    # died with "The version '3.9' with architecture 'x64' was not found for
+    # Ubuntu 26.04". 3.9 reached end of life in October 2025, so that build is
+    # never coming: 3.9 exists for 16.04 through 24.04 only.
+    #
+    # The 3.9 leg stays because it IS the worker image's runtime (worker/
+    # Dockerfile is python:3.9-slim) and the vendored-eventgen import check and
+    # standalone smoke below are gated to it deliberately, to exercise the
+    # interpreter the image actually ships. Dropping the leg would leave the
+    # real engine untested on the only python it runs on.
+    #
+    # 24.04 is the newest LTS carrying a 3.9 build. See the EOL note in
+    # worker/engines/eventgen/VENDOR.md for moving the worker off 3.9, which is
+    # the real fix.
+    runs-on: ${{ matrix.os }}
     concurrency:
       group: ${{ github.workflow }}-test-${{ github.event.pull_request.number || github.ref }}-${{ matrix.python-version }}
       cancel-in-progress: true
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.9", "3.12"]
+        include:
+          - python-version: "3.9"
+            os: ubuntu-24.04
+          - python-version: "3.12"
+            os: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
