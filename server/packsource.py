@@ -25,6 +25,15 @@ down and rebuilt should come back with its packs.
     one of them quietly overwriting it would be hard to notice and worse to
     diagnose.
 
+``STOKER_PACK_SOURCE_SSE`` / ``STOKER_PACK_SOURCE_SSE_KMS_KEY_ID``
+    Server-side encryption headers to send on upload. Needed when the bucket
+    policy DENIES PutObject unless the request carries them: a condition using
+    ``StringNotEquals`` on ``s3:x-amz-server-side-encryption`` fires when the
+    header is absent, and S3 does not fill that condition key in from the
+    bucket's default encryption. Set the algorithm (``aws:kms`` or ``AES256``)
+    and, when the policy pins a key, the key ARN as well: the algorithm alone
+    leaves a key-id condition still firing. Unset, the request is unchanged.
+
 boto3 is imported lazily, so the dependency is only required by a deployment
 that actually points at S3.
 """
@@ -48,6 +57,8 @@ log = logging.getLogger("stoker.packsource")
 REPOS_ENV = "STOKER_PACK_REPOS"
 SOURCE_ENV = "STOKER_PACK_SOURCE"
 WRITE_ENV = "STOKER_PACK_SOURCE_WRITE"
+SSE_ENV = "STOKER_PACK_SOURCE_SSE"
+SSE_KEY_ENV = "STOKER_PACK_SOURCE_SSE_KMS_KEY_ID"
 
 ARCHIVE_SUFFIX = ".tar.gz"
 
@@ -196,7 +207,41 @@ class S3Store(Store):
     def put(self, key, data):
         # type: (str, bytes) -> None
         self.client.put_object(Bucket=self.bucket, Key=self._key(key), Body=data,
-                               ContentType="application/gzip")
+                               ContentType="application/gzip", **_sse_args())
+
+
+def _sse_args(env=None):
+    # type: (Optional[Any]) -> dict
+    """Server-side encryption headers for PutObject, from the environment.
+
+    A bucket policy may DENY PutObject unless the request CARRIES the headers,
+    using a condition like::
+
+        StringNotEquals s3:x-amz-server-side-encryption            aws:kms
+        StringNotEquals s3:x-amz-server-side-encryption-aws-kms-key-id  <arn>
+
+    ``StringNotEquals`` matches when the key is ABSENT, and S3 does NOT
+    populate those condition keys from the bucket's default encryption
+    configuration, so a request without the headers is denied even though the
+    object would have been encrypted anyway. The only thing that satisfies such
+    a policy is sending them.
+
+    Both matter when the policy pins a key: ``ServerSideEncryption`` on its own
+    satisfies the algorithm condition and leaves the key-id one still firing.
+
+    Unset, this returns nothing and the request is byte-for-byte what it always
+    was, so a bucket with no such policy is unaffected.
+    """
+    env = env if env is not None else os.environ
+    algorithm = (env.get(SSE_ENV) or "").strip()
+    if not algorithm:
+        return {}
+    args = {"ServerSideEncryption": algorithm}
+    key_id = (env.get(SSE_KEY_ENV) or "").strip()
+    if key_id:
+        # Omitted for AES256, which takes no key and rejects an empty one.
+        args["SSEKMSKeyId"] = key_id
+    return args
 
 
 def open_store(source):

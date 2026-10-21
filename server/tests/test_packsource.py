@@ -356,3 +356,61 @@ def test_publish_endpoint_404s_an_unknown_pack(client, monkeypatch, tmp_path):
     monkeypatch.setenv(packsource.SOURCE_ENV, str(tmp_path))
     monkeypatch.setenv(packsource.WRITE_ENV, "1")
     assert client.post("/api/packs/999999/publish").status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Server-side encryption headers on PutObject
+# ---------------------------------------------------------------------------
+
+class _RecordingClient:
+    """Captures put_object kwargs. Reaching the recorded call through the
+    instance (not through S3Store) keeps the assertion off the code's own path.
+    """
+
+    def __init__(self):
+        self.calls = []
+
+    def put_object(self, **kwargs):
+        self.calls.append(kwargs)
+        return {}
+
+
+def test_put_sends_no_sse_headers_by_default():
+    """A bucket with no encryption policy must see the request it always saw."""
+    rec = _RecordingClient()
+    store = packsource.S3Store("b", "p", client=rec)
+    store.put("demo.tar.gz", b"x")
+    sent = rec.calls[0]
+    assert "ServerSideEncryption" not in sent
+    assert "SSEKMSKeyId" not in sent
+
+
+def test_put_sends_sse_headers_when_the_environment_asks(monkeypatch):
+    """A bucket policy using StringNotEquals on
+    s3:x-amz-server-side-encryption fires when the header is ABSENT, and S3
+    does not populate that condition key from the bucket's default encryption.
+    Both headers are required: ServerSideEncryption alone leaves a DenyWrongKMS
+    statement firing, because the key-id condition key is still absent.
+    """
+    monkeypatch.setenv("STOKER_PACK_SOURCE_SSE", "aws:kms")
+    monkeypatch.setenv("STOKER_PACK_SOURCE_SSE_KMS_KEY_ID", "arn:aws:kms:eu-west-2:1:key/abc")
+    rec = _RecordingClient()
+    store = packsource.S3Store("b", "p", client=rec)
+    store.put("demo.tar.gz", b"x")
+    sent = rec.calls[0]
+    assert sent["ServerSideEncryption"] == "aws:kms"
+    assert sent["SSEKMSKeyId"] == "arn:aws:kms:eu-west-2:1:key/abc"
+    assert sent["Bucket"] == "b"
+    assert sent["Key"] == "p/demo.tar.gz"
+
+
+def test_put_sends_the_algorithm_without_a_key_id(monkeypatch):
+    """SSE-S3 (AES256) takes no key id; sending an empty one would be rejected."""
+    monkeypatch.setenv("STOKER_PACK_SOURCE_SSE", "AES256")
+    monkeypatch.delenv("STOKER_PACK_SOURCE_SSE_KMS_KEY_ID", raising=False)
+    rec = _RecordingClient()
+    store = packsource.S3Store("b", "p", client=rec)
+    store.put("demo.tar.gz", b"x")
+    sent = rec.calls[0]
+    assert sent["ServerSideEncryption"] == "AES256"
+    assert "SSEKMSKeyId" not in sent
