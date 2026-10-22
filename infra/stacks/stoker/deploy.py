@@ -36,6 +36,9 @@ SECRET_NAME = "stoker_master_key"
 ENV_KEYS = [
     "STOKER_DB_PASSWORD", "STOKER_HOST", "STOKER_PUBLIC_BASE_URL", "STOKER_WORKER_IMAGE",
     "PORTAINER_HOST", "PORTAINER_TOKEN", "DOGFOOD_HEC_URL", "DOGFOOD_HEC_TOKEN",
+    # Splunk HEC token for the db-backup service's logging driver, so the house
+    # "DB Backup STALE / MISSING" alert sees Stoker's backups.
+    "SPLUNK_HEC_TOKEN",
     # App-level auth (see .env.example). All optional; the stack.yml supplies
     # ${VAR:-default} fallbacks, so an unset var just uses its default. (Traefik
     # basic-auth was removed: Stoker's own app-level auth guards the UI/ops API.)

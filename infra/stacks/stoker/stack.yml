@@ -115,17 +115,38 @@ services:
       placement: {constraints: ["node.hostname == hpelite"]}   # pinned: data locality
 
   db-backup:
-    image: tiredofit/db-backup
+    # nfrastack/db-backup v5, digest-pinned. tiredofit/db-backup:latest became an
+    # empty stub that prints a deprecation banner and backs up nothing; this
+    # service ran it from late Sep to 22 Oct 2026 with no backup taken. Logs go
+    # to Splunk (index home_web, sourcetype db:backup) so the house "DB Backup
+    # STALE / MISSING" alert covers Stoker too. Runs as uid 10000: the volume
+    # must be owned by it.
+    image: nfrastack/db-backup:5.0.5@sha256:012122061dc0851030207f70b3d6187ba7d1ef60cc58180507d157b80646f5fb
     networks: [stoker_internal]
     environment:
+      - TIMEZONE=Etc/UTC
+      - CONTAINER_ENABLE_MONITORING=FALSE
       - DB01_TYPE=pgsql
       - DB01_HOST=db
       - DB01_NAME=stoker
       - DB01_USER=stoker
       - DB01_PASS=${STOKER_DB_PASSWORD}
       - DB01_PORT=5432
+      - DB01_BACKUP_BEGIN=0345
+      - DB01_BACKUP_INTERVAL=1440
+      - DB01_CLEANUP_TIME=43200
     volumes:
       - stoker_backups:/backup
+    logging:
+      driver: splunk
+      options:
+        splunk-url: https://hec.cloud.livehybrid.com:443/
+        splunk-token: ${SPLUNK_HEC_TOKEN}
+        splunk-index: home_web
+        splunk-source: db-backup
+        splunk-sourcetype: db:backup
+        splunk-format: raw
+        splunk-verify-connection: "false"
     deploy:
       replicas: 1
       placement: {constraints: ["node.hostname == hpelite"]}
