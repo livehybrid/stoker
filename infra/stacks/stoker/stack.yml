@@ -135,8 +135,18 @@ services:
       - DB01_BACKUP_BEGIN=0345
       - DB01_BACKUP_INTERVAL=1440
       - DB01_CLEANUP_TIME=43200
+      # Off-host, like every other database on the estate: AWS S3
+      # livehybrid-db-backups (eu-west-2), same key as the databases stack.
+      - DB01_BACKUP_LOCATION=S3
+      - DB01_S3_BUCKET=${AWS_BACKUP_BUCKET}
+      - DB01_S3_PATH=stoker
+      - DB01_S3_REGION=eu-west-2
+      - DB01_S3_HOST=s3.eu-west-2.amazonaws.com
+      - DB01_S3_PROTOCOL=https
+      - DB01_S3_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - DB01_S3_KEY_SECRET=${AWS_SECRET_KEY}
     volumes:
-      - stoker_backups:/backup
+      - stoker_backups:/backup   # state (/backup/.dbb) and the pre-S3 dumps
     logging:
       driver: splunk
       options:

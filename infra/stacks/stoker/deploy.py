@@ -39,6 +39,8 @@ ENV_KEYS = [
     # Splunk HEC token for the db-backup service's logging driver, so the house
     # "DB Backup STALE / MISSING" alert sees Stoker's backups.
     "SPLUNK_HEC_TOKEN",
+    # Off-host backups to S3 (bucket + key shared with the databases stack).
+    "AWS_BACKUP_BUCKET", "AWS_ACCESS_KEY_ID", "AWS_SECRET_KEY",
     # App-level auth (see .env.example). All optional; the stack.yml supplies
     # ${VAR:-default} fallbacks, so an unset var just uses its default. (Traefik
     # basic-auth was removed: Stoker's own app-level auth guards the UI/ops API.)
