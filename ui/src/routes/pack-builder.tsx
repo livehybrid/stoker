@@ -641,7 +641,12 @@ function PackBuilder() {
   );
 
   // Debounced live preview whenever the config changes.
-  const [preview, setPreview] = useState<{ events: string[]; warnings: string[]; bpe: number } | null>(null);
+  const [preview, setPreview] = useState<{
+    events: string[];
+    warnings: string[];
+    blocking: string[];
+    bpe: number;
+  } | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [nonce, setNonce] = useState(0);
@@ -653,7 +658,12 @@ function PackBuilder() {
       try {
         const res = await api.packBuilder.preview(config, 12, undefined, builtEvents);
         if (cancelled) return;
-        setPreview({ events: res.events, warnings: res.warnings, bpe: res.bytes_per_event });
+        setPreview({
+          events: res.events,
+          warnings: res.warnings,
+          blocking: res.blocking ?? [],
+          bpe: res.bytes_per_event,
+        });
         setHighlights(res.highlights);
         setPreviewError(null);
       } catch (err) {
@@ -731,7 +741,8 @@ function PackBuilder() {
   }
 
   const nameOk = /^[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}$/.test(name.trim());
-  const canSave = events.length > 0 && nameOk && !save.isPending && !previewError;
+  const blocked = (preview?.blocking.length ?? 0) > 0;
+  const canSave = events.length > 0 && nameOk && !save.isPending && !previewError && !blocked;
   const enabledCount = tokens.filter((t) => t.enabled).length;
 
   if (editing && packQ.isPending) return <LoadingState />;
@@ -1011,6 +1022,18 @@ function PackBuilder() {
           >
             <Stack $gap="small">
               {previewError && <Callout $tone="error">{previewError}</Callout>}
+              {preview?.blocking.length ? (
+                <Callout $tone="error">
+                  <Stack $gap="small">
+                    <Strong>Fix these before saving</Strong>
+                    <Bullets>
+                      {preview.blocking.map((w) => (
+                        <li key={w}>{w}</li>
+                      ))}
+                    </Bullets>
+                  </Stack>
+                </Callout>
+              ) : null}
               {preview?.warnings.length ? (
                 <Callout $tone="warning">
                   <Bullets>
@@ -1044,6 +1067,7 @@ function PackBuilder() {
               <Strong>{enabledCount}</Strong> field{enabledCount === 1 ? "" : "s"} · <Strong>{events.length}</Strong>{" "}
               sample event{events.length === 1 ? "" : "s"}
               {!nameOk && <Warn> · give the pack a name</Warn>}
+              {blocked && <Warn> · fix the problems shown in Preview</Warn>}
             </>
           ) : (
             "Analyse some events to start"

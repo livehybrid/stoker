@@ -276,6 +276,11 @@ def _stage(cfg, subkey=None, fingerprint=None, already=None):
     try:
         packbuilder.write_pack(cfg, staging, subkey=subkey, fingerprint=fingerprint,
                                already=already)
+    except packbuilder.BuilderError as exc:
+        # A refused build (an identifier left in the pack, say) is the
+        # operator's to fix, so it goes back as a 422 the editor shows.
+        shutil.rmtree(staging, ignore_errors=True)
+        raise _bad(exc)
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         raise

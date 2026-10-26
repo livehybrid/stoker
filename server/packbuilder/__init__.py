@@ -1664,7 +1664,7 @@ def apply_pseudonyms(cfg, subkey=None, fingerprint=None, already=None, strict=Tr
     if blocking:
         if strict:
             raise BuilderError(" ".join(blocking))
-        report.warnings.extend(blocking)
+        report.blocking = blocking
     merged = report.events
     out = dict(cfg, events=merged)
     out["pseudonymised"] = [
@@ -2154,7 +2154,10 @@ def render_preview(cfg, n=20, seed=None, subkey=None, already=None):
     # type: (Dict[str, Any], int, Optional[int]) -> Dict[str, Any]
     """Render ``n`` events from a validated config without touching disk.
 
-    Returns ``{"events": [...], "warnings": [...], "bytes_per_event": float}``.
+    Returns ``{"events": [...], "warnings": [...], "blocking": [...],
+    "bytes_per_event": float}``. ``blocking`` holds the problems that will make
+    the save refuse, kept apart from ``warnings`` so a pack with hundreds of
+    fields cannot bury them.
     A warning names every enabled field whose pattern matches no sample event
     (it would never fire) and every field that matches inside another field's
     inserted text.
@@ -2218,7 +2221,9 @@ def render_preview(cfg, n=20, seed=None, subkey=None, already=None):
             text = "".join(pieces)
         out.append(text)
     size = sum(len(e.encode("utf-8")) for e in out) / float(len(out))
-    return {"events": out, "warnings": warnings, "bytes_per_event": round(size, 1)}
+    blocking = list(pseudo_report.blocking) if pseudo_report is not None else []
+    return {"events": out, "warnings": warnings, "blocking": blocking,
+            "bytes_per_event": round(size, 1)}
 
 
 __all__ = [

@@ -963,7 +963,50 @@ def test_the_preview_warns_where_the_save_refuses(subkey):
     cfg = pb.validate_config({"name": "c", "events": RESIDUAL_SAMPLE,
                               "tokens": [_residual_token()]})
     out = pb.render_preview(cfg, n=2, seed=1, subkey=sub)
-    assert any("outside the field itself" in w for w in out["warnings"])
+    # Apart from the warnings, so a pack with hundreds of fields that match
+    # nothing cannot bury the one thing that will stop the save.
+    assert any("outside the field itself" in w for w in out["blocking"])
+    assert not any("outside the field itself" in w for w in out["warnings"])
+
+
+def _listed_elsewhere_config():
+    # FIELD_B lists the very values FIELD_A pseudonymises, as the analyser does
+    # when it copies what it saw into a "values I list" replacement.
+    return pb.validate_config({"name": "c", "events": RESIDUAL_SAMPLE, "tokens": [
+        _residual_token(rewrite=True),
+        {"field": "FIELD_B", "pattern": r"status=(\d+)", "enabled": True,
+         "replacement": {"kind": "values", "values": ["654321", "111222", "200"]}}]})
+
+
+def test_a_value_left_in_another_fields_list_names_that_field_once(tmp_path, subkey):
+    """'Replace it everywhere' only rewrites events, so it must not be offered.
+
+    It is already on here, and the save still refuses: suggesting it again
+    would send the operator round in a circle.
+    """
+    sub, fp = subkey
+    with pytest.raises(pb.BuilderError) as exc:
+        pb.write_pack(_listed_elsewhere_config(), str(tmp_path / "p"), subkey=sub, fingerprint=fp)
+    message = str(exc.value)
+    assert "the listed values of FIELD_B" in message
+    assert message.count("the listed values of FIELD_B") == 1, "one place, named once"
+    assert "does not reach these" in message
+    assert "Turn on 'replace it everywhere'" not in message
+    assert "654321" not in message and "111222" not in message
+
+
+def test_api_save_refused_by_a_residual_is_a_422_with_the_reason(client, upload_dir):
+    config = {"name": "c", "events": RESIDUAL_SAMPLE, "tokens": [_residual_token()]}
+    r = client.post("/api/pack-builder/preview", json={"config": config, "n": 2, "seed": 1})
+    assert r.status_code == 200 and r.json()["blocking"]
+    r = client.post("/api/pack-builder/packs", json={"config": config})
+    assert r.status_code == 422, r.text
+    detail = r.json()["detail"]
+    assert detail["error"] == "pack_builder_invalid"
+    assert "still appears outside the field itself" in detail["detail"]
+    assert "654321" not in r.text
+    # Nothing half-built is left behind under the upload root.
+    assert not [n for n in os.listdir(upload_dir) if n.startswith(".builder-")]
 
 
 def test_replace_everywhere_fixes_it_and_correlates(tmp_path, subkey):
