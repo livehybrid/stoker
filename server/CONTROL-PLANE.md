@@ -289,6 +289,7 @@ Parsed once into a frozen `Settings` (`config.py`); secret fields are `repr=Fals
 - **Dogfood**: `DOGFOOD_HEC_URL`, `DOGFOOD_HEC_TOKEN` (secret; both required to enable), `DOGFOOD_METRICS_INTERVAL_S` (30), `DOGFOOD_GZIP` (true).
 - **rawreplay**: `RAWREPLAY_MAX_DATASET_BYTES` (default 512 MiB; cap on a `dataset_url` fetch), `RAWREPLAY_FETCH_TIMEOUT_S` (default 120).
 - **Pack upload**: `PACK_UPLOAD_DIR` (default `/data/uploads`) — where `POST /api/packs/upload` extracts packs to; mount a volume here (alongside `BUNDLE_DIR` / `REPO_CLONE_DIR`) so uploads survive a restart. The extraction-bomb caps, all enforced on actual bytes while streaming: `PACK_UPLOAD_MAX_ARCHIVE_BYTES` (default 256 MiB; the upload body), `PACK_UPLOAD_MAX_TOTAL_BYTES` (default 1 GiB; total uncompressed), `PACK_UPLOAD_MAX_MEMBER_BYTES` (default 512 MiB; any single member — sized to match the rawreplay dataset cap), `PACK_UPLOAD_MAX_MEMBERS` (default 10000).
+- **Pack builder**: `PACK_BUILDER_MAX_FIELDS` (default 2000), the number of fields a builder pack may switch on; switched-off fields count towards a ceiling of five times that. Each field is a regex scanned over the whole event on every render, so wide packs generate far fewer events per second (see the builder limits in `docs/PACKS.md`).
 
 ## Crypto
 

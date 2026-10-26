@@ -1287,3 +1287,46 @@ def test_reopening_a_rotating_pack_keeps_its_settings(tmp_path, scope, period):
     with open(os.path.join(out2, "samples", "sessions.sample"), encoding="utf-8") as fh:
         second = fh.read()
     assert first == second, "a rebuild changed the stand-ins"
+
+
+# ---- field limit ----
+
+def _kv_config(n, on):
+    event = " ".join("k%d=v%d" % (i, i) for i in range(n))
+    tokens = [{"field": "k%d" % i, "pattern": r"k%d=(\w+)" % i, "enabled": i < on,
+               "replacement": {"kind": "static", "value": "x"}} for i in range(n)]
+    return {"name": "wide", "events": [event], "tokens": tokens}
+
+
+@pytest.fixture()
+def max_fields():
+    yield pb.set_max_fields
+    pb.set_max_fields(pb.DEFAULT_MAX_TOKENS)
+
+
+def test_field_limit_counts_only_fields_switched_on(max_fields):
+    max_fields(3)
+    assert len(pb.validate_config(_kv_config(10, 3))["tokens"]) == 10
+    with pytest.raises(pb.BuilderError, match=r"switched on \(4, max 3"):
+        pb.validate_config(_kv_config(10, 4))
+    with pytest.raises(pb.BuilderError, match=r"max 15 including those switched off"):
+        pb.validate_config(_kv_config(16, 1))
+
+
+def test_field_limit_default_takes_a_wide_pack():
+    assert pb.MAX_TOKENS == pb.DEFAULT_MAX_TOKENS == 2000
+    assert len(pb.validate_config(_kv_config(1773, 1773))["tokens"]) == 1773
+
+
+def test_field_limit_from_env():
+    assert config_mod.load_settings(env={}).pack_builder_max_fields == 2000
+    assert config_mod.load_settings(
+        env={"PACK_BUILDER_MAX_FIELDS": "5000"}).pack_builder_max_fields == 5000
+    with pytest.raises(config_mod.ConfigError):
+        config_mod.load_settings(env={"PACK_BUILDER_MAX_FIELDS": "lots"})
+
+
+def test_api_applies_field_limit(client, upload_dir, max_fields):
+    config_mod.set_settings(dataclasses.replace(config_mod.get_settings(), pack_builder_max_fields=2))
+    r = client.post("/api/pack-builder/preview", json={"config": _kv_config(3, 3), "n": 1})
+    assert r.status_code == 422 and "max 2" in r.text

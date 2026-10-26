@@ -796,7 +796,8 @@ events into an eventgen pack without writing any `eventgen.conf` by hand.
    | Bytes per event | 64 KB |
    | Total sample size (also the upload guard, combined across files) | 2 MB |
    | Events the analyser examines when suggesting fields | first 2,000 |
-   | Fields per pack | 100 |
+   | Fields switched on per pack (`PACK_BUILDER_MAX_FIELDS`) | 2,000 |
+   | Fields per pack, including those switched off | 5 x the above |
 
    Past the first 2,000 events the rest still ship in the pack and still
    generate; they just do not influence which fields are suggested. The 2 MB
@@ -804,6 +805,12 @@ events into an eventgen pack without writing any `eventgen.conf` by hand.
    under about 400 bytes. These bound the pack's **template**, not the volume a
    run generates; for replaying a large capture verbatim use a
    [rawreplay pack](#rawreplay-piston-packs) instead.
+
+   Every field is a regex that scans the whole event each time it renders, so
+   generation cost grows with fields x event size. As a guide, 100 fields on
+   2 KB JSON events render at about 6,000 events/s per Firebox thread; 1,773
+   fields on 41 KB events manage about 40. Switch off fields you do not need
+   to vary.
 2. **Review the suggested fields.** The analyser marks what it would vary and
    recommends a replacement for each. It finds timestamps in the common formats
    (ISO 8601, access log, syslog, `date time`, `%a %b %d %Y`, epoch seconds and

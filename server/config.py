@@ -100,6 +100,11 @@ DEFAULT_PACK_UPLOAD_MAX_ARCHIVE_BYTES = 256 * 1024 * 1024  # 256 MiB upload body
 DEFAULT_PACK_UPLOAD_MAX_TOTAL_BYTES = 1024 * 1024 * 1024   # 1 GiB unpacked total
 DEFAULT_PACK_UPLOAD_MAX_MEMBER_BYTES = 512 * 1024 * 1024   # 512 MiB per member
 DEFAULT_PACK_UPLOAD_MAX_MEMBERS = 10_000
+# Fields a pack builder pack may switch on (env PACK_BUILDER_MAX_FIELDS). Each
+# field is a regex scanned over the whole event on every render, so the cost is
+# roughly fields x event size: 1,773 fields on 41 KB JSON events render at about
+# 40 events/s per Firebox thread, against 6,000+ for 100 fields on 2 KB events.
+DEFAULT_PACK_BUILDER_MAX_FIELDS = 2000
 # The three authorisation roles, most to least privileged. ``admin`` gates user
 # management; validated here so a bad STOKER_PROXY_DEFAULT_ROLE fails at boot.
 VALID_ROLES = ("viewer", "operator", "admin")
@@ -213,6 +218,7 @@ class Settings:
     pack_upload_max_total_bytes: int = DEFAULT_PACK_UPLOAD_MAX_TOTAL_BYTES
     pack_upload_max_member_bytes: int = DEFAULT_PACK_UPLOAD_MAX_MEMBER_BYTES
     pack_upload_max_members: int = DEFAULT_PACK_UPLOAD_MAX_MEMBERS
+    pack_builder_max_fields: int = DEFAULT_PACK_BUILDER_MAX_FIELDS
 
     # --- Kubernetes fleets --------------------------------------------------- #
     # Namespace the seeded ``k8s-local`` fleet runs worker Jobs in (env
@@ -676,6 +682,8 @@ def load_settings(env=None):
             DEFAULT_PACK_UPLOAD_MAX_MEMBER_BYTES),
         pack_upload_max_members=_get_int(
             env, "PACK_UPLOAD_MAX_MEMBERS", DEFAULT_PACK_UPLOAD_MAX_MEMBERS),
+        pack_builder_max_fields=max(1, _get_int(
+            env, "PACK_BUILDER_MAX_FIELDS", DEFAULT_PACK_BUILDER_MAX_FIELDS)),
         k8s_namespace=_get(env, "K8S_NAMESPACE", DEFAULT_K8S_NAMESPACE)
         or DEFAULT_K8S_NAMESPACE,
         k8s_node_selector=_parse_node_selector(env),
