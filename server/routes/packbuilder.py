@@ -52,7 +52,9 @@ log = logging.getLogger("stoker.routes.packbuilder")
 
 def _use_custom_lists():
     # type: () -> None
-    packbuilder.set_custom_dir(os.path.join(get_settings().pack_upload_dir, ".wordlists"))
+    settings = get_settings()
+    packbuilder.set_custom_dir(os.path.join(settings.pack_upload_dir, ".wordlists"))
+    packbuilder.set_max_fields(settings.pack_builder_max_fields)
 
 
 router = APIRouter(prefix="/api/pack-builder", tags=["pack-builder"],

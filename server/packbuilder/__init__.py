@@ -50,7 +50,13 @@ BUILDER_TAG = "pack-builder"
 MAX_EVENTS = 5000
 MAX_EVENT_BYTES = 64 * 1024
 MAX_TOTAL_BYTES = 2 * 1024 * 1024
-MAX_TOKENS = 100
+# Fields switched on per pack. The control plane sets it from
+# PACK_BUILDER_MAX_FIELDS (set_max_fields). Every field is a regex that scans the
+# whole event on every render, so a large count costs generation throughput.
+DEFAULT_MAX_TOKENS = 2000
+MAX_TOKENS = DEFAULT_MAX_TOKENS
+# Fields switched off ride along in the config, so they are bounded too.
+TOKENS_OFF_FACTOR = 5
 MAX_PATTERN_LEN = 1000
 MAX_VALUES = 10000
 MAX_INT = 10 ** 18             # integer bounds (both engines draw in 64 bits)
@@ -89,6 +95,13 @@ _INDEX_CACHE = []  # type: List[Dict[str, Any]]
 _CUSTOM_DIR = None  # type: Optional[str]
 _LIST_NAME_RE = re.compile(r"^[a-z0-9_]{1,40}$")
 _CELL_RE = re.compile(r'^[^,"\r\n]*$')
+
+
+def set_max_fields(n):
+    # type: (int) -> None
+    """How many fields a pack may switch on (``PACK_BUILDER_MAX_FIELDS``)."""
+    global MAX_TOKENS
+    MAX_TOKENS = max(1, int(n))
 
 
 def set_custom_dir(path):
@@ -1310,8 +1323,13 @@ def validate_config(cfg):
             raise BuilderError("event %d does not survive the event breaker: every event must start "
                                "with a breaker match and no later line may match it" % (bad + 1))
     tokens = cfg.get("tokens") or []
-    if len(tokens) > MAX_TOKENS:
-        raise BuilderError("too many fields (%d, max %d)" % (len(tokens), MAX_TOKENS))
+    on = sum(1 for t in tokens if isinstance(t, dict) and t.get("enabled", True))
+    if on > MAX_TOKENS:
+        raise BuilderError("too many fields switched on (%d, max %d; PACK_BUILDER_MAX_FIELDS)"
+                           % (on, MAX_TOKENS))
+    if len(tokens) > MAX_TOKENS * TOKENS_OFF_FACTOR:
+        raise BuilderError("too many fields (%d, max %d including those switched off)"
+                           % (len(tokens), MAX_TOKENS * TOKENS_OFF_FACTOR))
     known_lists = set(wordlist_names())
     tables = table_columns()
     clean_tokens = []
