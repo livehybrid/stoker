@@ -633,6 +633,8 @@ export interface BuilderConfig {
 export interface BuilderPreviewResponse {
   events: string[];
   warnings: string[];
+  /** Problems the save will refuse; kept apart so many warnings cannot bury them. */
+  blocking?: string[];
   bytes_per_event: number;
   highlights: BuilderHighlights;
 }

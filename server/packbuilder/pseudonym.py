@@ -595,6 +595,9 @@ class PseudonymReport:
     mapping: Dict[str, str] = dataclasses.field(default_factory=dict)
     origin: Dict[str, str] = dataclasses.field(default_factory=dict)
     residuals: List[Dict[str, Any]] = dataclasses.field(default_factory=list)
+    # Residuals that refuse a save. A preview carries them here rather than in
+    # ``warnings`` so the UI can show them apart and hold the save back.
+    blocking: List[str] = dataclasses.field(default_factory=list)
 
     def total_spans(self):
         # type: () -> int
@@ -834,10 +837,17 @@ def scan_residuals(report, texts=(), rewrite_fields=()):
         for _s, _e, value in find_residuals(text or "", pattern):
             if value in report.mapping:
                 findings.append({"where": where, "value": value,
-                                 "field": report.origin.get(value), "rewritten": False})
+                                 "field": report.origin.get(value), "rewritten": False,
+                                 "in_config": True})
 
     report.residuals = findings
     return report
+
+
+def _places(wheres):
+    # type: (Sequence[str]) -> str
+    return ", ".join(wheres[:3]) + (" and %d more" % (len(wheres) - 3)
+                                    if len(wheres) > 3 else "")
 
 
 def residual_problems(report):
@@ -852,25 +862,40 @@ def residual_problems(report):
     unusable. No message ever contains the value.
     """ % RESIDUAL_MIN_REFUSE
     blocking, warnings = [], []  # type: List[str], List[str]
-    by_field = {}  # type: Dict[Tuple[str, bool], List[str]]
+    by_field = {}  # type: Dict[Tuple[str, bool], Dict[bool, List[str]]]
     for finding in report.residuals:
         long_enough = len(finding["value"]) >= RESIDUAL_MIN_REFUSE
-        by_field.setdefault((finding.get("field") or "", long_enough), []).append(
-            finding["where"])
-    for (field, long_enough), wheres in sorted(by_field.items()):
-        where = ", ".join(wheres[:3]) + (" and %d more" % (len(wheres) - 3)
-                                         if len(wheres) > 3 else "")
-        if long_enough:
+        places = by_field.setdefault((finding.get("field") or "", long_enough),
+                                     {False: [], True: []})
+        wheres = places[bool(finding.get("in_config"))]
+        # One field's value list can hold many of the originals; naming it once
+        # per value buries the other places in repetition.
+        if finding["where"] not in wheres:
+            wheres.append(finding["where"])
+    for (field, long_enough), places in sorted(by_field.items()):
+        label = field or "a pseudonym field"
+        if not long_enough:
+            warnings.append(
+                "%s: a value of this field also appears outside the field (%s). It "
+                "is short enough that this may be a coincidence, such as a digit "
+                "run inside an address or a size, so it is not treated as a leak."
+                % (label, _places(places[False] + places[True])))
+            continue
+        if places[False]:
             blocking.append(
                 "%s: a value of this field still appears outside the field itself "
                 "(%s), so the pack would carry the identifier you asked to hide. "
                 "Turn on 'replace it everywhere' for this field, widen the pattern "
                 "to cover those occurrences, or remove them from the sample."
-                % (field or "a pseudonym field", where))
-        else:
-            warnings.append(
-                "%s: a value of this field also appears outside the field (%s). It "
-                "is short enough that this may be a coincidence, such as a digit "
-                "run inside an address or a size, so it is not treated as a leak."
-                % (field or "a pseudonym field", where))
+                % (label, _places(places[False])))
+        if places[True]:
+            # 'Replace it everywhere' rewrites events only, never another field's
+            # settings, so suggesting it here would send the operator in a circle.
+            blocking.append(
+                "%s: a value of this field still appears in the pack's settings "
+                "(%s), so the pack would carry the identifier you asked to hide. "
+                "'Replace it everywhere' does not reach these: change those fields "
+                "so they no longer hold the value (a different replacement, or the "
+                "value removed from the list), disable them, or rename what holds it."
+                % (label, _places(places[True])))
     return blocking, warnings
