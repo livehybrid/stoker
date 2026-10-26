@@ -14,6 +14,7 @@ import { Modal } from "../features/ui/Modal";
 import { PackCard } from "../features/packs/PackCard";
 import { PackPreviewDrawer } from "../features/packs/PackPreviewDrawer";
 import { UploadPackForm } from "../features/packs/UploadPackForm";
+import { DraftsCard } from "../features/packs/DraftsCard";
 import { Callout, Grid, Inline, Muted, Stack, Strong } from "../components/text";
 
 // Packs page: a filterable grid of indexed sample packs (filter by repo, wired
@@ -114,6 +115,8 @@ function Packs() {
           )}
         </Callout>
       )}
+
+      <DraftsCard />
 
       <Card>
         <Inline>

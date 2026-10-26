@@ -404,6 +404,7 @@ def _install_auth_middleware(app):
         # "operator" when this is absent (bootstrap / auth-disabled paths).
         role, username = outcome
         request.state.actor = username
+        request.state.role = role
         # Role gate: /api/users, /api/tokens and /api/config are admin-only
         # (managing users or API tokens is a strictly higher privilege than
         # holding one, and a config export carries every target's encrypted HEC

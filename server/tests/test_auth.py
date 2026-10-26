@@ -932,6 +932,10 @@ def test_role_gate_viewer_is_read_only_operator_can_write(settings, fake_driver)
             "name": "x", "hec_url": "http://h:8088", "token": "t"}).status_code == 403  # write denied
         assert vc.delete("/api/targets/1").status_code == 403
         assert vc.get("/api/users").status_code == 403                        # admin only
+        # A pack builder draft holds the original sample: a viewer may list
+        # drafts but never read one back.
+        assert vc.get("/api/pack-builder/drafts").status_code == 200
+        assert vc.get("/api/pack-builder/drafts/1").status_code == 403
 
     with _build_client(s, fake_driver) as oc:
         assert _login(oc, "opie", "operatorpw12345").status_code == 200

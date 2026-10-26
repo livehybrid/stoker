@@ -1373,3 +1373,72 @@ def test_api_applies_field_limit(client, upload_dir, max_fields):
     config_mod.set_settings(dataclasses.replace(config_mod.get_settings(), pack_builder_max_fields=2))
     r = client.post("/api/pack-builder/preview", json={"config": _kv_config(3, 3), "n": 1})
     assert r.status_code == 422 and "max 2" in r.text
+
+
+# ---- drafts: progress kept before the pack builds ----
+
+def test_api_a_draft_saves_what_does_not_build_and_the_build_removes_it(
+        client, upload_dir, db_session):
+    from server.models import PackDraft
+    # Refused as a pack (the identifier survives in the URL), kept as a draft.
+    config = {"name": "c", "events": RESIDUAL_SAMPLE, "tokens": [_residual_token()]}
+    assert client.post("/api/pack-builder/packs", json={"config": config}).status_code == 422
+    r = client.post("/api/pack-builder/drafts", json={"name": "half done", "config": config})
+    assert r.status_code == 201, r.text
+    draft = r.json()
+    assert draft["name"] == "half done" and draft["pack_id"] is None
+    assert "config" not in draft
+
+    listed = client.get("/api/pack-builder/drafts").json()
+    assert [d["id"] for d in listed] == [draft["id"]]
+    assert "654321" not in json.dumps(listed), "the list never carries contents"
+
+    # The originals are only ever stored as ciphertext.
+    row = db_session.get(PackDraft, draft["id"])
+    assert "654321" not in row.state_encrypted and "client_id" not in row.state_encrypted
+
+    got = client.get("/api/pack-builder/drafts/%d" % draft["id"]).json()
+    assert got["config"] == config
+
+    fixed = dict(config, tokens=[_residual_token(rewrite=True)])
+    r = client.put("/api/pack-builder/drafts/%d" % draft["id"],
+                   json={"name": "nearly", "config": fixed})
+    assert r.status_code == 200 and r.json()["name"] == "nearly"
+
+    r = client.post("/api/pack-builder/packs", json={"config": fixed, "draft_id": draft["id"]})
+    assert r.status_code == 201, r.text
+    assert client.get("/api/pack-builder/drafts").json() == []
+    assert client.get("/api/pack-builder/drafts/%d" % draft["id"]).status_code == 404
+
+
+def test_api_a_refused_build_keeps_its_draft(client, upload_dir):
+    config = {"name": "c", "events": RESIDUAL_SAMPLE, "tokens": [_residual_token()]}
+    draft = client.post("/api/pack-builder/drafts", json={"config": config}).json()
+    r = client.post("/api/pack-builder/packs", json={"config": config, "draft_id": draft["id"]})
+    assert r.status_code == 422
+    assert client.get("/api/pack-builder/drafts/%d" % draft["id"]).status_code == 200
+
+
+def test_api_a_draft_of_a_deleted_pack_becomes_a_new_pack_draft(client, upload_dir):
+    r = client.post("/api/pack-builder/analyse", json={"text": SYSLOG})
+    body = r.json()
+    config = {"name": "d", "events": body["event_list"], "tokens": body["suggestions"]}
+    pack = client.post("/api/pack-builder/packs", json={"config": config}).json()
+    draft = client.post("/api/pack-builder/drafts",
+                        json={"config": config, "pack_id": pack["id"]}).json()
+    assert draft["pack_id"] == pack["id"]
+    assert client.delete("/api/packs/%d" % pack["id"]).status_code == 204
+    assert client.get("/api/pack-builder/drafts/%d" % draft["id"]).json()["pack_id"] is None
+
+
+def test_api_a_draft_only_edits_a_builder_pack(client, upload_dir):
+    r = client.post("/api/pack-builder/drafts", json={"config": {}, "pack_id": 999999})
+    assert r.status_code == 404
+
+
+def test_api_drafts_refused_under_an_ephemeral_master_key(client, upload_dir):
+    config_mod.set_settings(dataclasses.replace(config_mod.get_settings(),
+                                                master_key_generated=True))
+    r = client.post("/api/pack-builder/drafts", json={"config": {"events": ["a"]}})
+    assert r.status_code == 409
+    assert r.json()["detail"]["error"] == "draft_unencryptable"

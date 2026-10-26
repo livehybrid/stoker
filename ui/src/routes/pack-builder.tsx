@@ -44,6 +44,8 @@ import {
 
 interface BuilderSearch {
   edit?: number;
+  // A saved draft to reopen; with `edit` it is a draft of that pack.
+  draft?: number;
 }
 
 // One highlight colour per field, readable in both themes.
@@ -487,8 +489,10 @@ function describeSplit(res: Pick<BuilderAnalyseResponse, "format" | "breaker" | 
 function PackBuilder() {
   const navigate = useNavigate();
   const toast = useToast();
-  const { edit } = Route.useSearch();
+  const queryClient = useQueryClient();
+  const { edit, draft } = Route.useSearch();
   const editing = typeof edit === "number";
+  const drafting = typeof draft === "number";
 
   const [text, setText] = useState("");
   const [events, setEvents] = useState<string[]>([]);
@@ -535,31 +539,49 @@ function PackBuilder() {
     enabled: editing,
   });
   const hydrated = useRef(false);
+  // Reopening a draft: its state wins over the pack's, which is only the
+  // starting point the draft was made from.
+  const draftQ = useQuery({
+    queryKey: ["pack-builder", "draft", draft],
+    queryFn: () => api.packBuilder.getDraft(draft as number),
+    // Not after this page saved the draft itself: what is on screen is newer.
+    enabled: drafting && !hydrated.current,
+    // A draft holds the original sample: fetch it once, never keep it around.
+    gcTime: 0,
+    staleTime: Infinity,
+  });
   useEffect(() => {
-    if (!editing || hydrated.current || !packQ.data) return;
-    const c = packQ.data.config;
-    setEvents(c.events);
-    setBuiltEvents(c.events);
-    setText(c.events.join("\n"));
+    if (hydrated.current) return;
+    if (drafting) {
+      if (!draftQ.data) return;
+    } else if (!editing || !packQ.data) {
+      return;
+    }
+    const c: Partial<BuilderConfig> = drafting ? draftQ.data!.config : packQ.data!.config;
+    const evs = c.events ?? [];
+    setEvents(evs);
+    setBuiltEvents(drafting ? draftQ.data!.already : evs);
+    setText(evs.join("\n"));
     setBreaker(c.breaker ?? null);
     if (c.breaker) {
       setMode("regex");
       setBreakerInput(c.breaker);
       setSplitNote(`Multi-line events: each starts where the breaker matches (${c.breaker}).`);
     }
-    setTokens(c.tokens.map((t) => ({ ...t, kind: "saved", why: "", examples: [], matches: 0 })));
-    setName(c.name);
+    setTokens((c.tokens ?? []).map((t) => ({ ...t, kind: "saved", why: "", examples: [], matches: 0 })));
+    setName(c.name ?? "");
     setDescription(c.description ?? "");
     setSourcetype(c.sourcetype ?? "");
     setTags((c.tags ?? []).join(", "));
-    setWholeSample(c.count < 0);
-    if (c.count > 0) setCount(String(c.count));
-    setInterval(String(c.interval));
+    const n = c.count ?? -1;
+    setWholeSample(n < 0);
+    if (n > 0) setCount(String(n));
+    setInterval(String(c.interval ?? 1));
     setOrder(c.order ?? "sequential");
     setRotateAligned((c.rotation?.scope ?? "pass") === "window");
     setRotatePeriod(String(c.rotation?.period ?? 60));
     hydrated.current = true;
-  }, [editing, packQ.data]);
+  }, [editing, drafting, packQ.data, draftQ.data]);
 
   const analyse = useMutation({
     mutationFn: () => api.packBuilder.analyse(text, mode, mode === "regex" ? breakerInput : null),
@@ -680,14 +702,44 @@ function PackBuilder() {
 
   const save = useMutation({
     mutationFn: () =>
-      editing ? api.packBuilder.update(edit as number, config) : api.packBuilder.create(config),
+      editing
+        ? api.packBuilder.update(edit as number, config, draft)
+        : api.packBuilder.create(config, draft),
     onSuccess: (pack) => {
+      if (drafting) queryClient.invalidateQueries({ queryKey: ["pack-builder", "drafts"] });
       toast.success(
         pack.lint_status === "ok"
           ? `Pack "${pack.name}" ${editing ? "rebuilt" : "created"} and verified`
           : `Pack "${pack.name}" saved but failed lint: see the pack card`,
       );
       navigate({ to: "/packs" });
+    },
+    onError: (err) => toast.error(apiMessage(err)),
+  });
+
+  // Keeps progress on a pack that does not build yet. The name the operator
+  // typed is kept as typed (possibly empty), not the preview's placeholder.
+  const saveDraft = useMutation({
+    mutationFn: () =>
+      api.packBuilder.saveDraft(draft, {
+        name: name.trim(),
+        pack_id: editing ? (edit as number) : null,
+        config: { ...config, name: name.trim() },
+        already: builtEvents,
+      }),
+    onSuccess: (d) => {
+      toast.success(`Draft "${d.name || "untitled"}" saved`);
+      queryClient.invalidateQueries({ queryKey: ["pack-builder", "drafts"] });
+      if (!drafting) {
+        // Later saves go over this draft rather than starting another; the
+        // page already holds what was saved, so it must not reload it.
+        hydrated.current = true;
+        navigate({
+          to: "/pack-builder",
+          search: editing ? { edit, draft: d.id } : { draft: d.id },
+          replace: true,
+        });
+      }
     },
     onError: (err) => toast.error(apiMessage(err)),
   });
@@ -747,6 +799,8 @@ function PackBuilder() {
 
   if (editing && packQ.isPending) return <LoadingState />;
   if (editing && packQ.isError) return <ErrorState error={packQ.error} onRetry={() => packQ.refetch()} />;
+  if (drafting && draftQ.isPending && !hydrated.current) return <LoadingState />;
+  if (drafting && draftQ.isError) return <ErrorState error={draftQ.error} onRetry={() => draftQ.refetch()} />;
 
   return (
     <Stack $gap="large">
@@ -1073,6 +1127,13 @@ function PackBuilder() {
             "Analyse some events to start"
           )}
         </Muted>
+        <Button
+          variant="secondary"
+          onClick={() => saveDraft.mutate()}
+          disabled={events.length === 0 || saveDraft.isPending || save.isPending}
+        >
+          {saveDraft.isPending ? "Saving draft…" : "Save draft"}
+        </Button>
         <Button variant="primary" onClick={() => save.mutate()} disabled={!canSave}>
           {save.isPending ? "Saving…" : editing ? "Rebuild pack" : "Create pack"}
         </Button>
@@ -1083,9 +1144,16 @@ function PackBuilder() {
 
 export const Route = createFileRoute("/pack-builder")({
   validateSearch: (search: Record<string, unknown>): BuilderSearch => {
-    const raw = search.edit;
-    const n = typeof raw === "number" ? raw : Number(raw);
-    return Number.isFinite(n) && n > 0 ? { edit: n } : {};
+    const id = (raw: unknown) => {
+      const n = typeof raw === "number" ? raw : Number(raw);
+      return Number.isFinite(n) && n > 0 ? n : undefined;
+    };
+    const out: BuilderSearch = {};
+    const e = id(search.edit);
+    const d = id(search.draft);
+    if (e !== undefined) out.edit = e;
+    if (d !== undefined) out.draft = d;
+    return out;
   },
   component: PackBuilder,
 });

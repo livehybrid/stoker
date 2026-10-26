@@ -58,6 +58,8 @@ import type {
   UserCreate,
   UserOut,
   UserUpdate,
+  PackDraftFull,
+  PackDraftOut,
 } from "./types";
 
 export const API_BASE = "/api";
@@ -333,12 +335,24 @@ export const packBuilder = {
     }),
   pseudonymKey: () =>
     request<PseudonymKeyInfo>("GET", "/pack-builder/pseudonym-key"),
-  create: (config: BuilderConfig) =>
-    request<PackOut>("POST", "/pack-builder/packs", { body: { config } }),
+  // `draftId` names the draft this build finishes; the server deletes it once
+  // the pack is saved, since the draft is where the originals were kept.
+  create: (config: BuilderConfig, draftId?: number) =>
+    request<PackOut>("POST", "/pack-builder/packs", { body: { config, draft_id: draftId ?? null } }),
   get: (id: number) =>
     request<{ pack_id: number; config: BuilderConfig }>("GET", `/pack-builder/packs/${id}`),
-  update: (id: number, config: BuilderConfig) =>
-    request<PackOut>("PUT", `/pack-builder/packs/${id}`, { body: { config } }),
+  update: (id: number, config: BuilderConfig, draftId?: number) =>
+    request<PackOut>("PUT", `/pack-builder/packs/${id}`, { body: { config, draft_id: draftId ?? null } }),
+  drafts: () => request<PackDraftOut[]>("GET", "/pack-builder/drafts"),
+  getDraft: (id: number) => request<PackDraftFull>("GET", `/pack-builder/drafts/${id}`),
+  saveDraft: (
+    id: number | undefined,
+    body: { name: string; pack_id: number | null; config: BuilderConfig; already: string[] },
+  ) =>
+    id === undefined
+      ? request<PackDraftOut>("POST", "/pack-builder/drafts", { body })
+      : request<PackDraftOut>("PUT", `/pack-builder/drafts/${id}`, { body }),
+  deleteDraft: (id: number) => request<void>("DELETE", `/pack-builder/drafts/${id}`),
 };
 
 // --------------------------------------------------------------------------- //

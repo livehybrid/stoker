@@ -630,6 +630,21 @@ export interface BuilderConfig {
   rotation?: { scope: "pass" | "window"; period?: number; fields?: string[] } | null;
 }
 
+/** A pack builder session saved before it builds. The list never carries contents. */
+export interface PackDraftOut {
+  id: number;
+  name: string;
+  pack_id: number | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PackDraftFull extends PackDraftOut {
+  config: BuilderConfig;
+  already: string[];
+}
+
 export interface BuilderPreviewResponse {
   events: string[];
   warnings: string[];

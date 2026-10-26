@@ -453,6 +453,39 @@ class PseudonymKey(Base):
     created_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
 
+class PackDraft(Base):
+    """A pack builder session saved part-way, to be finished later.
+
+    A draft is NOT a pack: it is never written under the pack directory, never
+    linted, bundled, exported, git-synced or mirrored to a pack source, and no
+    run can use it. It exists so an operator can keep their progress on a pack
+    that does not yet build (a blocking residual, an unfinished field list).
+
+    **It holds the operator's ORIGINAL sample.** Pseudonymisation happens when a
+    pack is built, so until then the events are the real ones; everywhere else
+    the server only ever keeps the stand-ins. That is why ``state_encrypted`` is
+    Fernet ciphertext under the master key, exactly like
+    ``targets.token_encrypted``, and why a successful build deletes the draft it
+    came from. ``name`` is the operator's working title, shown in the list, and
+    is the only part stored in clear.
+
+    ``pack_id`` is set when the draft edits an existing builder pack; building
+    it then rebuilds that pack in place.
+    """
+
+    __tablename__ = "pack_drafts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    pack_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("packs.id", ondelete="SET NULL"), nullable=True)
+    # Secret: Fernet ciphertext of the builder state JSON. Never serialised.
+    state_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    created_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime.datetime] = _ts_column(nullable=False, default=utcnow)
+    updated_at: Mapped[datetime.datetime] = _ts_column(nullable=False, default=utcnow)
+
+
 class ApiToken(Base):
     """A non-interactive API token for CI/CD and machine callers.
 
@@ -509,4 +542,5 @@ __all__ = [
     "User",
     "ApiToken",
     "PseudonymKey",
+    "PackDraft",
 ]

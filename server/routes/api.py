@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 from fastapi import (APIRouter, Depends, File, Form, HTTPException, Query,
                      Request, Response, UploadFile)
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from .. import (bundles, catrust, crypto, gitsync, lifecycle, packexport, packsource,
@@ -40,6 +40,7 @@ from ..models import (
     Fleet,
     MetricSample,
     Pack,
+    PackDraft,
     Repo,
     Run,
     RunEvent,
@@ -632,6 +633,9 @@ def delete_pack(pack_id: int, db: Session = Depends(get_db)):
             detail="pack %s is referenced by one or more specs; delete those first" % pack_id,
         )
     _remove_uploaded_pack_dir(pack.source_path)
+    # A draft editing this pack keeps the operator's work: it becomes a draft of
+    # a new pack rather than vanishing (SQLite does not enforce the SET NULL).
+    db.execute(update(PackDraft).where(PackDraft.pack_id == pack_id).values(pack_id=None))
     db.delete(pack)
     db.commit()
     return Response(status_code=204)

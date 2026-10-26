@@ -130,7 +130,7 @@ def test_delta_0003_adds_specs_extra_pack_ids(tmp_path):
     assert "extra_pack_ids_json" not in _spec_columns()
 
     run_migrations()  # managed at 0002 -> upgrade head applies 0003 (and on)
-    assert _head_rev() == "0006_pseudonym_keys"
+    assert _head_rev() == "0007_pack_drafts"
     assert "extra_pack_ids_json" in _spec_columns()
 
 
@@ -180,7 +180,7 @@ def test_delta_0004_adds_specs_eventgen_impl(tmp_path):
     assert not ({"eventgen_impl", "fast_envelope"} & _spec_columns())
 
     run_migrations()  # managed at 0003 -> upgrade head applies 0004 (and on)
-    assert _head_rev() == "0006_pseudonym_keys"
+    assert _head_rev() == "0007_pack_drafts"
     assert {"eventgen_impl", "fast_envelope"} <= _spec_columns()
 
 
@@ -209,7 +209,7 @@ def test_delta_0005_adds_specs_rate_shape(tmp_path):
         command.stamp(cfg, "0004_spec_eventgen_impl", purge=True)
     assert "rate_shape" not in _spec_columns()
     run_migrations()
-    assert _head_rev() == "0006_pseudonym_keys"
+    assert _head_rev() == "0007_pack_drafts"
     assert "rate_shape" in _spec_columns()
 
 
@@ -253,10 +253,51 @@ def test_delta_0006_adds_pseudonym_keys_and_never_drops_it(tmp_path):
         command.stamp(_cfg(conn), "0005_spec_rate_shape", purge=True)
     assert "pseudonym_keys" not in _tables()
     run_migrations()
-    assert _head_rev() == "0006_pseudonym_keys"
+    assert _head_rev() == "0007_pack_drafts"
     assert "pseudonym_keys" in _tables()
 
     # And the downgrade is a no-op: the table survives it.
     with db_mod.get_engine().begin() as conn:
         command.downgrade(_cfg(conn), "0005_spec_rate_shape")
     assert "pseudonym_keys" in _tables(), "the key table must survive a rollback"
+
+
+def test_delta_0007_adds_pack_drafts_and_drops_it_on_downgrade(tmp_path):
+    """A live DB stamped at 0006 gains ``pack_drafts``; a rollback drops it,
+    which loses nothing a built pack depends on."""
+    _use(tmp_path, "delta0007.db")
+    from alembic import command
+    from alembic.config import Config
+
+    from server.migrate import run_migrations
+    from server.models import PackDraft
+
+    run_migrations()
+
+    def _tables():
+        # type: () -> set
+        return set(inspect(db_mod.get_engine()).get_table_names())
+
+    def _cfg(conn):
+        cfg = Config()
+        cfg.set_main_option(
+            "script_location",
+            os.path.join(os.path.dirname(db_mod.__file__), "migrations"))
+        cfg.attributes["connection"] = conn
+        return cfg
+
+    cols = {c["name"] for c in inspect(db_mod.get_engine()).get_columns("pack_drafts")}
+    assert {"id", "name", "pack_id", "state_encrypted", "created_by",
+            "created_at", "updated_at"} <= cols
+
+    with db_mod.get_engine().begin() as conn:
+        PackDraft.__table__.drop(conn)
+        command.stamp(_cfg(conn), "0006_pseudonym_keys", purge=True)
+    run_migrations()
+    assert _head_rev() == "0007_pack_drafts"
+    assert "pack_drafts" in _tables()
+
+    with db_mod.get_engine().begin() as conn:
+        command.downgrade(_cfg(conn), "0006_pseudonym_keys")
+    assert "pack_drafts" not in _tables()
+    assert "pseudonym_keys" in _tables()

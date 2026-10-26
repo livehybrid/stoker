@@ -970,11 +970,15 @@ For the values it IS pseudonymising, the builder checks the rest of the pack. If
 `client_id=654321` is marked but `654321` also appears in a URL, a message, a
 "values I list" field, a pattern or the description, the save is **refused** and
 names where, because the pack travels and would carry the identifier you asked
-to hide. Turn on **"replace this value everywhere it appears"** for the field and
+to hide. The preview lists these problems in a red box above its warnings and the
+save button stays off until they are cleared. When the value survives in the
+events, turn on **"replace this value everywhere it appears"** for the field and
 the other occurrences get the same stand-in, which removes the residue and makes
 the identifier correlate in both places. Patterns, field names, value lists and
 the description are reported but never rewritten: they are configuration you
-wrote, and editing them silently would change what the pack matches.
+wrote, and editing them silently would change what the pack matches. For those,
+change the field that holds the value (another replacement, or the value taken
+out of its list) or disable it.
 
 Two deliberate limits on that check. An original of fewer than five characters
 only warns, because a three-digit identifier genuinely does appear inside
@@ -1105,6 +1109,20 @@ creates a key.
 API: `GET /api/pack-builder/pseudonym-key` reports whether a key exists and its
 fingerprint, and never creates one. A save needing a key that cannot be created
 is `409 pseudonym_key_unavailable`.
+
+### Saving a draft
+
+**Save draft** keeps a pack you have not finished, even one that does not build
+yet. Drafts are listed at the top of the Packs page, where **Continue** reopens
+one and **Discard** deletes it. A draft is not a pack: no job can use it, and it
+is never exported, pushed to a pack source or written beside the packs.
+
+A draft holds your **original** sample, because pseudonymising happens when the
+pack is built. It is therefore stored only as ciphertext under
+`STOKER_MASTER_KEY`, readable back by operators and admins but not viewers, and
+deleted as soon as the pack it becomes is saved. Saving a draft is refused while
+the master key is auto-generated, since the draft would be unreadable after the
+next restart. Deleting a pack keeps any draft of it as a draft of a new pack.
 
 ### Your own word lists
 
