@@ -733,3 +733,29 @@ def test_the_collision_rate_is_the_one_we_already_warn_about():
 # the control-plane job never checks the submodule out, and a drift check that
 # does not run is the exact failure it exists to catch: each repo would test
 # against its own copy and both would pass while disagreeing.
+
+
+def test_replace_everywhere_rewrites_every_hit_and_keeps_the_masks_right():
+    # Several residues in one event, around the field's own span, with a
+    # stand-in longer than the original so every later offset moves. All are
+    # rewritten in one pass, and the masks still cover exactly the stand-ins.
+    events = ["a=123 user=123 b=123 c=/x/123/ d=4123 user=456 e=456"]
+    token = _tok(pattern=r"\buser=(\d+)", widen={"shape": "digits", "length": 15})
+    rep = ps.pseudonymise_events(events, [token], SUB)
+    ps.scan_residuals(rep, rewrite_fields=["user"])
+    event = rep.events[0]
+    a, b = rep.mapping["123"], rep.mapping["456"]
+    assert event == ("a=%s user=%s b=%s c=/x/%s/ d=4123 user=%s e=%s"
+                     % (a, a, a, a, b, b))
+    assert sorted(event[s:e] for s, e in rep.rewritten[0]) == sorted([a] * 4 + [b] * 2)
+    assert rep.residuals == []
+    (row,) = rep.rows
+    assert row.spans == 6
+
+
+def test_find_residuals_skips_hits_touching_any_masked_span():
+    pattern = ps.residual_regex(["123"])
+    text = "123 123 123 123"
+    # Unsorted and overlapping masks, as a rewrite pass can leave them.
+    masked = [(8, 11), (0, 2), (1, 3)]
+    assert ps.find_residuals(text, pattern, masked) == [(4, 7, "123"), (12, 15, "123")]
