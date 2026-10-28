@@ -29,8 +29,9 @@ const Value = styled.div<{ $tone?: "red" | "amber" }>`
 `;
 
 // A compact totals strip for the run header: cumulative events + volume + HEC
-// outcome counts + elapsed. Values come from the folded totals_json (updated as
-// workers report their final summaries) with a live elapsed clock.
+// outcome counts + elapsed. Values come from totals_json, which the server
+// builds from the workers' final summaries plus, for any slot that has not
+// reported one yet, its latest heartbeat, so a live run counts up as it goes.
 
 function num(totals: Record<string, unknown> | null | undefined, key: string): number | null {
   const v = totals?.[key];

@@ -1510,7 +1510,12 @@ def run_spec(spec_id: int, body: RunLaunch, request: Request, db: Session = Depe
 @router.get("/runs", response_model=List[RunOut])
 def list_runs(db: Session = Depends(get_db)):
     # type: (...) -> Any
-    return list(db.execute(select(Run).order_by(Run.id.desc())).scalars().all())
+    runs = list(db.execute(select(Run).order_by(Run.id.desc())).scalars().all())
+    totals = lifecycle.live_totals(db, runs)
+    return [
+        RunOut.model_validate(run).model_copy(update={"totals_json": totals[run.id]})
+        for run in runs
+    ]
 
 
 @router.get("/runs/{run_id}", response_model=RunDetail)
@@ -1520,7 +1525,10 @@ def get_run(run_id: int, db: Session = Depends(get_db)):
     run = db.get(Run, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="unknown run")
-    return run
+    # Totals from the latest heartbeats too, or a running fleet shows nothing
+    # until it drains.
+    totals = lifecycle.live_totals(db, [run])[run.id]
+    return RunDetail.model_validate(run).model_copy(update={"totals_json": totals})
 
 
 @router.get("/runs/{run_id}/metrics", response_model=MetricsOut)
