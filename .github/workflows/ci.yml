@@ -389,3 +389,58 @@ jobs:
 
       - name: Keyless sign the pushed digest
         run: cosign sign --yes "${IMAGE_NAME}@${{ needs.build.outputs.digest }}"
+
+  release:
+    # A v* tag becomes a GitHub Release once both images for it are pushed and
+    # signed: the Splunk app as an installable package with its checksum, and
+    # the image references in the notes. The app version is the tag's, stamped
+    # at packaging time (tools/package_splunk_apps.py), so a tag that is not
+    # vMAJOR.MINOR.PATCH fails here rather than shipping an app Splunk rejects.
+    needs: [cp-build, sign]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: ${{ github.workflow }}-release-${{ github.ref_name }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Package the Splunk app
+        run: |
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" \
+            python tools/package_splunk_apps.py --version "$GITHUB_REF_NAME" --out dist
+      - name: Write the release notes
+        run: |
+          tag="$GITHUB_REF_NAME"
+          cat > notes.md <<NOTES
+          ## Images
+
+          | | |
+          |---|---|
+          | Control plane | \`ghcr.io/livehybrid/stoker:${tag}\` |
+          | Worker | \`ghcr.io/livehybrid/stoker-worker:${tag}\` |
+
+          Each is keyless-signed with cosign.
+
+          ## Splunk app
+
+          - \`stoker_observability-${tag#v}.tgz\`: Fleet Observability and Run Detail over the control plane's dogfood telemetry (stoker:metrics, stoker:worker, stoker:job). Install where DOGFOOD_HEC_URL delivers.
+
+          Install from Splunk Web (Apps, Install app from file) or \`splunk install app <file> -update 1\`. Checksums are in SHA256SUMS.
+
+          NOTES
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/*.tgz dist/SHA256SUMS --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/*.tgz dist/SHA256SUMS \
+              --verify-tag --title "$GITHUB_REF_NAME" \
+              --notes-file notes.md --generate-notes
+          fi

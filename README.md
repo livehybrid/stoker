@@ -257,6 +257,14 @@ Want real recorded captures instead of synthetic templates? See
 corpora (BOTSv3, attack_data, NASA-HTTP, …) you can wire in as `rawreplay`
 `dataset_url` packs.
 
+## Releases
+
+Push a `vMAJOR.MINOR.PATCH` tag on `main` (`git tag v0.2.0 && git push origin
+v0.2.0`). CI tests it, publishes and signs `ghcr.io/livehybrid/stoker:v0.2.0`
+and `stoker-worker:v0.2.0`, then creates the GitHub Release with the Splunk app
+attached as `stoker_observability-0.2.0.tgz` plus `SHA256SUMS`. The app
+version comes from the tag; `app.conf` in the tree is not edited.
+
 ## Repo layout
 
 ```
