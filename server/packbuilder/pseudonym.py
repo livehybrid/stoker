@@ -46,7 +46,9 @@ the cross-engine contract, so it must not acquire dependencies.
 
 from __future__ import annotations
 
+import bisect
 import dataclasses
+import functools
 import hashlib
 import hmac
 import math
@@ -487,6 +489,14 @@ def expected_collisions(n, m):
 # Residual scan: find an original that survived somewhere else
 # --------------------------------------------------------------------------- #
 
+@functools.lru_cache(maxsize=8192)
+def token_regex(pattern):
+    # type: (str) -> re.Pattern
+    """A field's compiled pattern. ``re`` keeps only 512, so a pack with more
+    fields than that recompiled every one of them on every live preview."""
+    return re.compile(pattern)
+
+
 def residual_regex(values):
     # type: (Iterable[str]) -> Optional[re.Pattern]
     """One trie-factored regex matching any of ``values`` as a whole token.
@@ -497,9 +507,17 @@ def residual_regex(values):
     a trie because a flat alternation of a few thousand values is orders of
     magnitude slower over a 2 MB sample.
     """
-    vals = sorted({v for v in values if v})
+    vals = tuple(sorted({v for v in values if v}))
     if not vals:
         return None
+    return _residual_regex(vals)
+
+
+@functools.lru_cache(maxsize=8)
+def _residual_regex(vals):
+    # type: (Tuple[str, ...]) -> re.Pattern
+    # Cached because a live preview rebuilds the same values on every edit
+    # that does not touch a pseudonym field, and the compile is the slow part.
     return re.compile(r"(?<![A-Za-z0-9])(?:%s)(?![A-Za-z0-9])" % _trie_pattern(vals))
 
 
@@ -544,10 +562,21 @@ def find_residuals(text, pattern, masked=()):
     """
     if pattern is None:
         return []
+    # Sorted and merged once, so each hit is one bisect rather than a scan of
+    # every masked span: an event with a thousand rewritten fields has a
+    # thousand of them.
+    starts, ends = [], []  # type: List[int], List[int]
+    for ms, me in sorted(masked):
+        if starts and ms <= ends[-1]:
+            ends[-1] = max(ends[-1], me)
+        else:
+            starts.append(ms)
+            ends.append(me)
     out = []  # type: List[Tuple[int, int, str]]
     for m in pattern.finditer(text):
         s, e = m.start(), m.end()
-        if any(s < me and ms < e for ms, me in masked):
+        k = bisect.bisect_left(ends, s + 1)
+        if k < len(starts) and starts[k] < e:
             continue
         out.append((s, e, m.group(0)))
     return out
@@ -560,7 +589,7 @@ __all__ = [
     "case_class", "collision_probability", "derive_subkey", "expected_collisions",
     "find_residuals", "fingerprint", "infer", "pseudonym", "render",
     "residual_problems", "residual_regex", "scan_residuals", "space",
-    "widen_format", "RESIDUAL_MIN_REFUSE",
+    "token_regex", "widen_format", "RESIDUAL_MIN_REFUSE",
 ]
 
 
@@ -658,7 +687,7 @@ def pseudonymise_events(events, tokens, subkey, widen_of=None):
         row = TokenRows(field=token.get("field") or "", pattern=token["pattern"],
                         widen=rep.get("widen"))
         rows.append(row)
-        compiled.append((re.compile(token["pattern"]), widen, row, token))
+        compiled.append((token_regex(token["pattern"]), widen, row, token))
 
     if not compiled:
         return PseudonymReport(list(events), {}, [], [], {}, [])
@@ -807,25 +836,41 @@ def scan_residuals(report, texts=(), rewrite_fields=()):
     wanted = set(rewrite_fields or ())
     findings = []  # type: List[Dict[str, Any]]
 
+    rows = {}  # type: Dict[Optional[str], int]
     for index, event in enumerate(report.events):
         masked = list(report.rewritten.get(index, ()))
-        while True:
-            hits = [h for h in find_residuals(event, pattern, masked)
-                    if h[2] in report.mapping]
-            target = next((h for h in hits
-                           if report.origin.get(h[2]) in wanted), None)
-            if target is None:
+        while wanted:
+            # Every hit of one scan is rewritten together, since they never
+            # overlap. Rewriting one hit per rescan was quadratic in the hits,
+            # which is every field ticked "replace everywhere". The rescan
+            # after it normally finds nothing, but a stand-in can change what
+            # borders the text next to it.
+            targets = [h for h in find_residuals(event, pattern, masked)
+                       if h[2] in report.mapping and report.origin.get(h[2]) in wanted]
+            if not targets:
                 break
-            start, end, value = target
-            stand_in = report.mapping[value]
-            event = event[:start] + stand_in + event[end:]
-            shift = len(stand_in) - (end - start)
-            masked = [(s + shift if s >= end else s, e + shift if e >= end else e)
-                      for s, e in masked]
-            masked.append((start, start + len(stand_in)))
-            for row in report.rows:
-                if row.field == report.origin.get(value):
-                    row.spans += 1
+            pieces, pos, shift, added = [], 0, 0, []
+            bounds = []  # type: List[Tuple[int, int]]
+            for start, end, value in targets:
+                stand_in = report.mapping[value]
+                pieces.append(event[pos:start])
+                pieces.append(stand_in)
+                pos = end
+                bounds.append((end, len(stand_in) - (end - start)))
+                added.append((start + shift, start + shift + len(stand_in)))
+                shift += len(stand_in) - (end - start)
+                rows[report.origin.get(value)] = rows.get(report.origin.get(value), 0) + 1
+            pieces.append(event[pos:])
+            event = "".join(pieces)
+            ends = [b[0] for b in bounds]
+            acc = [0]
+            for _e, d in bounds:
+                acc.append(acc[-1] + d)
+
+            def moved(x):
+                # type: (int) -> int
+                return x + acc[bisect.bisect_right(ends, x)]
+            masked = [(moved(s), moved(e)) for s, e in masked] + added
         report.events[index] = event
         report.rewritten[index] = masked
         for start, end, value in find_residuals(event, pattern, masked):
@@ -840,6 +885,8 @@ def scan_residuals(report, texts=(), rewrite_fields=()):
                                  "field": report.origin.get(value), "rewritten": False,
                                  "in_config": True})
 
+    for row in report.rows:
+        row.spans += rows.get(row.field, 0)
     report.residuals = findings
     return report
 

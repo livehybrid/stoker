@@ -1373,3 +1373,16 @@ def test_api_applies_field_limit(client, upload_dir, max_fields):
     config_mod.set_settings(dataclasses.replace(config_mod.get_settings(), pack_builder_max_fields=2))
     r = client.post("/api/pack-builder/preview", json={"config": _kv_config(3, 3), "n": 1})
     assert r.status_code == 422 and "max 2" in r.text
+
+
+def test_highlights_let_the_first_field_win_an_overlap():
+    events = ["user=alice host=web1 msg=alice@web1"]
+    tokens = [
+        {"id": "a", "pattern": r"msg=(\S+)"},
+        {"id": "b", "pattern": r"alice"},
+        {"id": "c", "pattern": r"web1"},
+    ]
+    (spans,) = pb.highlight(events, tokens)
+    text = events[0]
+    assert [(text[s:e], tid) for s, e, tid in spans] == [
+        ("alice", "b"), ("web1", "c"), ("alice@web1", "a")]

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import TextArea from "@splunk/react-ui/TextArea";
@@ -58,6 +58,15 @@ const PALETTE = [
   "rgba(170, 170, 60, 0.35)",
 ];
 
+// A pack this wide keeps its field editors closed until one is opened, so a
+// keystroke is not spent laying out hundreds of forms nobody is looking at.
+const OPEN_ALL_AT_MOST = 30;
+// Field rows rendered before "show more"; the filter finds the rest.
+const FIELD_PAGE = 200;
+// Above this many enabled fields a preview costs seconds of server time, so it
+// runs when asked rather than after every edit.
+const LIVE_PREVIEW_MAX_FIELDS = 300;
+
 const SIMPLE_KINDS: Array<[BuilderReplacementKind, string]> = [
   ["pseudonym", "Consistent pseudonym (keyed hash)"],
   ["timestamp", "Timestamp (the event time)"],
@@ -110,6 +119,20 @@ function defaultReplacement(key: string, examples: string[]): BuilderReplacement
   }
 }
 
+/** One line for a closed field: what it is replaced with. */
+function describeReplacement(r: BuilderReplacement, lists: WordlistInfo[]): string {
+  if (r.kind === "list") return `Word list: ${lists.find((l) => l.name === r.list)?.title ?? r.list}`;
+  if (r.kind === "linked") return `Linked: ${r.table} → ${r.column}`;
+  const label = SIMPLE_KINDS.find(([k]) => k === r.kind)?.[1] ?? r.kind;
+  if (r.kind !== "pseudonym") return label;
+  const extra = [
+    r.widen?.shape === "guid" ? "a GUID" : r.widen ? `widened to ${r.widen.shape}` : null,
+    r.rotate ? "new each replay" : null,
+    r.rewrite_residuals ? "everywhere in the event" : null,
+  ].filter(Boolean);
+  return extra.length ? `Consistent pseudonym: ${extra.join(", ")}` : label;
+}
+
 function num(v: string, fallback: number): number {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
@@ -126,7 +149,7 @@ function apiMessage(err: unknown): string {
 }
 
 /** One event with the spans each field would rewrite marked in its colour. */
-function MarkedEvent({
+const MarkedEvent = memo(function MarkedEvent({
   text,
   spans,
   colour,
@@ -159,7 +182,7 @@ function MarkedEvent({
       {parts}
     </Mono>
   );
-}
+});
 
 function ReplacementEditor({
   value,
@@ -363,6 +386,88 @@ function ReplacementEditor({
   );
 }
 
+/**
+ * One field. Memoised, with stable callbacks from the page, so editing one
+ * field re-renders that field rather than every field in a wide pack.
+ */
+const FieldPanel = memo(function FieldPanel({
+  token: t,
+  colour,
+  eventCount,
+  lists,
+  open,
+  onPatch,
+  onRemove,
+  onToggle,
+}: {
+  token: BuilderSuggestion;
+  colour: string;
+  eventCount: number;
+  lists: WordlistInfo[];
+  open: boolean | null; // null: always open, so no toggle
+  onPatch: (id: string, p: Partial<BuilderSuggestion>) => void;
+  onRemove: (id: string) => void;
+  onToggle: (id: string) => void;
+}) {
+  const expanded = open !== false;
+  return (
+    <Panel style={{ borderLeft: `6px solid ${colour}` }}>
+      <Stack $gap="small">
+        <Between>
+          <Inline>
+            <Switch
+              appearance="checkbox"
+              selected={t.enabled}
+              onClick={() => onPatch(t.id, { enabled: !t.enabled })}
+            >
+              <Strong>{t.field}</Strong>
+            </Switch>
+            {t.why && <Badge tone="slate">{t.why}</Badge>}
+            {t.replacement.kind === "linked" && <Badge tone="sky">linked</Badge>}
+            {t.kind !== "saved" && (
+              <Muted $small>
+                matches {t.matches} of {eventCount}
+              </Muted>
+            )}
+            {!expanded && t.enabled && <Muted $small>{describeReplacement(t.replacement, lists)}</Muted>}
+          </Inline>
+          <Inline>
+            {open !== null && t.enabled && (
+              <Button variant="ghost" onClick={() => onToggle(t.id)}>
+                {expanded ? "Close" : "Edit"}
+              </Button>
+            )}
+            <Button variant="ghost" onClick={() => onRemove(t.id)}>
+              Remove
+            </Button>
+          </Inline>
+        </Between>
+        {expanded && t.examples.length > 0 && (
+          <Muted $small>
+            seen: <Mono>{t.examples.slice(0, 4).join("  ·  ")}</Mono>
+          </Muted>
+        )}
+        {expanded && t.enabled && (
+          <>
+            <ReplacementEditor
+              value={t.replacement}
+              examples={t.examples}
+              lists={lists}
+              onChange={(r) => onPatch(t.id, { replacement: r })}
+            />
+            <Field
+              label="Pattern"
+              hint="Regular expression; the first capture group is replaced, otherwise the whole match"
+            >
+              <TextInput value={t.pattern} onChange={(_e, { value }) => onPatch(t.id, { pattern: value })} />
+            </Field>
+          </>
+        )}
+      </Stack>
+    </Panel>
+  );
+});
+
 /** Operator word lists: saved on the control plane and reusable in any pack. */
 function CustomLists({ lists }: { lists: WordlistInfo[] }) {
   const toast = useToast();
@@ -526,7 +631,8 @@ function PackBuilder() {
 
   const listsQ = useQuery({ queryKey: ["pack-builder", "wordlists"], queryFn: api.packBuilder.wordlists });
   const keyQ = useQuery({ queryKey: ["pack-builder", "pseudonym-key"], queryFn: api.packBuilder.pseudonymKey });
-  const lists = listsQ.data ?? [];
+  // Stable while loading too: a fresh [] each render would re-render every field.
+  const lists = useMemo(() => listsQ.data ?? [], [listsQ.data]);
 
   // Edit mode: reopen a builder pack's saved config once.
   const packQ = useQuery({
@@ -640,7 +746,9 @@ function PackBuilder() {
     ],
   );
 
-  // Debounced live preview whenever the config changes.
+  // Live preview, debounced. One request at a time: an edit made while one is
+  // running queues a single rerun with the newest config, rather than stacking
+  // requests that each take seconds on a wide pack and finish out of order.
   const [preview, setPreview] = useState<{
     events: string[];
     warnings: string[];
@@ -649,34 +757,67 @@ function PackBuilder() {
   } | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewing, setPreviewing] = useState(false);
-  const [nonce, setNonce] = useState(0);
+  const [previewed, setPreviewed] = useState<BuilderConfig | null>(null);
+  const enabledCount = tokens.filter((t) => t.enabled).length;
+  // null follows the field count; the switch on the Preview card overrides it.
+  const [livePref, setLivePref] = useState<boolean | null>(null);
+  const live = livePref ?? enabledCount <= LIVE_PREVIEW_MAX_FIELDS;
+  const latest = useRef({ config, builtEvents });
+  latest.current = { config, builtEvents };
+  const running = useRef(false);
+  const again = useRef(false);
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+  const runPreview = useCallback(async () => {
+    if (running.current) {
+      again.current = true;
+      return;
+    }
+    running.current = true;
+    setPreviewing(true);
+    try {
+      do {
+        again.current = false;
+        const { config: cfg, builtEvents: built } = latest.current;
+        try {
+          const res = await api.packBuilder.preview(cfg, 12, undefined, built);
+          if (!alive.current) return;
+          setPreview({
+            events: res.events,
+            warnings: res.warnings,
+            blocking: res.blocking ?? [],
+            bpe: res.bytes_per_event,
+          });
+          setHighlights(res.highlights);
+          setPreviewError(null);
+        } catch (err) {
+          if (!alive.current) return;
+          setPreviewError(apiMessage(err));
+        }
+        setPreviewed(cfg);
+      } while (again.current);
+    } finally {
+      running.current = false;
+      if (alive.current) setPreviewing(false);
+    }
+  }, []);
+  // Without live preview a new sample still gets one preview by itself.
+  const previewedEvents = useRef<string[] | null>(null);
   useEffect(() => {
     if (events.length === 0) return;
-    let cancelled = false;
-    const timer = window.setTimeout(async () => {
-      setPreviewing(true);
-      try {
-        const res = await api.packBuilder.preview(config, 12, undefined, builtEvents);
-        if (cancelled) return;
-        setPreview({
-          events: res.events,
-          warnings: res.warnings,
-          blocking: res.blocking ?? [],
-          bpe: res.bytes_per_event,
-        });
-        setHighlights(res.highlights);
-        setPreviewError(null);
-      } catch (err) {
-        if (!cancelled) setPreviewError(apiMessage(err));
-      } finally {
-        if (!cancelled) setPreviewing(false);
-      }
+    if (!live && previewedEvents.current === events) return;
+    const timer = window.setTimeout(() => {
+      previewedEvents.current = events;
+      runPreview();
     }, 450);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
-  }, [config, events.length, nonce, builtEvents]);
+    return () => window.clearTimeout(timer);
+  }, [config, events, builtEvents, live, runPreview]);
+  const previewStale = !live && preview !== null && previewed !== config;
 
   const save = useMutation({
     mutationFn: () =>
@@ -692,16 +833,55 @@ function PackBuilder() {
     onError: (err) => toast.error(apiMessage(err)),
   });
 
-  const colourOf = useMemo(() => {
-    const map = new Map<string, string>();
-    tokens.forEach((t, i) => map.set(t.id, PALETTE[i % PALETTE.length]));
-    return (id: string) => map.get(id) ?? PALETTE[0];
-  }, [tokens]);
-  const labelOf = (id: string) => tokens.find((t) => t.id === id)?.field ?? id;
+  // Keyed on the fields' ids and names only, which an edit to a field does not
+  // change, so the marked events are not redrawn on every keystroke.
+  const fieldKey = tokens.map((t) => `${t.id}\u0000${t.field}`).join("\u0001");
+  const { colourOf, labelOf } = useMemo(() => {
+    const colours = new Map<string, string>();
+    const labels = new Map<string, string>();
+    tokens.forEach((t, i) => {
+      colours.set(t.id, PALETTE[i % PALETTE.length]);
+      labels.set(t.id, t.field);
+    });
+    return {
+      colourOf: (id: string) => colours.get(id) ?? PALETTE[0],
+      labelOf: (id: string) => labels.get(id) ?? id,
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fieldKey]);
 
-  const patchToken = (id: string, p: Partial<BuilderSuggestion>) =>
-    setTokens((ts) => ts.map((t) => (t.id === id ? { ...t, ...p } : t)));
-  const removeToken = (id: string) => setTokens((ts) => ts.filter((t) => t.id !== id));
+  const patchToken = useCallback(
+    (id: string, p: Partial<BuilderSuggestion>) =>
+      setTokens((ts) => ts.map((t) => (t.id === id ? { ...t, ...p } : t))),
+    [],
+  );
+  const removeToken = useCallback((id: string) => setTokens((ts) => ts.filter((t) => t.id !== id)), []);
+
+  const [openIds, setOpenIds] = useState<Set<string>>(() => new Set());
+  const toggleOpen = useCallback(
+    (id: string) =>
+      setOpenIds((s) => {
+        const next = new Set(s);
+        if (!next.delete(id)) next.add(id);
+        return next;
+      }),
+    [],
+  );
+  const openAll = tokens.length <= OPEN_ALL_AT_MOST;
+  const [fieldFilter, setFieldFilter] = useState("");
+  const [kindFilter, setKindFilter] = useState("any");
+  const [fieldLimit, setFieldLimit] = useState(FIELD_PAGE);
+  const shownTokens = useMemo(() => {
+    const needle = fieldFilter.trim().toLowerCase();
+    return tokens.filter(
+      (t) =>
+        (!needle || t.field.toLowerCase().includes(needle)) &&
+        (kindFilter === "any" ||
+          (kindFilter === "on" && t.enabled) ||
+          (kindFilter === "off" && !t.enabled) ||
+          (t.enabled && t.replacement.kind === kindFilter)),
+    );
+  }, [tokens, fieldFilter, kindFilter]);
 
   function addCustom() {
     const raw = custom.trim();
@@ -743,7 +923,6 @@ function PackBuilder() {
   const nameOk = /^[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}$/.test(name.trim());
   const blocked = (preview?.blocking.length ?? 0) > 0;
   const canSave = events.length > 0 && nameOk && !save.isPending && !previewError && !blocked;
-  const enabledCount = tokens.filter((t) => t.enabled).length;
 
   if (editing && packQ.isPending) return <LoadingState />;
   if (editing && packQ.isError) return <ErrorState error={packQ.error} onRetry={() => packQ.refetch()} />;
@@ -837,54 +1016,62 @@ function PackBuilder() {
                 <Muted>No fields detected. Add one below: select text in an event or type a value.</Muted>
               )}
 
-              {tokens.map((t) => (
-                <Panel key={t.id} style={{ borderLeft: `6px solid ${colourOf(t.id)}` }}>
-                  <Stack $gap="small">
-                    <Between>
-                      <Inline>
-                        <Switch
-                          appearance="checkbox"
-                          selected={t.enabled}
-                          onClick={() => patchToken(t.id, { enabled: !t.enabled })}
-                        >
-                          <Strong>{t.field}</Strong>
-                        </Switch>
-                        {t.why && <Badge tone="slate">{t.why}</Badge>}
-                        {t.replacement.kind === "linked" && <Badge tone="sky">linked</Badge>}
-                        {t.kind !== "saved" && (
-                          <Muted $small>
-                            matches {t.matches} of {events.length}
-                          </Muted>
-                        )}
-                      </Inline>
-                      <Button variant="ghost" onClick={() => removeToken(t.id)}>
-                        Remove
-                      </Button>
-                    </Between>
-                    {t.examples.length > 0 && (
-                      <Muted $small>
-                        seen: <Mono>{t.examples.slice(0, 4).join("  ·  ")}</Mono>
-                      </Muted>
-                    )}
-                    {t.enabled && (
-                      <>
-                        <ReplacementEditor
-                          value={t.replacement}
-                          examples={t.examples}
-                          lists={lists}
-                          onChange={(r) => patchToken(t.id, { replacement: r })}
-                        />
-                        <Field
-                          label="Pattern"
-                          hint="Regular expression; the first capture group is replaced, otherwise the whole match"
-                        >
-                          <TextInput value={t.pattern} onChange={(_e, { value }) => patchToken(t.id, { pattern: value })} />
-                        </Field>
-                      </>
-                    )}
-                  </Stack>
-                </Panel>
+              {!openAll && (
+                <Grid $min="220px">
+                  <Field label="Find a field" hint={`${shownTokens.length} of ${tokens.length} shown`}>
+                    <TextInput
+                      value={fieldFilter}
+                      onChange={(_e, { value }) => {
+                        setFieldFilter(value);
+                        setFieldLimit(FIELD_PAGE);
+                      }}
+                      placeholder="part of the field name"
+                    />
+                  </Field>
+                  <Field label="Show">
+                    <Select
+                      value={kindFilter}
+                      onChange={(_e, { value }) => {
+                        setKindFilter(String(value));
+                        setFieldLimit(FIELD_PAGE);
+                      }}
+                    >
+                      <Select.Option value="any" label="All fields" />
+                      <Select.Option value="on" label="Fields that are on" />
+                      <Select.Option value="off" label="Fields that are off" />
+                      <Select.Option value="list" label="Replaced from a word list" />
+                      <Select.Option value="linked" label="Linked to a table" />
+                      {SIMPLE_KINDS.map(([k, label]) => (
+                        <Select.Option key={k} value={k} label={`Replaced with: ${label}`} />
+                      ))}
+                    </Select>
+                  </Field>
+                </Grid>
+              )}
+
+              {shownTokens.slice(0, fieldLimit).map((t) => (
+                <FieldPanel
+                  key={t.id}
+                  token={t}
+                  colour={colourOf(t.id)}
+                  eventCount={events.length}
+                  lists={lists}
+                  open={openAll ? null : openIds.has(t.id)}
+                  onPatch={patchToken}
+                  onRemove={removeToken}
+                  onToggle={toggleOpen}
+                />
               ))}
+              {shownTokens.length > fieldLimit && (
+                <Between>
+                  <Muted $small>
+                    Showing {fieldLimit} of {shownTokens.length}. Find a field by name to go straight to it.
+                  </Muted>
+                  <Button variant="secondary" onClick={() => setFieldLimit((n) => n + FIELD_PAGE)}>
+                    Show {Math.min(FIELD_PAGE, shownTokens.length - fieldLimit)} more
+                  </Button>
+                </Between>
+              )}
 
               <Panel>
                 <Grid $min="220px">
@@ -1015,12 +1202,28 @@ function PackBuilder() {
           <Card
             title="4. Preview"
             actions={
-              <Button variant="secondary" onClick={() => setNonce((n) => n + 1)} disabled={previewing}>
-                {previewing ? "Generating…" : "Regenerate"}
-              </Button>
+              <Inline>
+                <Switch appearance="toggle" selected={live} onClick={() => setLivePref(!live)}>
+                  Live
+                </Switch>
+                <Button variant="secondary" onClick={() => runPreview()} disabled={previewing}>
+                  {previewing ? "Generating…" : live ? "Regenerate" : "Refresh preview"}
+                </Button>
+              </Inline>
             }
           >
             <Stack $gap="small">
+              {!live && livePref === null && (
+                <Muted $small>
+                  With {enabledCount} fields on, each preview takes a while, so it updates when you press Refresh
+                  preview rather than after every change. Turn Live on to change that.
+                </Muted>
+              )}
+              {previewStale && (
+                <Callout $tone="info">
+                  The preview is from before your latest changes. Press Refresh preview to update it.
+                </Callout>
+              )}
               {previewError && <Callout $tone="error">{previewError}</Callout>}
               {preview?.blocking.length ? (
                 <Callout $tone="error">

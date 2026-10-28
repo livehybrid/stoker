@@ -825,9 +825,13 @@ events into an eventgen pack without writing any `eventgen.conf` by hand.
 3. **Choose replacements**: a word list, a linked table column, "values I list" (the values
    seen, editable, one per line), random IPv4 / GUID / MAC / integer / decimal /
    hex, a sequence number, a fixed value, or the event timestamp in any strftime
-   format.
+   format. Above 30 fields each field is a one-line summary that opens with
+   **Edit**, and a filter finds a field by name or by its replacement.
 4. **Preview** renders generated events live, with the same token semantics the
-   engines apply, and warns about a field whose pattern matches nothing.
+   engines apply, and warns about a field whose pattern matches nothing. With
+   more than 300 fields on, a preview takes seconds of server time, so it runs
+   once for a new sample and then on **Refresh preview**; the **Live** switch
+   turns updating after every change back on.
 5. **Create pack** writes an ordinary pack under `PACK_UPLOAD_DIR` and registers
    it through the same lint as an uploaded pack, tagged `pack-builder`. **Edit in
    builder** on the pack card reopens it; saving rebuilds the directory in place.

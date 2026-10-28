@@ -62,7 +62,7 @@ MAX_VALUES = 10000
 MAX_INT = 10 ** 18             # integer bounds (both engines draw in 64 bits)
 MAX_VALUE_LEN = 4096
 ANALYSE_EVENTS = 2000          # events examined for suggestions (the rest ride along)
-HIGHLIGHT_EVENTS = 25          # events returned with highlight spans
+HIGHLIGHT_EVENTS = 6           # events returned with highlight spans (the editor shows 6)
 PREVIEW_MAX = 200
 # eventgen's "generate the whole sample every interval". Both engines agree
 # (verified: 20 lines, count = -1, 3 intervals -> every line exactly 3 times),
@@ -1261,16 +1261,20 @@ def highlight(events, tokens):
     compiled = []
     for t in tokens:
         try:
-            compiled.append((t.get("id"), re.compile(t["pattern"])))
+            compiled.append((t.get("id"), _ps.token_regex(t["pattern"])))
         except (re.error, KeyError, TypeError):
             continue
     out = []
     for ev in events:
         spans = []  # type: List[List[Any]]
+        # One flag per character rather than a check against every span so
+        # far, which was quadratic in the fields of a wide event.
+        taken = bytearray(len(ev) + 1)
         for tid, rx in compiled:
             for m in rx.finditer(ev):
                 s, e = _target(m)
-                if e > s and all(e <= a or s >= b for a, b, _ in spans):
+                if e > s and taken.find(1, s, e) < 0:
+                    taken[s:e] = b"\x01" * (e - s)
                     spans.append([s, e, tid])
         spans.sort()
         out.append(spans)
@@ -1343,11 +1347,11 @@ def validate_config(cfg):
         if "\n" in pattern or "\r" in pattern:
             raise BuilderError("%s: pattern must be one line" % label)
         try:
-            re.compile(pattern)
+            compiled = _ps.token_regex(pattern)
         except re.error as exc:
             raise BuilderError("%s: invalid regular expression (%s)" % (label, exc))
         rep = _validate_replacement(label, t.get("replacement") or {}, known_lists, tables)
-        if rep["kind"] == "pseudonym" and re.compile(pattern).groups > 1:
+        if rep["kind"] == "pseudonym" and compiled.groups > 1:
             raise BuilderError(
                 "%s: a consistent-pseudonym pattern must have at most one capture "
                 "group, so there is no doubt which text is the identifier" % label)
@@ -1717,7 +1721,7 @@ def rotation_tables(cfg):
     is a contract rather than an implementation detail. See
     ``build_rotation_tables`` in firebox.
     """
-    fields = [(t, re.compile(t["pattern"])) for t in rotating_fields(cfg)]
+    fields = [(t, _ps.token_regex(t["pattern"])) for t in rotating_fields(cfg)]
     if not fields:
         return {}
     order = {}  # type: Dict[str, List[str]]
@@ -1799,7 +1803,7 @@ def _rotate_preview(cfg, text, tables, index, epoch):
     rotation = cfg.get("rotation") or {}
     sample = len(cfg.get("events") or []) or 1
     for token in rotating_fields(cfg):
-        rx = re.compile(token["pattern"])
+        rx = _ps.token_regex(token["pattern"])
         widen = token["replacement"].get("widen")
         fmt = (_ps.widen_format(widen.get("shape"), widen.get("length"))
                if widen else None)
@@ -2171,7 +2175,7 @@ def render_preview(cfg, n=20, seed=None, subkey=None, already=None):
     cfg, pseudo_report = apply_pseudonyms(cfg, subkey=subkey, already=already,
                                           strict=False)
     tokens = ordered_tokens(cfg)
-    compiled = [(t, re.compile(t["pattern"])) for t in tokens]
+    compiled = [(t, _ps.token_regex(t["pattern"])) for t in tokens]
     events = cfg["events"]
     warnings = []
     for t, rx in compiled:
