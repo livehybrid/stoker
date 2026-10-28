@@ -85,19 +85,18 @@ e.g. a dedicated `stoker_telemetry` index.
 
 ## Install the app
 
-1. Copy the `app/` directory into `$SPLUNK_HOME/etc/apps/stoker_observability/`
-   (rename `app/` to `stoker_observability`), or package it:
+1. Download `stoker_observability-<version>.tgz` from the GitHub Release for
+   your Stoker version (every `v*` tag attaches it, checksum in `SHA256SUMS`)
+   and install it via **Apps, Manage Apps, Install app from file**, or
+   `splunk install app stoker_observability-<version>.tgz -update 1`. To build
+   one from a checkout:
    ```
-   cd dashboards/stoker-observability
-   cp -r app stoker_observability
-   tar czf stoker_observability.tgz stoker_observability
+   python3 tools/package_splunk_apps.py --version 0.1.0 --out dist
    ```
-   then install `stoker_observability.tgz` via **Apps → Manage Apps → Install
-   app from file**.
 2. Restart Splunk (or reload: `| rest /services/apps/local/_reload`).
 3. Open **Stoker Observability** from the app menu.
 
-`props.conf` in the app sets `KV_MODE = json` for both sourcetypes so the JSON
+`props.conf` in the app sets `KV_MODE = json` for all three sourcetypes so the JSON
 fields extract at search time — no re-indexing, safe to add to an existing
 index.
 
