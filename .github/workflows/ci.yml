@@ -26,6 +26,9 @@ env:
 # This is not a licence to build stale commits: every publish job is gated
 # behind a test job, so when a newer push cancels the tests the publish behind
 # them never starts.
+#
+# Closing or merging a PR is not a new commit, so it cancels nothing here;
+# cancel-closed-pr.yml stops that PR's runs instead.
 
 jobs:
   test:
