@@ -20,14 +20,16 @@ permissions:
   pages: write
   id-token: write
 
-# Allow one concurrent deployment; don't cancel an in-progress one.
-concurrency:
-  group: pages
-  cancel-in-progress: false
+# Concurrency per job, as in ci.yml. A build of docs a newer push has already
+# changed is waste, so it is cancelled; a deployment in progress is never
+# interrupted, and only one runs at a time.
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.workflow }}-build-${{ github.ref }}
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -45,6 +47,9 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
