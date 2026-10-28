@@ -36,7 +36,7 @@ import secrets
 import time
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from sqlalchemy import select
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from . import catrust
@@ -2706,6 +2706,64 @@ def fold_totals(run, summary):
             totals[key] = value
     run.totals_json = totals
     return totals
+
+
+# Cumulative counters a heartbeat carries and a final summary folds, so the
+# latest heartbeat of a slot stands in for its final until that arrives.
+_LIVE_TOTAL_KEYS = ("events_total", "bytes_total", "hec_2xx", "hec_4xx", "hec_5xx",
+                    "hec_timeouts", "retries")
+
+
+def live_totals(db, runs):
+    # type: (Session, Sequence[Run]) -> Dict[int, Dict[str, Any]]
+    """Each run's totals as the UI should show them, keyed by run id.
+
+    ``totals_json`` only grows when a worker reports its final summary, so a
+    running fleet showed no events and no volume until it drained, and a
+    worker that never reported (lost, killed in a teardown) never counted at
+    all. For every slot whose lease is not ``done`` (its final is not folded
+    yet), the slot's latest heartbeat counters are added instead. A ``done``
+    lease is skipped, so nothing is counted twice. Read-only: ``totals_json``
+    stays what the workers reported.
+
+    One floor, stated: a slot reclaimed by a restarted worker heartbeats from
+    zero again, so what its previous holder sent is not in the latest sample.
+    """
+    out = {run.id: dict(run.totals_json or {}) for run in runs}
+    if not out:
+        return out
+    pending = {(run_id, slot) for run_id, slot in db.execute(
+        select(WorkerLease.run_id, WorkerLease.slot)
+        .where(WorkerLease.run_id.in_(list(out)), WorkerLease.state != LEASE_DONE)
+    )}
+    if not pending:
+        return out
+    newest = (
+        select(MetricSample.run_id, MetricSample.slot,
+               func.max(MetricSample.ts).label("ts"))
+        .where(MetricSample.run_id.in_({run_id for run_id, _ in pending}))
+        .group_by(MetricSample.run_id, MetricSample.slot)
+        .subquery()
+    )
+    samples = db.execute(
+        select(MetricSample).join(newest, and_(
+            MetricSample.run_id == newest.c.run_id,
+            MetricSample.slot == newest.c.slot,
+            MetricSample.ts == newest.c.ts,
+        ))
+    ).scalars().all()
+    seen = set()
+    for sample in samples:
+        key = (sample.run_id, sample.slot)
+        if key not in pending or key in seen:
+            continue
+        seen.add(key)
+        totals = out[sample.run_id]
+        for name in _LIVE_TOTAL_KEYS:
+            value = getattr(sample, name)
+            if value is not None:
+                totals[name] = totals.get(name, 0) + value
+    return out
 
 
 def maybe_refresh_jwt(run, current_token, settings=None):
