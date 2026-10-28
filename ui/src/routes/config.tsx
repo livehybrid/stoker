@@ -1,18 +1,22 @@
 import { useRef, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { PageHeader } from "../components/PageHeader";
 import { Card } from "../components/Card";
 import { Button } from "../components/Button";
+import { Badge } from "../components/Badge";
 import { EmptyState } from "../components/States";
 import { useToast } from "../components/Toast";
-import { Bullets, Callout, Inline, Muted, Stack, Strong } from "../components/text";
+import { Bullets, Callout, Inline, Mono, Muted, Stack, Strong } from "../components/text";
+import { absoluteTime, relativeTime } from "../features/format";
+import type { ConfigImportReport, ConfigSourceInfo, ConfigSyncResult } from "../lib/types";
 
 // Configuration backup: download this instance's targets, pack repos and specs
-// as JSON, and restore one. Admin only, matching the API.
+// as JSON, and restore one; and the shared copy in STOKER_CONFIG_SOURCE, pulled
+// at boot and pushed on change. Admin only, matching the API.
 //
 // The restore that matters for a rebuilt environment is STOKER_CONFIG_IMPORT at
 // boot, which needs no UI at all; this page exists so an operator can obtain the
@@ -23,13 +27,44 @@ function ConfigPage() {
   const toast = useToast();
   const qc = useQueryClient();
   const fileRef = useRef<HTMLInputElement>(null);
-  const [report, setReport] = useState<null | {
-    targets: number;
-    repos: number;
-    specs: number;
-    skipped: string[];
-    warnings: string[];
-  }>(null);
+  const [report, setReport] = useState<null | ConfigImportReport>(null);
+
+  // Deployment environment plus the last pull/push; refreshed after either.
+  const sourceQ = useQuery({
+    queryKey: ["config-source"],
+    queryFn: api.config.source,
+    enabled: isAdmin,
+    retry: false,
+  });
+
+  const pullM = useMutation({
+    mutationFn: api.config.pull,
+    onSuccess: (r) => {
+      setReport(r);
+      toast.success(
+        r.found === false
+          ? "The shared copy is empty: nothing has been pushed yet"
+          : `Pulled ${r.targets} new target(s), ${r.repos} repo(s), ${r.specs} spec(s)`,
+      );
+      qc.invalidateQueries();
+    },
+    onError: (e) => {
+      toast.error(e instanceof Error ? e.message : "Pull failed");
+      qc.invalidateQueries({ queryKey: ["config-source"] });
+    },
+  });
+
+  const pushM = useMutation({
+    mutationFn: api.config.push,
+    onSuccess: (r) => {
+      toast.success(`Pushed ${r.targets} target(s), ${r.repos} repo(s), ${r.specs} spec(s)`);
+      qc.invalidateQueries({ queryKey: ["config-source"] });
+    },
+    onError: (e) => {
+      toast.error(e instanceof Error ? e.message : "Push failed");
+      qc.invalidateQueries({ queryKey: ["config-source"] });
+    },
+  });
 
   const importM = useMutation({
     mutationFn: async (file: File) => {
@@ -74,6 +109,17 @@ function ConfigPage() {
         title="Configuration"
         subtitle="Back up this instance's targets, pack repos and specs, or restore them."
       />
+
+      <Card title="Shared copy">
+        <SharedCopy
+          info={sourceQ.data}
+          loading={sourceQ.isPending}
+          pulling={pullM.isPending}
+          pushing={pushM.isPending}
+          onPull={() => pullM.mutate()}
+          onPush={() => pushM.mutate()}
+        />
+      </Card>
 
       <Card title="Download">
         <Stack $gap="small">
@@ -177,6 +223,104 @@ function ConfigPage() {
           must not stop the control plane starting.
         </Muted>
       </Card>
+    </Stack>
+  );
+}
+
+function SyncLine({ label, result }: { label: string; result: ConfigSyncResult | null }) {
+  if (!result) {
+    return (
+      <Muted>
+        {label}: <Strong>not since this instance started</Strong>
+      </Muted>
+    );
+  }
+  let what = "";
+  if (!result.ok) what = result.error ?? "failed";
+  else if (result.found === false) what = "nothing there yet";
+  else if (result.created)
+    what = `${result.created.targets} target(s), ${result.created.repos} repo(s), ${result.created.specs} spec(s) new`;
+  else if (result.counts)
+    what = `${result.counts.targets} target(s), ${result.counts.repos} repo(s), ${result.counts.specs} spec(s)`;
+  return (
+    <Muted>
+      {label}: <span title={absoluteTime(result.at)}>{relativeTime(result.at)}</span>{" "}
+      <Badge tone={result.ok ? "green" : "red"}>{result.ok ? "ok" : "failed"}</Badge>{" "}
+      {what}
+    </Muted>
+  );
+}
+
+function SharedCopy({
+  info,
+  loading,
+  pulling,
+  pushing,
+  onPull,
+  onPush,
+}: {
+  info: ConfigSourceInfo | undefined;
+  loading: boolean;
+  pulling: boolean;
+  pushing: boolean;
+  onPull: () => void;
+  onPush: () => void;
+}) {
+  if (loading) return <Muted>Checking the config source…</Muted>;
+  if (!info || !info.configured) {
+    return (
+      <Muted>
+        Not configured. Set <code>STOKER_CONFIG_SOURCE</code> to an{" "}
+        <code>s3://bucket/prefix</code> (or a directory) and this instance pulls
+        its configuration from there at boot, so a fresh or rebuilt instance
+        comes up ready to run. Add <code>STOKER_CONFIG_SOURCE_WRITE=1</code> and
+        every change made here is pushed back automatically.
+      </Muted>
+    );
+  }
+  if (info.error) {
+    return (
+      <Callout $tone="warning">
+        <Strong>The config source cannot be used:</Strong> {info.error}
+      </Callout>
+    );
+  }
+  return (
+    <Stack $gap="small">
+      <Inline>
+        <Mono $break>
+          {info.location}/{info.object}
+        </Mono>
+        <Badge tone={info.writable ? "green" : "slate"}>
+          {info.writable ? "pushes changes" : "read only"}
+        </Badge>
+      </Inline>
+      <Muted>
+        Pulled at boot and with <em>Pull now</em>: the same upsert as a restore,
+        so nothing made here is removed.{" "}
+        {info.writable
+          ? "Every change to a target, repo or spec here is pushed within seconds, secrets as ciphertext."
+          : "This instance does not write the shared copy; set STOKER_CONFIG_SOURCE_WRITE=1 to let it."}
+      </Muted>
+      <SyncLine label="Last pull" result={info.last_pull} />
+      <SyncLine label="Last push" result={info.last_push} />
+      {info.carried > 0 && (
+        <Callout $tone="info">
+          {info.carried} row(s) in the shared copy could not be applied here
+          (usually a spec whose pack has not synced yet). They are kept in every
+          push rather than deleted; <em>Pull now</em> again once the pack is in.
+        </Callout>
+      )}
+      <Inline>
+        <Button variant="secondary" onClick={onPull} disabled={pulling}>
+          {pulling ? "Pulling…" : "Pull now"}
+        </Button>
+        {info.writable && (
+          <Button variant="secondary" onClick={onPush} disabled={pushing}>
+            {pushing ? "Pushing…" : "Push now"}
+          </Button>
+        )}
+      </Inline>
     </Stack>
   );
 }

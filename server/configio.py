@@ -172,14 +172,16 @@ def import_config(db, doc, settings=None):
 
     want = doc.get("master_key_fingerprint")
     have = master_key_fingerprint(settings)
-    if want and have and want != have:
+    foreign_key = bool(want and have and want != have)
+    if foreign_key:
         # Not fatal: the configuration still restores and is still useful, but
         # every encrypted secret in it is unreadable, so say so loudly once
         # rather than let it surface as a pile of auth failures later.
         report["warnings"].append(
             "this config was exported under master key %s but this instance "
             "uses %s: HEC tokens and repo credentials in it cannot be "
-            "decrypted and must be re-entered" % (want, have))
+            "decrypted and must be re-entered; ones already set here are kept"
+            % (want, have))
 
     for row in doc.get("targets") or []:
         name = (row.get("name") or "").strip()
@@ -187,12 +189,17 @@ def import_config(db, doc, settings=None):
             report["skipped"].append("a target with no name")
             continue
         target = db.scalar(select(Target).where(Target.name == name))
+        existing = target is not None
         if target is None:
             target = Target(name=name, hec_url=row.get("hec_url") or "")
             db.add(target)
             report["targets"] += 1
         for field in TARGET_FIELDS + TARGET_SECRETS:
             if field in row and field != "name":
+                # Ciphertext under another key cannot be read here, so it must
+                # not replace a secret that can.
+                if foreign_key and existing and field in TARGET_SECRETS:
+                    continue
                 setattr(target, field, row[field])
 
     for row in doc.get("repos") or []:
@@ -201,12 +208,15 @@ def import_config(db, doc, settings=None):
             report["skipped"].append("a repo with no url")
             continue
         repo = db.scalar(select(Repo).where(Repo.url == url))
+        existing = repo is not None
         if repo is None:
             repo = Repo(url=url)
             db.add(repo)
             report["repos"] += 1
         for field in REPO_FIELDS + REPO_SECRETS:
             if field in row and field != "url":
+                if foreign_key and existing and field in REPO_SECRETS:
+                    continue
                 setattr(repo, field, row[field])
 
     db.flush()

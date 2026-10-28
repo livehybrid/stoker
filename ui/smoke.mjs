@@ -144,6 +144,13 @@ const ROUTES = {
     '/runs': [RUN],
     '/users': [USER],
     '/fleets': [{ kind: 'docker', available: true, detail: 'local docker' }],
+    '/config/source': {
+        configured: true, writable: true, kind: 's3', location: 's3://stoker-config/lab',
+        object: 'stoker-config.json', error: null, carried: 1,
+        last_pull: { at: '2026-10-28T09:00:00Z', ok: true, found: true,
+                     created: { targets: 2, repos: 1, specs: 3 }, skipped: 1 },
+        last_push: null,
+    },
     '/runs/7': {
         ...RUN,
         leases: [LEASE],
@@ -450,6 +457,11 @@ const go = async (pathname) => {
 
     await go('/users');
     await check('users', 'will');
+
+    await go('/config');
+    await check('config: shared copy location', 's3://stoker-config/lab/stoker-config.json');
+    await check('config: shared copy writes', 'pushes changes');
+    await check('config: carried rows explained', 'kept in every push');
 
     await settle(200);
 
