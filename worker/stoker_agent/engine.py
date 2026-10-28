@@ -19,6 +19,7 @@ from __future__ import annotations
 import collections
 import logging
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -63,6 +64,10 @@ DEFAULT_ENGINE_ROOT = os.path.join(os.path.dirname(_HERE), "engines", "eventgen"
 DEFAULT_RAWREPLAY_ROOT = os.path.join(os.path.dirname(_HERE), "engines", "rawreplay")
 # worker/stoker_agent/ -> worker/engines/metrics (the metrics engine package root)
 DEFAULT_METRICS_ROOT = os.path.join(os.path.dirname(_HERE), "engines", "metrics")
+
+
+# firebox's start-up line: "firebox 0.4.0 starting with 4 generator thread(s)".
+_THREADS_LINE = re.compile(r"starting with (\d+) generator thread")
 
 
 class EngineError(Exception):
@@ -220,6 +225,9 @@ class EngineRunner(object):
         self._proc = None    # type: Optional[subprocess.Popen]
         self._pgid = None    # type: Optional[int]
         self._reader = None  # type: Optional[threading.Thread]
+        # Generator threads the engine said it started with (firebox logs it
+        # once at start-up); None until seen, and for engines that never say.
+        self.generator_threads = None  # type: Optional[int]
 
     def _build_env(self):
         # type: () -> Dict[str, str]
@@ -247,6 +255,7 @@ class EngineRunner(object):
         if self.is_alive():
             raise EngineError("engine already running")
         cmd = self._command()
+        self.generator_threads = None
         log.info("starting engine: %s", " ".join(cmd))
         try:
             self._proc = subprocess.Popen(
@@ -286,6 +295,10 @@ class EngineRunner(object):
                 line = line.rstrip("\n")
                 with self._ring_lock:
                     self._ring.append(line)
+                if self.generator_threads is None:
+                    m = _THREADS_LINE.search(line)
+                    if m:
+                        self.generator_threads = int(m.group(1))
                 log.debug("engine: %s", line)
         except (ValueError, OSError):
             pass  # stream closed during stop
@@ -337,6 +350,15 @@ class EngineRunner(object):
     def is_alive(self):
         # type: () -> bool
         return self._proc is not None and self._proc.poll() is None
+
+    @property
+    def pid(self):
+        # type: () -> Optional[int]
+        """The live engine's pid, for sampling its CPU; None when stopped."""
+        if not self.is_alive():
+            return None
+        pid = getattr(self._proc, "pid", None)
+        return pid if isinstance(pid, int) else None
 
     @property
     def returncode(self):

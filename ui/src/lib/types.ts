@@ -486,6 +486,11 @@ export interface MetricSampleOut {
   lag_s?: number | null;
   rss_mb?: number | null;
   cpu_pct?: number | null;
+  /** The engine subprocess (100 = one core); cpu_pct is the agent alone. */
+  engine_cpu_pct?: number | null;
+  engine_threads?: number | null;
+  /** Cores the worker's container may use. */
+  cpu_limit_cores?: number | null;
 }
 
 export interface MetricsOut {

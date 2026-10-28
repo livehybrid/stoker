@@ -1,6 +1,6 @@
 <form version="1.1" theme="dark">
   <label>Stoker — Fleet Observability</label>
-  <description>Live view across every Stoker run, over the control plane's dogfood telemetry (sourcetypes stoker:metrics and stoker:job). Click a run to drill into it.</description>
+  <description>Live view across every Stoker run, over the control plane's dogfood telemetry (sourcetypes stoker:metrics, stoker:worker and stoker:job). Click a run to drill into it.</description>
 
   <fieldset submitButton="false" autoRun="true">
     <input type="time" token="tr">
@@ -164,6 +164,45 @@
         <option name="charting.axisTitleY.text">cumulative count</option>
         <option name="charting.legend.placement">bottom</option>
       </chart>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Slots holding a run back (latest, active runs)</title>
+      <description>Every slot of an active run that is unheld, lost, silent, CPU-bound, queueing, lagging or under its share, from stoker:worker. Empty means every slot is delivering its share.</description>
+      <table>
+        <search>
+          <query>index=$index$ sourcetype=stoker:worker run_state IN (provisioning, releasing, running, draining)
+| stats latest(run_state) as run_state latest(lease_state) as state latest(holder) as holder
+        latest(share_eps) as share_eps latest(eps) as eps latest(eps_of_share_pct) as of_share
+        latest(engine_cpu_of_limit_pct) as of_limit latest(lag_s) as lag_s latest(queue_depth) as queue
+        latest(heartbeat_age_s) as hb_age latest(_time) as t by run_id slot
+| where t &gt;= relative_time(now(), "-5m")
+| eval verdict=case(state="free", "unheld: no worker claimed this slot",
+                    state="lost", "lost: worker stopped heartbeating",
+                    hb_age&gt;60, "silent for ".round(hb_age)." s",
+                    of_limit&gt;=90, "engine CPU-bound",
+                    queue&gt;0, "HEC queue backing up",
+                    lag_s&gt;5, "behind schedule",
+                    isnotnull(of_share) AND of_share&lt;90, "under share",
+                    true(), null())
+| where isnotnull(verdict)
+| eval eps=round(eps, 0), share_eps=round(share_eps, 0)
+| sort run_id slot
+| table run_id slot verdict state holder share_eps eps of_share of_limit lag_s queue
+| rename run_id as "Run" slot as "Slot" verdict as "Verdict" state as "Lease" holder as "Holder"
+         share_eps as "Share eps" eps as "Delivered eps" of_share as "% of share"
+         of_limit as "Engine % of CPU limit" lag_s as "Lag s" queue as "Queue"</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="drilldown">row</option>
+        <option name="count">20</option>
+        <drilldown>
+          <link target="_blank">stoker_run_detail?form.run_id=$row.Run$&amp;form.index=$index$&amp;form.tr.earliest=$tr.earliest$&amp;form.tr.latest=$tr.latest$</link>
+        </drilldown>
+      </table>
     </panel>
   </row>
 

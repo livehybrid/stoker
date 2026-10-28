@@ -7,10 +7,15 @@ that stream into two dashboards:
 - **Fleet Observability** — every run at once: active runs, fleet delivered eps
   (with target overlay), worst-worker pacing lag, **stacked throughput by run in
   both eps and MB/s** (each run's contribution to the fleet total), HEC
-  outcomes, a runs table (click a row to drill in) and a recent-lifecycle feed.
+  outcomes, a **slots holding a run back** table (every unheld, lost, silent,
+  CPU-bound, queueing, lagging or under-share slot of an active run), a runs
+  table (click a row to drill in) and a recent-lifecycle feed.
 - **Run Detail** — one run by id: delivered eps vs target, **delivered MB/s**,
-  pacing lag, HEC outcomes (2xx/4xx/5xx/timeouts/retries) and the run's
-  lifecycle transitions.
+  pacing lag, HEC outcomes (2xx/4xx/5xx/timeouts/retries), the run's
+  lifecycle transitions, and **per worker**: each slot's share against what it
+  delivered, its engine's CPU against the container's CPU limit, threads, lag,
+  queue and RSS with a one-line verdict, plus eps and engine CPU by slot over
+  time.
 
 Throughput is derived from the telemetry's `eps` and `bps` (MB/s = `bps` ÷
 1048576); the stacked areas make each run's share of the fleet total visible.
@@ -38,19 +43,28 @@ the run and aggregates the whole fleet.
 
 ## What it reads
 
-Two sourcetypes the control plane emits when dogfood telemetry is enabled:
+Three sourcetypes the control plane emits when dogfood telemetry is enabled:
 
 | sourcetype       | when                          | key fields |
 |------------------|-------------------------------|------------|
 | `stoker:metrics` | every `DOGFOOD_METRICS_INTERVAL_S` (default 30 s) per active run | `run_id`, `spec_id`, `state`, `eps`, `target_eps`, `bps`, `events_total`, `bytes_total`, `lag_s_max`, `live_workers`, `reporting_workers`, `hec_2xx`, `hec_4xx`, `hec_5xx`, `hec_timeouts`, `retries` |
+| `stoker:worker`  | with each `stoker:metrics`, one per slot of the run, whatever its lease state | `run_id`, `spec_id`, `run_state`, `slot`, `lease_state`, `holder`, `node`, `restarts`, `engine_impl`, `assigned_work`, `share_eps` (or `share_per_day_gb` / `share_count`), `heartbeat_age_s`, `sample_age_s`, `eps`, `eps_of_share_pct`, `bps`, `events_total`, `bytes_total`, `lag_s`, `queue_depth`, `hec_*`, `retries`, `rss_mb`, `cpu_pct`, `engine_cpu_pct`, `engine_threads`, `cpu_limit_cores`, `engine_cpu_of_limit_pct` |
 | `stoker:job`     | every run state transition    | `run_id`, `spec_id`, `from`, `to`, `end_reason`, `degraded` |
 
 `eps` is the instantaneous fleet-wide delivered rate; `target_eps` is the run's
 intended eps (present only for an `eps` run — `per_day_gb` / `count_interval`
 runs do not pace to an eps figure). `lag_s_max` is the worst worker's pacing lag
-across the fleet — the aggregate stream is run-level, so per-worker granularity
-lives in the control plane's own React run view, not here. HEC counters are
+across the fleet. `stoker:metrics` also carries `unheld_slots` (slots no worker
+holds, whose share goes undelivered) and `engine_cpu_pct_max`. HEC counters are
 cumulative per run.
+
+On `stoker:worker`, `cpu_pct` is the worker agent alone; `engine_cpu_pct` is the
+engine subprocess that generates the events (100 = one core, so a 4-thread
+firebox can read up to 400). `cpu_limit_cores` is the container's CPU quota (or
+the CPUs it may run on when there is none), and `engine_cpu_of_limit_pct` is the
+engine against it: at 90 or more the slot is CPU-bound and a higher target will
+not raise its rate; more workers or a bigger limit will. Engine figures need
+workers built from this release; older workers leave them out.
 
 ## Enable the telemetry (control plane)
 
@@ -98,8 +112,9 @@ index.
 
 ## Notes / limits
 
-- **Cross-run, not per-worker.** The dogfood aggregate is per run; for per-slot
-  pacing error use the control plane's React run view.
+- **Per-worker events are one per slot per interval.** At the default 30 s
+  that is 2,880 events a day per slot; a 25-worker run sends about 72,000 a
+  day, a few tens of MB.
 - **HEC counters are cumulative.** The outcome panels show running totals (2xx
   climbs, errors step up); for a rate, wrap the metric in `delta`/`streamstats`.
 - Simple XML, so it imports on Splunk 8/9/10 and is easy to review. To adopt it

@@ -1,6 +1,6 @@
 <form version="1.1" theme="dark">
   <label>Stoker — Run Detail</label>
-  <description>A single run, keyed by run id: delivered vs target eps, pacing lag, HEC outcomes and lifecycle. Reached from the fleet dashboard or by entering a run id.</description>
+  <description>A single run, keyed by run id: delivered vs target eps, pacing lag, HEC outcomes and lifecycle, then each worker slot against its share, with its engine's CPU against the container's allowance. Reached from the fleet dashboard or by entering a run id.</description>
 
   <fieldset submitButton="false" autoRun="true">
     <input type="text" token="run_id">
@@ -34,12 +34,13 @@
       </single>
     </panel>
     <panel>
-      <title>Live / reporting workers</title>
+      <title>Reporting / live workers (unheld slots)</title>
       <single>
         <search>
           <query>index=$index$ sourcetype=stoker:metrics run_id=$run_id|s$
-| stats latest(reporting_workers) as reporting latest(live_workers) as live
-| eval v = reporting . " / " . live</query>
+| stats latest(reporting_workers) as reporting latest(live_workers) as live latest(unheld_slots) as unheld
+| eval v = reporting . " / " . live . if(unheld&gt;0, " (" . unheld . " unheld)", "")
+| fields v</query>
           <earliest>$tr.earliest$</earliest>
           <latest>$tr.latest$</latest>
         </search>
@@ -155,6 +156,84 @@
         </search>
         <option name="drilldown">none</option>
       </table>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Workers: each slot against its share (latest)</title>
+      <description>One row per slot, from stoker:worker. Engine CPU is the generating process (100 = one core); "of limit" is that against the cores the container may use, so at 90 % or more the slot is CPU-bound and more rate needs more workers or a bigger CPU limit. A free slot has no worker holding it, so its share is not delivered.</description>
+      <table>
+        <search>
+          <query>index=$index$ sourcetype=stoker:worker run_id=$run_id|s$
+| stats latest(lease_state) as state latest(holder) as holder latest(engine_impl) as engine
+        latest(share_eps) as share_eps latest(eps) as eps latest(eps_of_share_pct) as of_share
+        latest(engine_cpu_pct) as engine_cpu latest(cpu_limit_cores) as cores
+        latest(engine_cpu_of_limit_pct) as of_limit latest(engine_threads) as threads
+        latest(lag_s) as lag_s latest(queue_depth) as queue latest(rss_mb) as rss_mb
+        latest(heartbeat_age_s) as hb_age by slot
+| eval verdict=case(state="free", "unheld: no worker claimed this slot",
+                    state="lost", "lost: worker stopped heartbeating",
+                    hb_age&gt;60, "silent for ".round(hb_age)." s",
+                    of_limit&gt;=90, "engine CPU-bound",
+                    queue&gt;0, "HEC queue backing up",
+                    lag_s&gt;5, "behind schedule",
+                    isnotnull(of_share) AND of_share&lt;90, "under share",
+                    true(), "ok")
+| eval eps=round(eps, 0), share_eps=round(share_eps, 0), lag_s=round(lag_s, 1), rss_mb=round(rss_mb, 0)
+| sort slot
+| table slot state verdict holder engine share_eps eps of_share engine_cpu cores of_limit threads lag_s queue rss_mb
+| rename slot as "Slot" state as "Lease" verdict as "Verdict" holder as "Holder" engine as "Engine"
+         share_eps as "Share eps" eps as "Delivered eps" of_share as "% of share"
+         engine_cpu as "Engine CPU %" cores as "CPU limit" of_limit as "% of limit"
+         threads as "Threads" lag_s as "Lag s" queue as "Queue" rss_mb as "RSS MB"</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="count">50</option>
+        <option name="drilldown">none</option>
+        <format type="color" field="Verdict">
+          <colorPalette type="map">{"ok":#53A051}</colorPalette>
+        </format>
+        <format type="color" field="% of limit">
+          <colorPalette type="list">[#53A051,#F8BE34,#DC4E41]</colorPalette>
+          <scale type="threshold">70,90</scale>
+        </format>
+      </table>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Delivered eps by slot</title>
+      <chart>
+        <search>
+          <query>index=$index$ sourcetype=stoker:worker run_id=$run_id|s$ lease_state=running
+| eval slot="slot ".slot
+| timechart span=30s avg(eps) by slot limit=50</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="charting.axisTitleY.text">events / s</option>
+        <option name="charting.legend.placement">right</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Engine CPU by slot (% of the container's limit)</title>
+      <chart>
+        <search>
+          <query>index=$index$ sourcetype=stoker:worker run_id=$run_id|s$ lease_state=running
+| eval slot="slot ".slot
+| timechart span=30s max(engine_cpu_of_limit_pct) by slot limit=50</query>
+          <earliest>$tr.earliest$</earliest>
+          <latest>$tr.latest$</latest>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="charting.axisTitleY.text">% of CPU limit</option>
+        <option name="charting.axisY.maximumNumber">110</option>
+        <option name="charting.legend.placement">right</option>
+      </chart>
     </panel>
   </row>
 </form>

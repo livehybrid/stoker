@@ -8,6 +8,7 @@ must match rate x duration within 1 %.
 
 import json
 import math
+import os
 import sys
 import threading
 import time
@@ -608,3 +609,41 @@ def test_the_fleet_position_reaches_the_engine_on_every_path(tmp_path, monkeypat
     cfg = load_config(base)
     sl = SpecSlice.from_standalone(cfg)
     assert Agent(cfg)._eventgen_envelope(cfg, sl, True) == ("stoker", None)
+
+
+def test_heartbeat_reports_the_engine_cpu_not_just_the_agent(tmp_path, monkeypatch):
+    """cpu_pct is the agent; the engine subprocess that generates is reported
+    beside it once it has run an interval, with its threads and the cores
+    the container may use, so a pinned engine is visible."""
+    from stoker_agent.metrics import CpuTracker
+
+    env = {
+        "STOKER_STANDALONE": "1",
+        "STOKER_BUNDLE": make_pack(tmp_path),
+        "STOKER_HEC_URL": "http://fake-hec:8088",
+        "STOKER_HEC_TOKEN": "tok",
+        "STOKER_INDEX": "loadtest",
+        "STOKER_RATE_MODE": "eps",
+        "STOKER_RATE_VALUE": "100",
+        "STOKER_OUTPUT_SOCKET": str(tmp_path / "out.sock"),
+        "STOKER_METRICS_PORT": "0",
+    }
+    cfg = load_config(env)
+    sl = SpecSlice.from_standalone(cfg)
+    agent = Agent(cfg)
+    agent._cpu_limit_cores = 2.0
+
+    class _Engine(object):
+        pid = os.getpid()  # any live process with a /proc entry
+        generator_threads = 2
+
+    agent._engine = _Engine()
+    first = agent._heartbeat_payload(sl, cpu=CpuTracker())
+    assert "engine_cpu_pct" not in first          # no interval measured yet
+    assert first["engine_threads"] == 2
+    assert first["cpu_limit_cores"] == 2.0
+    second = agent._heartbeat_payload(sl, cpu=CpuTracker())
+    assert second["engine_cpu_pct"] >= 0.0
+
+    agent._engine = None
+    assert "engine_cpu_pct" not in agent._heartbeat_payload(sl, cpu=CpuTracker())

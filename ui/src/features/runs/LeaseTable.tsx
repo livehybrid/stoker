@@ -8,12 +8,33 @@ import { EmptyState } from "../../components/States";
 import { Mono, Negative } from "../../components/text";
 
 // Lease roster (section 10.3): slot, holder, node, assigned work, EPS, lag s,
-// queue depth, RSS, restarts, state. Live gauge columns (EPS/lag/queue/RSS)
+// queue depth, engine CPU, RSS, restarts, state. Live gauge columns (EPS/lag/
+// queue/engine CPU/RSS)
 // come from the latest metric sample per slot; identity + restarts + heartbeat
 // come off the lease. "Assigned" is the worker's own report of how many work
 // units it holds (metrics series / eventgen stanzas / a replay dataset) — a
 // slot legitimately holding NONE is flagged in red with the worker's reason,
 // so a 0 EPS row is never a silent mystery.
+
+// An engine using this share of its container's CPU limit is CPU-bound: more
+// rate needs more workers or a bigger limit. Shown in red on the row.
+const CPU_BOUND_FRACTION = 0.9;
+
+/** "190 % of 2 cores (2 thr)"; null when the worker does not report it. */
+export function engineCpuText(sample: SlotLatest | undefined): string | null {
+  const pct = sample?.engine_cpu_pct;
+  if (pct == null) return null;
+  const parts = [`${fmtNum(pct, 0)} %`];
+  if (sample?.cpu_limit_cores) parts.push(`of ${fmtNum(sample.cpu_limit_cores, 1)} cores`);
+  if (sample?.engine_threads) parts.push(`(${sample.engine_threads} thr)`);
+  return parts.join(" ");
+}
+
+export function isCpuBound(sample: SlotLatest | undefined): boolean {
+  const pct = sample?.engine_cpu_pct;
+  const cores = sample?.cpu_limit_cores;
+  return pct != null && !!cores && pct >= CPU_BOUND_FRACTION * 100 * cores;
+}
 
 // A lag figure over this many seconds is shown in red on the row.
 const LAG_WARN_S = 300;
@@ -130,6 +151,17 @@ export function LeaseTable({
       header: "Queue",
       align: "right",
       cell: (l) => fmtInt(latest.get(l.slot)?.queue_depth ?? null),
+    },
+    {
+      key: "engine_cpu",
+      header: "Engine CPU",
+      align: "right",
+      cell: (l) => {
+        const sample = latest.get(l.slot);
+        const text = engineCpuText(sample);
+        if (text == null) return "—";
+        return isCpuBound(sample) ? <Negative>{text}</Negative> : <span>{text}</span>;
+      },
     },
     {
       key: "rss",

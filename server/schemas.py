@@ -632,6 +632,9 @@ class MetricSampleOut(BaseModel):
     lag_s: Optional[float] = None
     rss_mb: Optional[float] = None
     cpu_pct: Optional[float] = None
+    engine_cpu_pct: Optional[float] = None
+    engine_threads: Optional[int] = None
+    cpu_limit_cores: Optional[float] = None
 
 
 class MetricsOut(BaseModel):
@@ -795,6 +798,9 @@ class HeartbeatRequest(BaseModel):
     lag_s: Optional[float] = None
     rss_mb: Optional[float] = None
     cpu_pct: Optional[float] = None
+    engine_cpu_pct: Optional[float] = None
+    engine_threads: Optional[int] = None
+    cpu_limit_cores: Optional[float] = None
     auth_failed: Optional[bool] = None
 
 

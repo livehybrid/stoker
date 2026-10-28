@@ -338,6 +338,12 @@ class MetricSample(Base):
     lag_s: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     rss_mb: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     cpu_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # The engine subprocess, which cpu_pct (the agent alone) never covers:
+    # its CPU (100 = one core), its generator threads, and the cores the
+    # worker's container may use. Null from workers that predate them.
+    engine_cpu_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    engine_threads: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    cpu_limit_cores: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
     run: Mapped[Run] = relationship(back_populates="samples")
 

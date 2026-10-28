@@ -18,6 +18,16 @@ VIEWS = os.path.join(HERE, "..", "app", "default", "data", "ui", "views")
 
 METRICS = "index=$index_tok$ sourcetype=stoker:metrics"
 JOBS = "index=$index_tok$ sourcetype=stoker:job"
+WORKERS = "index=$index_tok$ sourcetype=stoker:worker"
+# A slot's verdict, worst first; shared by both dashboards' worker tables.
+VERDICT = ('\n| eval verdict=case(state="free", "unheld: no worker claimed this slot",'
+           ' state="lost", "lost: worker stopped heartbeating",'
+           ' hb_age>60, "silent for ".round(hb_age)." s",'
+           ' of_limit>=90, "engine CPU-bound",'
+           ' queue>0, "HEC queue backing up",'
+           ' lag_s>5, "behind schedule",'
+           ' isnotnull(of_share) AND of_share<90, "under share",'
+           ' true(), %s)')
 TIME = {"earliest": "$global_time.earliest$", "latest": "$global_time.latest$"}
 
 
@@ -136,6 +146,21 @@ def fleet():
                       "\n| sort - run_id", "Runs"),
         "ds_life": ds(JOBS + "\n| sort - _time"
                       "\n| table _time run_id from to end_reason degraded", "Lifecycle"),
+        "ds_held_back": ds(
+            WORKERS + " run_state IN (provisioning, releasing, running, draining)"
+            "\n| stats latest(lease_state) as state latest(holder) as holder "
+            "latest(share_eps) as share_eps latest(eps) as eps "
+            "latest(eps_of_share_pct) as of_share "
+            "latest(engine_cpu_of_limit_pct) as of_limit latest(lag_s) as lag_s "
+            "latest(queue_depth) as queue latest(heartbeat_age_s) as hb_age "
+            "latest(_time) as t by run_id slot"
+            '\n| where t >= relative_time(now(), "-5m")'
+            + VERDICT % "null()" +
+            "\n| where isnotnull(verdict)"
+            "\n| eval eps=round(eps, 0), share_eps=round(share_eps, 0)"
+            "\n| sort run_id slot"
+            "\n| table run_id slot verdict state holder share_eps eps of_share "
+            "of_limit lag_s queue", "Slots holding a run back"),
     }
     drill = ("/app/stoker_observability/stoker_run_detail_studio"
              "?form.run_id_tok=$row.run_id.value$"
@@ -156,10 +181,13 @@ def fleet():
         "viz_hec_ts": line("ds_hec_ts", "HEC outcomes — cumulative", "count"),
         "viz_runs": table("ds_runs", "Runs — click a row to drill in", drilldown_url=drill),
         "viz_life": table("ds_life", "Recent run lifecycle"),
+        "viz_held_back": table("ds_held_back",
+                               "Slots holding a run back (latest, active runs)",
+                               drilldown_url=drill),
     }
     layout = {
         "type": "absolute",
-        "options": {"width": 1200, "height": 1500, "display": "auto"},
+        "options": {"width": 1200, "height": 1830, "display": "auto"},
         "structure": [
             block("viz_active", 0, 0, 300, 150),
             block("viz_eps", 300, 0, 300, 150),
@@ -170,8 +198,9 @@ def fleet():
             block("viz_eps_by_run", 0, 470, 600, 300),
             block("viz_mbps_by_run", 610, 470, 590, 300),
             block("viz_hec_ts", 0, 780, 1200, 280),
-            block("viz_runs", 0, 1070, 600, 360),
-            block("viz_life", 610, 1070, 590, 360),
+            block("viz_held_back", 0, 1070, 1200, 320),
+            block("viz_runs", 0, 1400, 600, 360),
+            block("viz_life", 610, 1400, 590, 360),
         ],
         "globalInputs": ["input_time", "input_index"],
     }
@@ -193,11 +222,13 @@ def fleet():
 def detail():
     R = METRICS + " run_id=$run_id_tok$"
     RJ = JOBS + " run_id=$run_id_tok$"
+    RW = WORKERS + " run_id=$run_id_tok$"
     d = {
         "ds_state": ds(R + "\n| stats latest(state) as state", "State"),
         "ds_workers": ds(R + "\n| stats latest(reporting_workers) as reporting "
-                         "latest(live_workers) as live"
-                         '\n| eval workers = reporting . " / " . live', "Workers"),
+                         "latest(live_workers) as live latest(unheld_slots) as unheld"
+                         '\n| eval workers = reporting . " / " . live'
+                         ' . if(unheld>0, " (" . unheld . " unheld)", "")', "Workers"),
         "ds_eps": ds(R + "\n| stats latest(eps) as eps", "Delivered eps"),
         "ds_events": ds(R + "\n| stats max(events_total) as events", "Events"),
         "ds_bytes": ds(R + "\n| stats max(bytes_total) as bytes"
@@ -215,6 +246,29 @@ def detail():
                         "HEC outcomes"),
         "ds_life": ds(RJ + "\n| sort - _time"
                       "\n| table _time from to end_reason degraded", "Lifecycle"),
+        "ds_slots": ds(
+            RW + "\n| stats latest(lease_state) as state latest(holder) as holder "
+            "latest(engine_impl) as engine latest(share_eps) as share_eps "
+            "latest(eps) as eps latest(eps_of_share_pct) as of_share "
+            "latest(engine_cpu_pct) as engine_cpu latest(cpu_limit_cores) as cores "
+            "latest(engine_cpu_of_limit_pct) as of_limit "
+            "latest(engine_threads) as threads latest(lag_s) as lag_s "
+            "latest(queue_depth) as queue latest(rss_mb) as rss_mb "
+            "latest(heartbeat_age_s) as hb_age by slot"
+            + VERDICT % '"ok"' +
+            "\n| eval eps=round(eps, 0), share_eps=round(share_eps, 0), "
+            "lag_s=round(lag_s, 1), rss_mb=round(rss_mb, 0)"
+            "\n| sort slot"
+            "\n| table slot state verdict holder engine share_eps eps of_share "
+            "engine_cpu cores of_limit threads lag_s queue rss_mb", "Workers"),
+        "ds_slot_eps": ds(RW + " lease_state=running"
+                          '\n| eval slot="slot ".slot'
+                          "\n| timechart span=30s avg(eps) by slot limit=50",
+                          "Delivered eps by slot"),
+        "ds_slot_cpu": ds(RW + " lease_state=running"
+                          '\n| eval slot="slot ".slot'
+                          "\n| timechart span=30s max(engine_cpu_of_limit_pct) by slot limit=50",
+                          "Engine CPU by slot"),
     }
     v = {
         "viz_state": single("ds_state", "state", "Current state"),
@@ -227,10 +281,15 @@ def detail():
         "viz_lag_ts": line("ds_lag_ts", "Pacing lag (max across workers)", "seconds behind"),
         "viz_hec_ts": line("ds_hec_ts", "HEC outcomes (cumulative)", "count"),
         "viz_life": table("ds_life", "Lifecycle (state transitions)"),
+        "viz_slots": table("ds_slots", "Workers: each slot against its share (latest)"),
+        "viz_slot_eps": line("ds_slot_eps", "Delivered eps by slot", "events / s"),
+        "viz_slot_cpu": line("ds_slot_cpu",
+                             "Engine CPU by slot (% of the container's limit)",
+                             "% of CPU limit"),
     }
     layout = {
         "type": "absolute",
-        "options": {"width": 1200, "height": 1100, "display": "auto"},
+        "options": {"width": 1200, "height": 1800, "display": "auto"},
         "structure": [
             block("viz_state", 0, 0, 240, 150),
             block("viz_workers", 240, 0, 240, 150),
@@ -242,6 +301,9 @@ def detail():
             block("viz_lag_ts", 0, 470, 600, 300),
             block("viz_hec_ts", 610, 470, 590, 300),
             block("viz_life", 0, 780, 1200, 280),
+            block("viz_slots", 0, 1070, 1200, 400),
+            block("viz_slot_eps", 0, 1480, 600, 300),
+            block("viz_slot_cpu", 610, 1480, 590, 300),
         ],
         "globalInputs": ["input_runid", "input_time", "input_index"],
     }
@@ -255,7 +317,9 @@ def detail():
     }
     return dashboard("Stoker — Run Detail",
                      "One run by id, over dogfood telemetry: delivered vs target "
-                     "eps, pacing lag, HEC outcomes and lifecycle.", v, d, layout, inputs)
+                     "eps, pacing lag, HEC outcomes and lifecycle, then each slot "
+                     "against its share with its engine's CPU against the "
+                     "container's limit.", v, d, layout, inputs)
 
 
 def main():
