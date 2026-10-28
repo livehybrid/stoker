@@ -125,3 +125,24 @@ Conclusions:
 - A full sender queue with zero HEC errors is the signature of a slow target;
   it is the signal the target-health backpressure in issue #2 should watch
   (sustained full queue or rising lag), alongside 429/5xx.
+
+## Packs with many fields (2026-10-28)
+
+A pack builder pack varies every field it found with its own token, and every
+token used to run its regex over every event. On a 1,700-field pack a worker
+delivered ~1,200 eps with HEC idle and its send queue empty: the engine was
+spending ~350 ns per token per event on searches that found nothing, since an
+event carries a few dozen of those fields. firebox now skips a token whose
+pattern's fixed prefix does not occur in the event (exactly: the output is
+byte-for-byte unchanged). One thread, ~570-byte events with 40 fields each:
+
+| tokens | before | after |
+|---|---|---|
+| 1,700 | 1,701 eps | 10,303 eps |
+| 1,700, 4 threads | | 45,203 eps |
+| 40 | 175,053 eps | 600,047 eps |
+
+Throughput on such a pack scales with the cores firebox gets, which is the
+container's CPU allowance: a worker limited to one CPU (`K8S_WORKER_CPU_LIMIT`,
+or a swarm `resources.limits.cpus`) runs one generator thread. The worker's log
+tail says how many it started with (`starting with N generator thread(s)`).
