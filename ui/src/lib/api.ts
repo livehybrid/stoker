@@ -31,6 +31,8 @@ import type {
   PackPreviewRun,
   PackPublishResult,
   PackSourceInfo,
+  ConfigImportReport,
+  ConfigSourceInfo,
   PseudonymKeyInfo,
   PackUploadMeta,
   RepoCreate,
@@ -397,8 +399,14 @@ export const config = {
   exportUrl: (includeSecrets = true) =>
     `${API_BASE}/config/export?secrets=${includeSecrets ? "include" : "exclude"}`,
   import: (doc: unknown) =>
-    request<{ targets: number; repos: number; specs: number; skipped: string[]; warnings: string[] }>(
+    request<ConfigImportReport>(
       "POST", "/config/import", { body: doc as Record<string, unknown> }),
+  // The shared copy in STOKER_CONFIG_SOURCE: where it is, and pull/push now.
+  source: () => request<ConfigSourceInfo>("GET", "/config/source"),
+  pull: () => request<ConfigImportReport>("POST", "/config/source/pull"),
+  push: () =>
+    request<{ pushed: boolean; targets: number; repos: number; specs: number }>(
+      "POST", "/config/source/push"),
 };
 
 export const auth = {

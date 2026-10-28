@@ -110,8 +110,8 @@ class Store:
         # type: (str) -> bytes
         raise NotImplementedError
 
-    def put(self, key, data):
-        # type: (str, bytes) -> None
+    def put(self, key, data, content_type="application/gzip", sse=None):
+        # type: (str, bytes, str, Optional[Dict[str, str]]) -> None
         raise NotImplementedError
 
 
@@ -134,8 +134,8 @@ class DirectoryStore(Store):
         with open(os.path.join(self.path, key), "rb") as fh:
             return fh.read()
 
-    def put(self, key, data):
-        # type: (str, bytes) -> None
+    def put(self, key, data, content_type="application/gzip", sse=None):
+        # type: (str, bytes, str, Optional[Dict[str, str]]) -> None
         os.makedirs(self.path, exist_ok=True)
         tmp = os.path.join(self.path, key + ".tmp")
         with open(tmp, "wb") as fh:
@@ -150,11 +150,12 @@ class S3Store(Store):
     so nothing about them belongs in Stoker's own configuration.
     """
 
-    def __init__(self, bucket, prefix, client=None):
-        # type: (str, str, Optional[Any]) -> None
+    def __init__(self, bucket, prefix, client=None, env_name=SOURCE_ENV):
+        # type: (str, str, Optional[Any], str) -> None
         self.bucket = bucket
         self.prefix = prefix.strip("/")
         self._client = client
+        self._env_name = env_name
 
     @property
     def client(self):
@@ -165,7 +166,7 @@ class S3Store(Store):
             except ImportError:
                 raise PackSourceError(
                     "%s names an s3:// source but boto3 is not installed in this "
-                    "image" % SOURCE_ENV)
+                    "image" % self._env_name)
             self._client = boto3.client("s3")
         return self._client
 
@@ -204,14 +205,15 @@ class S3Store(Store):
         return self.client.get_object(
             Bucket=self.bucket, Key=self._key(key))["Body"].read()
 
-    def put(self, key, data):
-        # type: (str, bytes) -> None
+    def put(self, key, data, content_type="application/gzip", sse=None):
+        # type: (str, bytes, str, Optional[Dict[str, str]]) -> None
         self.client.put_object(Bucket=self.bucket, Key=self._key(key), Body=data,
-                               ContentType="application/gzip", **_sse_args())
+                               ContentType=content_type,
+                               **(_sse_args() if sse is None else sse))
 
 
-def _sse_args(env=None):
-    # type: (Optional[Any]) -> dict
+def _sse_args(env=None, sse_env=SSE_ENV, key_env=SSE_KEY_ENV):
+    # type: (Optional[Any], str, str) -> dict
     """Server-side encryption headers for PutObject, from the environment.
 
     A bucket policy may DENY PutObject unless the request CARRIES the headers,
@@ -233,32 +235,37 @@ def _sse_args(env=None):
     was, so a bucket with no such policy is unaffected.
     """
     env = env if env is not None else os.environ
-    algorithm = (env.get(SSE_ENV) or "").strip()
+    algorithm = (env.get(sse_env) or "").strip()
     if not algorithm:
         return {}
     args = {"ServerSideEncryption": algorithm}
-    key_id = (env.get(SSE_KEY_ENV) or "").strip()
+    key_id = (env.get(key_env) or "").strip()
     if key_id:
         # Omitted for AES256, which takes no key and rejects an empty one.
         args["SSEKMSKeyId"] = key_id
     return args
 
 
-def open_store(source):
-    # type: (str) -> Store
-    """A :class:`Store` for ``s3://bucket/prefix`` or a directory path."""
+def open_store(source, label="pack source", env_name=SOURCE_ENV):
+    # type: (str, str, str) -> Store
+    """A :class:`Store` for ``s3://bucket/prefix`` or a directory path.
+
+    ``label`` and ``env_name`` only shape the error messages, so the config
+    source (:mod:`server.configsource`) can share this without its failures
+    being reported as a pack source's.
+    """
     source = source.strip()
     if not source:
-        raise PackSourceError("empty pack source")
+        raise PackSourceError("empty %s" % label)
     parsed = urlparse(source)
     if parsed.scheme == "s3":
         if not parsed.netloc:
-            raise PackSourceError("pack source %r has no bucket" % source)
-        return S3Store(parsed.netloc, parsed.path)
+            raise PackSourceError("%s %r has no bucket" % (label, source))
+        return S3Store(parsed.netloc, parsed.path, env_name=env_name)
     if parsed.scheme in ("", "file"):
         return DirectoryStore(parsed.path if parsed.scheme == "file" else source)
     raise PackSourceError(
-        "pack source %r: only s3:// and local directories are supported" % source)
+        "%s %r: only s3:// and local directories are supported" % (label, source))
 
 
 def store_from_env(env=None):

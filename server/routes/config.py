@@ -20,7 +20,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session
 
-from .. import auth, configio
+from .. import auth, configio, configsource
 from ..config import get_settings
 from ..db import get_db
 from ..models import User
@@ -80,6 +80,79 @@ def import_config(
              admin.username, report["targets"], report["repos"], report["specs"],
              "; %d skipped" % len(report["skipped"]) if report["skipped"] else "")
     return report
+
+
+# --------------------------------------------------------------------------- #
+# The shared copy (STOKER_CONFIG_SOURCE)
+# --------------------------------------------------------------------------- #
+
+def _require_source():
+    # type: () -> object
+    try:
+        store = configsource.store_from_env()
+    except configsource.ConfigSourceError as exc:
+        raise HTTPException(status_code=409, detail={
+            "error": "bad_config_source", "detail": str(exc)})
+    if store is None:
+        raise HTTPException(status_code=409, detail={
+            "error": "no_config_source",
+            "detail": "%s is not set" % configsource.SOURCE_ENV})
+    return store
+
+
+@router.get("/source")
+def config_source(admin: User = Depends(auth.require_admin)):
+    # type: (...) -> object
+    """Where the shared copy lives, whether this instance writes it, and what
+    the last pull and push did (admin only)."""
+    return configsource.describe()
+
+
+@router.post("/source/pull")
+def pull_config_source(
+    db: Session = Depends(get_db),
+    admin: User = Depends(auth.require_admin),
+):
+    # type: (...) -> object
+    """Apply the shared copy now (admin only). Same upsert as an import."""
+    store = _require_source()
+    try:
+        report = configsource.pull(db, settings=get_settings(), store=store)
+    except configsource.ConfigSourceError as exc:
+        raise HTTPException(status_code=502, detail={
+            "error": "config_source_failed", "detail": str(exc)})
+    db.commit()
+    log.info("config pulled from the source by %s: %d target(s), %d repo(s), "
+             "%d spec(s) created", admin.username, report["targets"],
+             report["repos"], report["specs"])
+    return report
+
+
+@router.post("/source/push")
+def push_config_source(
+    db: Session = Depends(get_db),
+    admin: User = Depends(auth.require_admin),
+):
+    # type: (...) -> object
+    """Write this instance's configuration to the shared copy now (admin only).
+
+    409 unless ``STOKER_CONFIG_SOURCE_WRITE`` is on: the switch exists so an
+    instance cannot overwrite a shared copy it was only meant to read, and a
+    button that bypassed it would make the switch meaningless.
+    """
+    store = _require_source()
+    if not configsource.writes_enabled():
+        raise HTTPException(status_code=409, detail={
+            "error": "config_source_read_only",
+            "detail": "set %s=1 to let this instance write the shared copy"
+            % configsource.WRITE_ENV})
+    try:
+        result = configsource.push(db, settings=get_settings(), store=store)
+    except configsource.ConfigSourceError as exc:
+        raise HTTPException(status_code=502, detail={
+            "error": "config_source_failed", "detail": str(exc)})
+    log.info("config pushed to the source by %s", admin.username)
+    return result
 
 
 __all__ = ["router"]

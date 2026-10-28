@@ -149,6 +149,34 @@ export interface PackSourceInfo {
   error: string | null;
 }
 
+// The shared configuration copy (STOKER_CONFIG_SOURCE), and what it last did.
+export interface ConfigSyncResult {
+  at: string;
+  ok: boolean;
+  error?: string;
+  found?: boolean;
+  created?: { targets: number; repos: number; specs: number };
+  skipped?: number;
+  counts?: { targets: number; repos: number; specs: number };
+}
+
+export interface ConfigSourceInfo extends PackSourceInfo {
+  object: string;
+  last_pull: ConfigSyncResult | null;
+  last_push: ConfigSyncResult | null;
+  // Rows the last pull could not apply here, kept in every push.
+  carried: number;
+}
+
+export interface ConfigImportReport {
+  targets: number;
+  repos: number;
+  specs: number;
+  skipped: string[];
+  warnings: string[];
+  found?: boolean;
+}
+
 export interface PackPublishResult {
   published: boolean;
   key: string | null;

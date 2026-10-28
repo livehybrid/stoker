@@ -32,7 +32,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import lifecycle
 from .config import get_settings
-from . import configio, packsource
+from . import configio, configsource, packsource
 from .db import SessionLocal, init_db
 from .drivers.base import ExecutionDriver
 
@@ -201,6 +201,35 @@ async def _dogfood_metrics_loop(app):
             log.warning("dogfood metrics tick error: %s", exc)
 
 
+async def _config_push_loop(app):
+    # type: (FastAPI) -> None
+    """Back the configuration up to STOKER_CONFIG_SOURCE when it changes.
+
+    A no-op loop unless STOKER_CONFIG_SOURCE_WRITE is on. Comparing the
+    document every few seconds rather than hooking every route that edits a
+    target, repo or spec means a route added later cannot forget to back up.
+    A failed push is logged and shown on the Configuration page, and retried
+    on the next tick because nothing was marked synced.
+    """
+    while True:
+        try:
+            await asyncio.sleep(configsource.PUSH_INTERVAL_S)
+        except asyncio.CancelledError:
+            break
+        if not configsource.writes_enabled():
+            continue
+        try:
+            await asyncio.to_thread(_run_config_push)
+        except Exception as exc:  # noqa: BLE001 - a failed backup never stops the loop
+            log.warning("config source push failed: %s", exc)
+
+
+def _run_config_push():
+    # type: () -> None
+    with SessionLocal() as db:
+        configsource.maybe_push(db, get_settings())
+
+
 def _run_dogfood_metrics():
     # type: () -> None
     from . import metrics_lifecycle
@@ -241,6 +270,11 @@ async def _lifespan(app):
         # instance will not start".
         if packsource.load_from_env(db, get_settings()) is not None:
             db.commit()
+        # The shared config copy named by STOKER_CONFIG_SOURCE. After the pack
+        # source, so a spec in it finds its pack; same never-raises contract.
+        report = configsource.load_from_env(db, get_settings())
+        if report is not None and not report.get("error"):
+            db.commit()
     app.state.drivers = _build_drivers_map()
     task = asyncio.create_task(_supervisor_loop(app), name="stoker-supervisor")
     app.state.supervisor_task = task
@@ -253,14 +287,17 @@ async def _lifespan(app):
     dogfood_task = asyncio.create_task(
         _dogfood_metrics_loop(app), name="stoker-dogfood-metrics")
     app.state.dogfood_task = dogfood_task
+    config_push_task = asyncio.create_task(
+        _config_push_loop(app), name="stoker-config-push")
+    app.state.config_push_task = config_push_task
     log.info("control plane started; supervisor loop running (%.0fs cadence)",
              SUPERVISOR_INTERVAL_S)
     try:
         yield
     finally:
-        for bg in (task, maintenance_task, dogfood_task):
+        for bg in (task, maintenance_task, dogfood_task, config_push_task):
             bg.cancel()
-        for bg in (task, maintenance_task, dogfood_task):
+        for bg in (task, maintenance_task, dogfood_task, config_push_task):
             with contextlib.suppress(asyncio.CancelledError):
                 await bg
         log.info("control plane stopped; background loops cancelled")
