@@ -144,6 +144,26 @@
         "primary": "ds_life"
       },
       "title": "Recent run lifecycle"
+    },
+    "viz_held_back": {
+      "type": "splunk.table",
+      "options": {
+        "count": 20,
+        "drilldown": "row"
+      },
+      "dataSources": {
+        "primary": "ds_held_back"
+      },
+      "title": "Slots holding a run back (latest, active runs)",
+      "eventHandlers": [
+        {
+          "type": "drilldown.customUrl",
+          "options": {
+            "url": "/app/stoker_observability/stoker_run_detail_studio?form.run_id_tok=$row.run_id.value$&form.global_time.earliest=$global_time.earliest$&form.global_time.latest=$global_time.latest$&form.index_tok=$index_tok$",
+            "newTab": true
+          }
+        }
+      ]
     }
   },
   "dataSources": {
@@ -267,6 +287,17 @@
         }
       },
       "name": "Lifecycle"
+    },
+    "ds_held_back": {
+      "type": "ds.search",
+      "options": {
+        "query": "index=$index_tok$ sourcetype=stoker:worker run_state IN (provisioning, releasing, running, draining)\n| stats latest(lease_state) as state latest(holder) as holder latest(share_eps) as share_eps latest(eps) as eps latest(eps_of_share_pct) as of_share latest(engine_cpu_of_limit_pct) as of_limit latest(lag_s) as lag_s latest(queue_depth) as queue latest(heartbeat_age_s) as hb_age latest(_time) as t by run_id slot\n| where t >= relative_time(now(), \"-5m\")\n| eval verdict=case(state=\"free\", \"unheld: no worker claimed this slot\", state=\"lost\", \"lost: worker stopped heartbeating\", hb_age>60, \"silent for \".round(hb_age).\" s\", of_limit>=90, \"engine CPU-bound\", queue>0, \"HEC queue backing up\", lag_s>5, \"behind schedule\", isnotnull(of_share) AND of_share<90, \"under share\", true(), null())\n| where isnotnull(verdict)\n| eval eps=round(eps, 0), share_eps=round(share_eps, 0)\n| sort run_id slot\n| table run_id slot verdict state holder share_eps eps of_share of_limit lag_s queue",
+        "queryParameters": {
+          "earliest": "$global_time.earliest$",
+          "latest": "$global_time.latest$"
+        }
+      },
+      "name": "Slots holding a run back"
     }
   },
   "defaults": {
@@ -303,7 +334,7 @@
     "type": "absolute",
     "options": {
       "width": 1200,
-      "height": 1500,
+      "height": 1830,
       "display": "auto"
     },
     "structure": [
@@ -398,11 +429,21 @@
         }
       },
       {
-        "item": "viz_runs",
+        "item": "viz_held_back",
         "type": "block",
         "position": {
           "x": 0,
           "y": 1070,
+          "w": 1200,
+          "h": 320
+        }
+      },
+      {
+        "item": "viz_runs",
+        "type": "block",
+        "position": {
+          "x": 0,
+          "y": 1400,
           "w": 600,
           "h": 360
         }
@@ -412,7 +453,7 @@
         "type": "block",
         "position": {
           "x": 610,
-          "y": 1070,
+          "y": 1400,
           "w": 590,
           "h": 360
         }

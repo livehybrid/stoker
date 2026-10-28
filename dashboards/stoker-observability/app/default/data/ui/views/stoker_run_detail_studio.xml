@@ -124,6 +124,40 @@
         "primary": "ds_life"
       },
       "title": "Lifecycle (state transitions)"
+    },
+    "viz_slots": {
+      "type": "splunk.table",
+      "options": {
+        "count": 20
+      },
+      "dataSources": {
+        "primary": "ds_slots"
+      },
+      "title": "Workers: each slot against its share (latest)"
+    },
+    "viz_slot_eps": {
+      "type": "splunk.line",
+      "options": {
+        "legendDisplay": "bottom",
+        "yAxisTitleText": "events / s",
+        "nullValueDisplay": "connect"
+      },
+      "dataSources": {
+        "primary": "ds_slot_eps"
+      },
+      "title": "Delivered eps by slot"
+    },
+    "viz_slot_cpu": {
+      "type": "splunk.line",
+      "options": {
+        "legendDisplay": "bottom",
+        "yAxisTitleText": "% of CPU limit",
+        "nullValueDisplay": "connect"
+      },
+      "dataSources": {
+        "primary": "ds_slot_cpu"
+      },
+      "title": "Engine CPU by slot (% of the container's limit)"
     }
   },
   "dataSources": {
@@ -141,7 +175,7 @@
     "ds_workers": {
       "type": "ds.search",
       "options": {
-        "query": "index=$index_tok$ sourcetype=stoker:metrics run_id=$run_id_tok$\n| stats latest(reporting_workers) as reporting latest(live_workers) as live\n| eval workers = reporting . \" / \" . live",
+        "query": "index=$index_tok$ sourcetype=stoker:metrics run_id=$run_id_tok$\n| stats latest(reporting_workers) as reporting latest(live_workers) as live latest(unheld_slots) as unheld\n| eval workers = reporting . \" / \" . live . if(unheld>0, \" (\" . unheld . \" unheld)\", \"\")",
         "queryParameters": {
           "earliest": "$global_time.earliest$",
           "latest": "$global_time.latest$"
@@ -236,6 +270,39 @@
         }
       },
       "name": "Lifecycle"
+    },
+    "ds_slots": {
+      "type": "ds.search",
+      "options": {
+        "query": "index=$index_tok$ sourcetype=stoker:worker run_id=$run_id_tok$\n| stats latest(lease_state) as state latest(holder) as holder latest(engine_impl) as engine latest(share_eps) as share_eps latest(eps) as eps latest(eps_of_share_pct) as of_share latest(engine_cpu_pct) as engine_cpu latest(cpu_limit_cores) as cores latest(engine_cpu_of_limit_pct) as of_limit latest(engine_threads) as threads latest(lag_s) as lag_s latest(queue_depth) as queue latest(rss_mb) as rss_mb latest(heartbeat_age_s) as hb_age by slot\n| eval verdict=case(state=\"free\", \"unheld: no worker claimed this slot\", state=\"lost\", \"lost: worker stopped heartbeating\", hb_age>60, \"silent for \".round(hb_age).\" s\", of_limit>=90, \"engine CPU-bound\", queue>0, \"HEC queue backing up\", lag_s>5, \"behind schedule\", isnotnull(of_share) AND of_share<90, \"under share\", true(), \"ok\")\n| eval eps=round(eps, 0), share_eps=round(share_eps, 0), lag_s=round(lag_s, 1), rss_mb=round(rss_mb, 0)\n| sort slot\n| table slot state verdict holder engine share_eps eps of_share engine_cpu cores of_limit threads lag_s queue rss_mb",
+        "queryParameters": {
+          "earliest": "$global_time.earliest$",
+          "latest": "$global_time.latest$"
+        }
+      },
+      "name": "Workers"
+    },
+    "ds_slot_eps": {
+      "type": "ds.search",
+      "options": {
+        "query": "index=$index_tok$ sourcetype=stoker:worker run_id=$run_id_tok$ lease_state=running\n| eval slot=\"slot \".slot\n| timechart span=30s avg(eps) by slot limit=50",
+        "queryParameters": {
+          "earliest": "$global_time.earliest$",
+          "latest": "$global_time.latest$"
+        }
+      },
+      "name": "Delivered eps by slot"
+    },
+    "ds_slot_cpu": {
+      "type": "ds.search",
+      "options": {
+        "query": "index=$index_tok$ sourcetype=stoker:worker run_id=$run_id_tok$ lease_state=running\n| eval slot=\"slot \".slot\n| timechart span=30s max(engine_cpu_of_limit_pct) by slot limit=50",
+        "queryParameters": {
+          "earliest": "$global_time.earliest$",
+          "latest": "$global_time.latest$"
+        }
+      },
+      "name": "Engine CPU by slot"
     }
   },
   "defaults": {
@@ -280,7 +347,7 @@
     "type": "absolute",
     "options": {
       "width": 1200,
-      "height": 1100,
+      "height": 1800,
       "display": "auto"
     },
     "structure": [
@@ -383,6 +450,36 @@
           "w": 1200,
           "h": 280
         }
+      },
+      {
+        "item": "viz_slots",
+        "type": "block",
+        "position": {
+          "x": 0,
+          "y": 1070,
+          "w": 1200,
+          "h": 400
+        }
+      },
+      {
+        "item": "viz_slot_eps",
+        "type": "block",
+        "position": {
+          "x": 0,
+          "y": 1480,
+          "w": 600,
+          "h": 300
+        }
+      },
+      {
+        "item": "viz_slot_cpu",
+        "type": "block",
+        "position": {
+          "x": 610,
+          "y": 1480,
+          "w": 590,
+          "h": 300
+        }
       }
     ],
     "globalInputs": [
@@ -392,7 +489,7 @@
     ]
   },
   "title": "Stoker \u2014 Run Detail",
-  "description": "One run by id, over dogfood telemetry: delivered vs target eps, pacing lag, HEC outcomes and lifecycle."
+  "description": "One run by id, over dogfood telemetry: delivered vs target eps, pacing lag, HEC outcomes and lifecycle, then each slot against its share with its engine's CPU against the container's limit."
 }
 ]]></definition>
   <meta type="hiddenElements"><![CDATA[

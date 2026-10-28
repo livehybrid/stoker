@@ -276,3 +276,53 @@ def test_rotation_detection_ignores_comments_and_other_types(tmp_path):
     from stoker_agent.engine import conf_declares_rotation
     assert conf_declares_rotation(str(path)) is False
     assert conf_declares_rotation(str(tmp_path / "missing.conf")) is False
+
+
+# --------------------------------------------------------------------------- #
+# Engine CPU and threads for the heartbeat: the agent's own cpu_pct never
+# covered the engine subprocess that does the generating.
+# --------------------------------------------------------------------------- #
+
+def test_runner_reads_firebox_thread_count_and_exposes_its_pid(tmp_path, monkeypatch):
+    class _Logged(_FakePopen):
+        pid = 4242
+
+        def __init__(self, cmd, **kwargs):
+            super().__init__(cmd, **kwargs)
+            self.stdout = io.StringIO(
+                "[INFO] firebox 0.4.0 starting with 6 generator thread(s)\n")
+
+    monkeypatch.setattr(engine_mod.subprocess, "Popen", _Logged)
+    runner = EngineRunner(str(tmp_path / "eventgen.conf"), str(tmp_path / "out.sock"))
+    assert runner.pid is None and runner.generator_threads is None
+    runner.start()
+    try:
+        runner._reader.join(2.0)
+        assert runner.generator_threads == 6
+        assert runner.pid == 4242
+    finally:
+        runner.stop()
+    assert runner.pid is None
+
+
+def test_engine_cpu_tracker_follows_the_engine_across_restarts(tmp_path):
+    from stoker_agent.metrics import EngineCpuTracker
+
+    def stat(pid, ticks):
+        # fields after the comm: state, then utime/stime at 12th/13th
+        (tmp_path / str(pid)).mkdir(exist_ok=True)
+        fields = ["S"] + ["0"] * 10 + [str(ticks), "0"]
+        (tmp_path / str(pid) / "stat").write_text(
+            "%d (fire box) %s\n" % (pid, " ".join(fields)))
+
+    now = [0.0]
+    hz = engine_mod.os.sysconf("SC_CLK_TCK")
+    tracker = EngineCpuTracker(clock=lambda: now[0], proc_root=str(tmp_path))
+    stat(111, 0)
+    assert tracker.sample(None) is None
+    assert tracker.sample(111) is None        # first sight: no interval yet
+    now[0] = 10.0
+    stat(111, 20 * hz)                        # 20 CPU-seconds in 10 s
+    assert tracker.sample(111) == 200.0       # two cores busy
+    stat(222, 0)
+    assert tracker.sample(222) is None        # restarted under a new pid

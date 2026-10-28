@@ -66,8 +66,9 @@ _LIVE_LEASE_STATES = ("claimed", "ready", "running")
 # true value by the sample count (~12x at a 60 s bucket / 5 s heartbeat). There
 # are no genuinely per-interval delta columns, so _ROLLUP_SUM is empty.
 _ROLLUP_LAST = ("events_total", "bytes_total", "queue_depth",
-                "hec_2xx", "hec_4xx", "hec_5xx", "hec_timeouts", "retries")
-_ROLLUP_MEAN = ("eps", "bps", "lag_s", "rss_mb", "cpu_pct")
+                "hec_2xx", "hec_4xx", "hec_5xx", "hec_timeouts", "retries",
+                "engine_threads", "cpu_limit_cores")
+_ROLLUP_MEAN = ("eps", "bps", "lag_s", "rss_mb", "cpu_pct", "engine_cpu_pct")
 _ROLLUP_SUM = ()
 
 
@@ -394,22 +395,26 @@ def emit_run_metrics(db, run, settings=None, now=None):
         return False
     if run.state not in _ACTIVE_STATES:
         return False
-    agg = _aggregate_run_metrics(db, run)
+    rows = _lease_samples(db, run)
+    agg = _aggregate_run_metrics(db, run, rows=rows)
     if agg is None:
         return False
-    event = _hec_envelope("stoker:metrics", agg, run=run, settings=settings, ts=now)
-    return emit_hec_events([event], settings=settings)
+    events = [_hec_envelope("stoker:metrics", agg, run=run, settings=settings, ts=now)]
+    events.extend(_hec_envelope("stoker:worker", body, run=run, settings=settings, ts=now)
+                  for body in _worker_bodies(run, rows, now=now))
+    return emit_hec_events(events, settings=settings)
 
 
 def emit_active_run_metrics(db, settings=None, now=None):
     # type: (Any, Optional[Settings], Optional[datetime.datetime]) -> int
-    """Emit a ``stoker:metrics`` aggregate for every active run (dogfood loop).
+    """Emit a ``stoker:metrics`` aggregate for every active run (dogfood loop),
+    and one ``stoker:worker`` event per lease of each.
 
     The periodic dogfood metrics pass the lifespan drives. A no-op returning 0
     when dogfood is disabled. Each run's emit is isolated: one run's HEC failure
     (already swallowed inside :func:`emit_run_metrics`) never stops the others.
     Batches all runs' events into one HEC POST when possible for efficiency.
-    Returns the number of runs an event was built for.
+    Returns the number of runs an aggregate was built for.
     """
     if settings is None:
         settings = get_settings()
@@ -419,35 +424,53 @@ def emit_active_run_metrics(db, settings=None, now=None):
         select(Run).where(Run.state.in_(_ACTIVE_STATES))
     ).scalars().all())
     events = []  # type: List[Dict[str, Any]]
+    built = 0
     for run in runs:
         try:
-            agg = _aggregate_run_metrics(db, run)
+            rows = _lease_samples(db, run)
+            agg = _aggregate_run_metrics(db, run, rows=rows)
+            workers = _worker_bodies(run, rows, now=now)
         except Exception as exc:  # one bad run must not stop the batch
             log.debug("dogfood: run %s metrics aggregate failed: %s", run.id, exc)
             continue
         if agg is None:
             continue
+        built += 1
         events.append(_hec_envelope("stoker:metrics", agg, run=run,
                                     settings=settings, ts=now))
+        events.extend(_hec_envelope("stoker:worker", body, run=run,
+                                    settings=settings, ts=now)
+                      for body in workers)
     if events:
         emit_hec_events(events, settings=settings)
-    return len(events)
+    return built
 
 
-def _aggregate_run_metrics(db, run):
-    # type: (Any, Run) -> Optional[Dict[str, Any]]
+def _lease_samples(db, run):
+    # type: (Any, Run) -> List[Tuple[WorkerLease, Optional[MetricSample]]]
+    """Every lease of the run, by slot, with its latest sample (or None)."""
+    leases = db.execute(
+        select(WorkerLease).where(WorkerLease.run_id == run.id)
+        .order_by(WorkerLease.slot.asc())
+    ).scalars().all()
+    return [(lease, _latest_sample(db, run.id, lease.slot)) for lease in leases]
+
+
+def _aggregate_run_metrics(db, run, rows=None):
+    # type: (Any, Run, Optional[Sequence[Tuple[WorkerLease, Optional[MetricSample]]]]) -> Optional[Dict[str, Any]]
     """Aggregate a run's live-lease telemetry from each lease's latest sample.
 
     Returns the event body (or ``None`` when the run has no live leases with a
     sample). Sums the rate + HEC-outcome counters across the live leases so the
     aggregate is the run's current whole-fleet throughput and error posture.
     """
-    leases = list(db.execute(
-        select(WorkerLease).where(WorkerLease.run_id == run.id)
-    ).scalars().all())
-    live_slots = [l.slot for l in leases if l.state in _LIVE_LEASE_STATES]
-    if not live_slots:
+    if rows is None:
+        rows = _lease_samples(db, run)
+    live = [(lease, sample) for lease, sample in rows
+            if lease.state in _LIVE_LEASE_STATES]
+    if not live:
         return None
+    live_slots = [lease.slot for lease, _sample in live]
 
     eps = 0.0
     bps = 0.0
@@ -456,8 +479,8 @@ def _aggregate_run_metrics(db, run):
     hec = {"hec_2xx": 0, "hec_4xx": 0, "hec_5xx": 0, "hec_timeouts": 0, "retries": 0}
     lag_vals = []  # type: List[float]
     reporting = 0
-    for slot in live_slots:
-        sample = _latest_sample(db, run.id, slot)
+    engine_cpu = []  # type: List[float]
+    for _lease, sample in live:
         if sample is None:
             continue
         reporting += 1
@@ -469,6 +492,8 @@ def _aggregate_run_metrics(db, run):
             hec[key] += getattr(sample, key) or 0
         if sample.lag_s is not None:
             lag_vals.append(float(sample.lag_s))
+        if sample.engine_cpu_pct is not None:
+            engine_cpu.append(float(sample.engine_cpu_pct))
     if reporting == 0:
         return None
 
@@ -484,7 +509,12 @@ def _aggregate_run_metrics(db, run):
         "events_total": events_total,
         "bytes_total": bytes_total,
         "lag_s_max": round(max(lag_vals), 3) if lag_vals else None,
+        # Slots the run has but no worker holds: a scale-up the fleet could
+        # not fill, whose share of the target goes undelivered.
+        "unheld_slots": sum(1 for lease, _s in rows if lease.state == "free"),
     }
+    if engine_cpu:
+        body["engine_cpu_pct_max"] = round(max(engine_cpu), 1)
     body.update(hec)
     # The run's intended fleet-wide rate, so the observability dashboard can plot
     # delivered eps against target. Only meaningful for an eps run (per_day_gb /
@@ -496,6 +526,71 @@ def _aggregate_run_metrics(db, run):
         except (TypeError, ValueError):
             pass
     return body
+
+
+# Counters and gauges a stoker:worker event copies off the slot's latest sample.
+_WORKER_SAMPLE_FIELDS = (
+    "eps", "bps", "events_total", "bytes_total", "lag_s", "queue_depth",
+    "hec_2xx", "hec_4xx", "hec_5xx", "hec_timeouts", "retries",
+    "rss_mb", "cpu_pct", "engine_cpu_pct", "engine_threads", "cpu_limit_cores",
+)
+
+
+def _worker_bodies(run, rows, now=None):
+    # type: (Run, Sequence[Tuple[WorkerLease, Optional[MetricSample]]], Optional[datetime.datetime]) -> List[Dict[str, Any]]
+    """One ``stoker:worker`` body per lease, whatever its state.
+
+    The run aggregate says the fleet is short; these say which slot and why:
+    a free slot nobody claimed, a worker whose engine is pinned at its core
+    allowance, one that is lagging or queueing, one that went quiet. Each
+    carries the slot's share of the target next to what it delivered.
+    """
+    when = _as_aware(now) if now is not None else utcnow()
+    snap = run.spec_snapshot_json or {}
+    rate_mode = snap.get("rate_mode")
+    out = []  # type: List[Dict[str, Any]]
+    for lease, sample in rows:
+        share = lease.share_json or {}
+        body = {
+            "type": "worker_metrics",
+            "run_id": run.id,
+            "spec_id": run.spec_id,
+            "run_state": run.state,
+            "slot": lease.slot,
+            "lease_state": lease.state,
+            "holder": lease.holder,
+            "node": lease.node,
+            "restarts": lease.restarts,
+        }  # type: Dict[str, Any]
+        for key in ("_engine_impl", "_assigned_work"):
+            if share.get(key) is not None:
+                body[key.lstrip("_")] = share[key]
+        for key, value in share.items():
+            if not key.startswith("_") and isinstance(value, (int, float)):
+                body["share_" + key] = value
+        if lease.last_heartbeat_at is not None:
+            body["heartbeat_age_s"] = round(
+                (when - _as_aware(lease.last_heartbeat_at)).total_seconds(), 1)
+        if sample is not None:
+            body["sample_age_s"] = round(
+                (when - _as_aware(sample.ts)).total_seconds(), 1)
+            for field in _WORKER_SAMPLE_FIELDS:
+                value = getattr(sample, field)
+                if value is not None:
+                    body[field] = value
+            # Engine CPU against the container's allowance: 100 means the
+            # engine has every core it may use, so more rate needs more
+            # workers or a bigger limit, not a higher target.
+            limit = sample.cpu_limit_cores
+            if sample.engine_cpu_pct is not None and limit:
+                body["engine_cpu_of_limit_pct"] = round(
+                    sample.engine_cpu_pct / float(limit), 1)
+            share_eps = share.get("eps")
+            if rate_mode == "eps" and isinstance(share_eps, (int, float)) \
+                    and share_eps > 0 and sample.eps is not None:
+                body["eps_of_share_pct"] = round(100.0 * sample.eps / share_eps, 1)
+        out.append(body)
+    return out
 
 
 def _latest_sample(db, run_id, slot):

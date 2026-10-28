@@ -2671,9 +2671,10 @@ def counters_from_payload(payload):
     """
     int_keys = (
         "events_total", "bytes_total", "hec_2xx", "hec_4xx", "hec_5xx",
-        "hec_timeouts", "retries", "queue_depth",
+        "hec_timeouts", "retries", "queue_depth", "engine_threads",
     )
-    float_keys = ("eps", "bps", "lag_s", "rss_mb", "cpu_pct")
+    float_keys = ("eps", "bps", "lag_s", "rss_mb", "cpu_pct",
+                  "engine_cpu_pct", "cpu_limit_cores")
     out = {}  # type: Dict[str, Any]
     for key in int_keys:
         out[key] = _coerce_int(payload.get(key))

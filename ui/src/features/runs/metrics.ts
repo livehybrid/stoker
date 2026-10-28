@@ -242,6 +242,9 @@ export interface SlotLatest {
   queue_depth: number | null;
   rss_mb: number | null;
   cpu_pct: number | null;
+  engine_cpu_pct: number | null;
+  engine_threads: number | null;
+  cpu_limit_cores: number | null;
   ts: string | null;
 }
 
@@ -258,6 +261,9 @@ export function latestBySlot(
       queue_depth: s.queue_depth ?? null,
       rss_mb: s.rss_mb ?? null,
       cpu_pct: s.cpu_pct ?? null,
+      engine_cpu_pct: s.engine_cpu_pct ?? null,
+      engine_threads: s.engine_threads ?? null,
+      cpu_limit_cores: s.cpu_limit_cores ?? null,
       ts: s.ts,
     });
   }

@@ -74,6 +74,21 @@ def test_counters_from_payload_ignores_bearer_and_garbage():
     assert "state" not in counters
 
 
+def test_counters_from_payload_keeps_the_engine_figures():
+    """The engine's CPU, threads and the container's core allowance travel
+    from the heartbeat to the sample; an older worker that omits them leaves
+    them null rather than zero."""
+    counters = lifecycle.counters_from_payload({
+        "cpu_pct": 2.5, "engine_cpu_pct": 395.0, "engine_threads": 4,
+        "cpu_limit_cores": 4.0,
+    })
+    assert counters["engine_cpu_pct"] == 395.0
+    assert counters["engine_threads"] == 4
+    assert counters["cpu_limit_cores"] == 4.0
+    older = lifecycle.counters_from_payload({"cpu_pct": 2.5})
+    assert older["engine_cpu_pct"] is None and older["engine_threads"] is None
+
+
 def test_command_builders_shapes():
     assert lifecycle.cmd_continue() == {"command": "continue"}
     assert lifecycle.cmd_superseded() == {"command": "superseded"}

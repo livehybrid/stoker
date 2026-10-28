@@ -24,7 +24,8 @@ from .control import (ControlClient, DeadManError, StandaloneControl,
                       SupersededError)
 from .engine import (STOP_GRACE_S, EngineError, EngineRunner,
                      MetricsRunner, RawReplayRunner, eventgen_impl)
-from .metrics import CpuTracker, Metrics, read_rss_mb
+from .metrics import (CpuTracker, EngineCpuTracker, Metrics,
+                      read_cpu_limit_cores, read_rss_mb)
 from . import shaping
 from .pacing import TokenBucket
 from .slice import SliceError, SpecSlice, parse_iso8601
@@ -159,6 +160,8 @@ class Agent(object):
         self._sock = None
         self._engine = None
         self._engine_started = False
+        self._engine_cpu = EngineCpuTracker()
+        self._cpu_limit_cores = read_cpu_limit_cores()
         # Assigned work: how many discrete work units this worker actually
         # holds (metrics: owned series; eventgen: stanzas that will emit;
         # rawreplay: the one dataset). None until known (pre-prepare, or an
@@ -905,6 +908,19 @@ class Agent(object):
             and not self._bucket.closed else 0.0
         payload["rss_mb"] = round(read_rss_mb(), 1)
         payload["cpu_pct"] = round(cpu.sample(), 1) if cpu else 0.0
+        # Engine CPU and thread count (optional, additive): cpu_pct above is
+        # the agent alone, while the engine subprocess does the generating.
+        # 100 is one core; omitted until the engine has run for an interval.
+        if cpu is not None:
+            engine = self._engine
+            engine_pct = self._engine_cpu.sample(getattr(engine, "pid", None))
+            if engine_pct is not None:
+                payload["engine_cpu_pct"] = round(engine_pct, 1)
+            threads = getattr(engine, "generator_threads", None)
+            if isinstance(threads, int):
+                payload["engine_threads"] = threads
+            if self._cpu_limit_cores:
+                payload["cpu_limit_cores"] = self._cpu_limit_cores
         payload["state"] = self._state
         if snap.get("auth_failed"):
             payload["auth_failed"] = True
