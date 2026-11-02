@@ -146,3 +146,24 @@ Throughput on such a pack scales with the cores firebox gets, which is the
 container's CPU allowance: a worker limited to one CPU (`K8S_WORKER_CPU_LIMIT`,
 or a swarm `resources.limits.cpus`) runs one generator thread. The worker's log
 tail says how many it started with (`starting with N generator thread(s)`).
+
+## Precompiled line templates (2026-11-02)
+
+Even with the prefilter, every token present in an event still ran a regex
+search over the whole event and rebuilt it. firebox now compiles each sample
+line once at load into literal text and value slots, and writes each event in
+one pass with no regex (livehybrid/firebox#3). One thread, synthetic
+1,700-token packs (pack builder JSON patterns):
+
+| fields per event | event size | before | after |
+|---|---|---|---|
+| 40 | 1.1 KB | 1,854 eps | 147,630 eps |
+| 40, 4 threads | 1.1 KB | 8,291 eps | 495,129 eps |
+| 400 | 10.3 KB | 132 eps | 14,422 eps |
+
+On such packs the engine stops being the limit: one generator thread now
+outruns the agent's per-worker ceiling, so `engine_cpu_pct` in the heartbeat
+should fall well below the agent's. Tokens match the sample line as written,
+not text earlier tokens rewrote; firebox checks this against the old path at
+load and falls back per stanza if they differ (a token chain). Set
+`FIREBOX_TEMPLATES=0` on a worker to restore the old behaviour everywhere.
