@@ -118,6 +118,15 @@ export interface PackOut {
   repo_id?: number | null;
   indexed_sha?: string | null;
   created_at: string;
+  // Ships with the image (STOKER_BUILTIN_PACKS_DIR) and re-registers at boot,
+  // so it cannot be deleted.
+  builtin?: boolean;
+}
+
+// DELETE /api/packs/{id}?remote=true
+export interface PackDeleteResult {
+  remote_key: string;
+  remote_existed: boolean;
 }
 
 // Optional form fields accompanying a pack-archive upload

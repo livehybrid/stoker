@@ -1,4 +1,6 @@
+import { useState } from "react";
 import { Link } from "@tanstack/react-router";
+import Switch from "@splunk/react-ui/Switch";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api } from "../../lib/api";
@@ -8,9 +10,10 @@ import { Button } from "../../components/Button";
 import { useToast } from "../../components/Toast";
 import { formatBytes, formatGbDay, shortSha } from "../format";
 import { packIsMetrics } from "../metrics/config";
+import { Modal } from "../ui/Modal";
 import {
-  Between, Callout, Inline, Label, Muted, Panel, PanelFooter, Stat, StatRow, Strong,
-  Tags, TitleBlock,
+  Between, Callout, Inline, Label, Mono, Muted, Panel, PanelFooter, Stack, Stat, StatRow,
+  Strong, Tags, TitleBlock,
 } from "../../components/text";
 
 // A pack card: what the pack is, what it emits and how big its events are,
@@ -22,8 +25,11 @@ import {
 // sends that same archive to the configured pack source (s3:// or a directory),
 // and appears only when one is configured for writing.
 // Local packs (uploaded / registered / built here — no repo) also get Delete;
-// a repo-indexed pack's lifecycle belongs to its repo, so no delete appears
-// for those (the server refuses it anyway).
+// a repo-indexed pack's lifecycle belongs to its repo, and a builtin pack
+// re-registers at every boot, so no delete appears for those (the server
+// refuses both anyway). When the pack source is writable the delete dialog
+// offers to remove the bucket copy too: without that, the boot sync imports
+// the pack straight back.
 interface Props {
   pack: PackOut;
   onPreview: (pack: PackOut) => void;
@@ -45,6 +51,9 @@ export function PackCard({ pack, onPreview }: Props) {
   const tags = asStringList(pack.tags_json);
   const isMetric = packIsMetrics(pack);
   const isLocal = pack.repo_id === null || pack.repo_id === undefined;
+  const canDelete = isLocal && !pack.builtin;
+  const [confirming, setConfirming] = useState(false);
+  const [alsoRemote, setAlsoRemote] = useState(false);
 
   // Whether pushing is possible at all. Deployment environment variables, so it
   // cannot change without a restart: fetched once and never refetched, and a
@@ -67,23 +76,27 @@ export function PackCard({ pack, onPreview }: Props) {
   });
 
   const del = useMutation({
-    mutationFn: () => api.packs.delete(pack.id),
-    onSuccess: () => {
-      toast.success(`Pack "${pack.name}" deleted`);
+    mutationFn: (remote: boolean) => api.packs.delete(pack.id, remote),
+    onSuccess: (r) => {
+      setConfirming(false);
+      if (r) {
+        toast.success(
+          r.remote_existed
+            ? `Pack "${pack.name}" deleted, and ${r.remote_key} removed from the pack source`
+            : `Pack "${pack.name}" deleted (${r.remote_key} was not in the pack source)`,
+        );
+      } else {
+        toast.success(`Pack "${pack.name}" deleted`);
+      }
       qc.invalidateQueries({ queryKey: ["packs"] });
     },
     onError: (e) =>
       toast.error(e instanceof Error ? e.message : "Delete failed"),
   });
 
-  function confirmDelete() {
-    if (
-      window.confirm(
-        `Delete pack ${pack.name}? An uploaded pack's extracted files are removed too (refused if a spec uses it).`,
-      )
-    ) {
-      del.mutate();
-    }
+  function openDelete() {
+    setAlsoRemote(false);
+    setConfirming(true);
   }
 
   return (
@@ -166,10 +179,10 @@ export function PackCard({ pack, onPreview }: Props) {
           {pack.indexed_sha ? `indexed ${shortSha(pack.indexed_sha)}` : "local pack"}
         </Muted>
         <Inline>
-          {isLocal && (
+          {canDelete && (
             <Button
               variant="danger"
-              onClick={confirmDelete}
+              onClick={openDelete}
               disabled={del.isPending}
             >
               Delete
@@ -222,6 +235,57 @@ export function PackCard({ pack, onPreview }: Props) {
           </Link>
         </Inline>
       </PanelFooter>
+      <Modal
+        open={confirming}
+        onClose={() => !del.isPending && setConfirming(false)}
+        title={`Delete pack ${pack.name}`}
+        footer={
+          <>
+            <Button
+              variant="ghost"
+              onClick={() => setConfirming(false)}
+              disabled={del.isPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              onClick={() => del.mutate(canPush && alsoRemote)}
+              disabled={del.isPending}
+            >
+              {del.isPending ? "Deleting…" : "Delete"}
+            </Button>
+          </>
+        }
+      >
+        <Stack>
+          <span>
+            The pack is removed from this instance. An uploaded pack&apos;s extracted
+            files go with it. This is refused while a spec uses the pack.
+          </span>
+          {canPush ? (
+            <Switch
+              appearance="checkbox"
+              selected={alsoRemote}
+              onClick={() => setAlsoRemote(!alsoRemote)}
+            >
+              Also delete its archive from <Mono>{source.data?.location}</Mono>
+            </Switch>
+          ) : (
+            source.data?.configured && (
+              <Muted $small>
+                The pack source is read-only here, so a copy in it is left alone and
+                will be imported again at the next restart.
+              </Muted>
+            )
+          )}
+          {canPush && !alsoRemote && (
+            <Muted $small>
+              Left in the pack source, the pack is imported again at the next restart.
+            </Muted>
+          )}
+        </Stack>
+      </Modal>
     </Panel>
   );
 }

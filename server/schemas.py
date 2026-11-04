@@ -218,6 +218,9 @@ class PackOut(BaseModel):
     repo_id: Optional[int] = None
     indexed_sha: Optional[str] = None
     created_at: datetime.datetime
+    # Lives under STOKER_BUILTIN_PACKS_DIR: ships with the image and cannot be
+    # deleted (it re-registers at boot). Computed, not stored.
+    builtin: bool = False
 
 
 class PackPreview(BaseModel):

@@ -12,6 +12,8 @@ import { Button } from "../components/Button";
 import { Field, Select, TextInput } from "../components/Field";
 import { EmptyState, ErrorState, LoadingState } from "../components/States";
 import { useToast } from "../components/Toast";
+import Switch from "@splunk/react-ui/Switch";
+import { DeleteRunsModal } from "../features/runs/DeleteRunsModal";
 import type { RunOut, SpecOut, TargetOut } from "../lib/types";
 import {
   endReasonLabel,
@@ -102,6 +104,25 @@ function Runs() {
     [runsQ.data],
   );
 
+  // --- Selection, for bulk delete ------------------------------------------
+  // Only finished runs can be deleted, so only they get a checkbox. Selection
+  // is pruned to what is still listed: a run deleted elsewhere drops out.
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [deleting, setDeleting] = useState(false);
+  const selectable = useMemo(
+    () => filtered.filter((r) => isTerminal(r.state)).map((r) => r.id),
+    [filtered],
+  );
+  const selectedIds = selectable.filter((id) => selected.has(id));
+  const allSelected = selectable.length > 0 && selectedIds.length === selectable.length;
+  const toggle = (id: number) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+  const toggleAll = () => setSelected(allSelected ? new Set() : new Set(selectable));
+
   // --- Re-run ---------------------------------------------------------------
   const rerun = useMutation({
     mutationFn: (specId: number) => api.specs.run(specId),
@@ -116,7 +137,32 @@ function Runs() {
     },
   });
 
+  const selectColumn: Column<RunOut> = {
+    key: "select",
+    header: (
+      <Switch
+        appearance="checkbox"
+        selected={allSelected}
+        disabled={selectable.length === 0}
+        onClick={toggleAll}
+        aria-label="Select all finished runs shown"
+      />
+    ),
+    cell: (r) =>
+      isTerminal(r.state) ? (
+        <span onClick={(e) => e.stopPropagation()}>
+          <Switch
+            appearance="checkbox"
+            selected={selected.has(r.id)}
+            onClick={() => toggle(r.id)}
+            aria-label={`Select run #${r.id}`}
+          />
+        </span>
+      ) : null,
+  };
+
   const columns: Column<RunOut>[] = [
+    selectColumn,
     { key: "id", header: "Run", cell: (r) => <Strong>#{r.id}</Strong> },
     {
       key: "spec",
@@ -255,7 +301,21 @@ function Runs() {
         </Grid>
       </Card>
 
-      <Card>
+      <Card
+        actions={
+          selectedIds.length > 0 ? (
+            <Inline>
+              <Muted>{selectedIds.length} selected</Muted>
+              <Button variant="ghost" onClick={() => setSelected(new Set())}>
+                Clear selection
+              </Button>
+              <Button variant="danger" onClick={() => setDeleting(true)}>
+                Delete selected
+              </Button>
+            </Inline>
+          ) : undefined
+        }
+      >
         {runsQ.isPending ? (
           <LoadingState />
         ) : runsQ.isError ? (
@@ -281,6 +341,19 @@ function Runs() {
           />
         )}
       </Card>
+
+      <DeleteRunsModal
+        ids={selectedIds}
+        open={deleting}
+        onClose={() => setDeleting(false)}
+        onDeleted={(gone) =>
+          setSelected((prev) => {
+            const next = new Set(prev);
+            for (const id of gone) next.delete(id);
+            return next;
+          })
+        }
+      />
     </Stack>
   );
 }
