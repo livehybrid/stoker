@@ -604,6 +604,10 @@ class RunOut(BaseModel):
     ended_at: Optional[datetime.datetime] = None
     end_reason: Optional[str] = None
     totals_json: Optional[Any] = None
+    # Operator pause: when the current pause began (null while not paused) and
+    # seconds spent in earlier pauses.
+    paused_at: Optional[datetime.datetime] = None
+    paused_s: float = 0.0
 
 
 class RunDetail(RunOut):

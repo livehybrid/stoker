@@ -12,6 +12,7 @@ import { Button } from "../components/Button";
 import { Field, Select, TextInput } from "../components/Field";
 import { EmptyState, ErrorState, LoadingState } from "../components/States";
 import { useToast } from "../components/Toast";
+import { RunActions } from "../features/runs/RunActions";
 import type { RunOut, SpecOut, TargetOut } from "../lib/types";
 import {
   endReasonLabel,
@@ -169,17 +170,24 @@ function Runs() {
       header: "",
       align: "right",
       cell: (r) => (
-        <Button
-          variant="ghost"
-          onClick={(e) => {
-            e.stopPropagation();
-            rerun.mutate(r.spec_id);
-          }}
-          disabled={rerun.isPending}
-          title="Launch this run's spec again (byte-identical)"
-        >
-          Re-run
-        </Button>
+        <Inline>
+          <RunActions
+            run={r}
+            rateMode={specById.get(r.spec_id)?.rate_mode}
+            compact
+          />
+          <Button
+            variant="ghost"
+            onClick={(e) => {
+              e.stopPropagation();
+              rerun.mutate(r.spec_id);
+            }}
+            disabled={rerun.isPending}
+            title="Launch this run's spec again, as the spec is now"
+          >
+            Re-run
+          </Button>
+        </Inline>
       ),
     },
   ];

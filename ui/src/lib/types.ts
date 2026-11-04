@@ -462,6 +462,10 @@ export interface RunOut {
   ended_at?: string | null;
   end_reason?: string | null;
   totals_json?: unknown;
+  /** When the current operator pause began; null while not paused. */
+  paused_at?: string | null;
+  /** Seconds spent in earlier, finished pauses. */
+  paused_s?: number;
 }
 
 export interface RunDetail extends RunOut {

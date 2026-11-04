@@ -154,6 +154,11 @@ class Agent(object):
         self._exit_code = EXIT_OK
         self._state = "starting"
         self._fencing_paused = False
+        # Operator pause (the control plane answered "pause"): output is held
+        # until any other command arrives. paused_s is the control plane's total
+        # paused time, which moves a bounded run's deadline out.
+        self._operator_paused = False
+        self._paused_s = 0.0
         # resources, torn down in run()'s finally
         self._hec = None
         self._bucket = None
@@ -702,9 +707,18 @@ class Agent(object):
                     and self._backfill_mode() == "sweep")
         while not self._drain_event.is_set():
             now_wall = self._clock()
-            if deadline is not None and now_wall >= deadline:
+            # A pause moves the end out by however long the run was paused; a
+            # worker that is paused right now never ends on its deadline.
+            end_at = (deadline + self._paused_s) if deadline is not None else None
+            if (end_at is not None and now_wall >= end_at
+                    and not self._operator_paused):
                 self.request_drain("duration-complete")
                 break
+            if self._operator_paused:
+                # Silence is expected while paused: keep the watchdog quiet.
+                last_progress = time.monotonic()
+                if self._sock is not None:
+                    last_received = self._sock.received
             if self._engine_started and not self._engine.is_alive():
                 log.warning("engine exited (rc=%s); draining",
                             self._engine.returncode)
@@ -777,8 +791,9 @@ class Agent(object):
                     self._apply_command(resp, sl, conf_path, pack)
 
             timeout = max(0.0, next_hb - time.monotonic())
-            if deadline is not None:
-                timeout = min(timeout, max(0.0, deadline - self._clock()))
+            if deadline is not None and not self._operator_paused:
+                timeout = min(timeout, max(
+                    0.0, deadline + self._paused_s - self._clock()))
             self._drain_event.wait(min(timeout, interval) or 0.001)
 
     def _check_fencing(self, control):
@@ -793,14 +808,28 @@ class Agent(object):
                 self._fencing_paused = True
                 self._state = "paused"
         elif self._fencing_paused:
+            self._fencing_paused = False
+            if self._operator_paused:
+                # The lease is confirmed but the operator still has the run
+                # paused: stay held until the control plane says otherwise.
+                log.info("fencing: heartbeat ack confirmed lease; run still paused")
+                return
             log.info("fencing: heartbeat ack confirmed lease; resuming")
             self._bucket.resume()
-            self._fencing_paused = False
             self._state = "generating"
 
     def _apply_command(self, resp, sl, conf_path, pack):
         # type: (Dict[str, Any], SpecSlice, str, Any) -> None
         command = resp.get("command")
+        paused_s = resp.get("paused_s")
+        if isinstance(paused_s, (int, float)) and not isinstance(paused_s, bool) \
+                and paused_s >= 0:
+            self._paused_s = float(paused_s)
+        if command == "pause":
+            self._operator_pause()
+            return
+        if command != "drain" and self._operator_paused:
+            self._operator_resume(sl)
         if command in (None, "continue", "release"):
             return
         if command == "drain":
@@ -809,6 +838,44 @@ class Agent(object):
             self._retarget(resp.get("share") or {}, sl, conf_path, pack)
         else:
             log.warning("unknown control command %r ignored", command)
+
+    def _operator_pause(self):
+        # type: () -> None
+        """Hold output: the operator paused the run."""
+        if self._operator_paused or self._bucket is None:
+            return
+        log.info("control: run paused by operator; holding output")
+        self._bucket.pause()
+        self._operator_paused = True
+        self._state = "paused"
+
+    def _operator_resume(self, sl):
+        # type: (SpecSlice) -> None
+        """Release output after an operator pause, without a catch-up burst.
+
+        The bucket is re-anchored at now, so the paused interval is not owed and
+        replayed. A live metrics engine walks a wall-clock grid and would
+        otherwise emit every tick it missed, stamped in the past, so it is
+        restarted onto the current grid instead.
+        """
+        if not self._operator_paused or self._bucket is None:
+            return
+        self._operator_paused = False
+        if self._fencing_paused:
+            return  # the fence lifts on the next ack and resumes then
+        log.info("control: run resumed by operator (paused %.0fs in total)",
+                 self._paused_s)
+        self._bucket.anchor_at(self._clock())
+        self._bucket.resume()
+        self._state = "generating"
+        if (sl.engine == "metrics" and sl.backfill_start_s is None
+                and self._engine is not None and self._engine_started):
+            try:
+                self._engine.restart()
+            except EngineError as exc:
+                log.error("metrics engine restart after resume failed: %s", exc)
+                self._exit_code = EXIT_NO_OUTPUT
+                self.request_drain("no-engine-output")
 
     def _retarget(self, share, sl, conf_path, pack):
         # type: (Dict[str, Any], SpecSlice, str, Any) -> None

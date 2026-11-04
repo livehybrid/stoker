@@ -44,6 +44,7 @@ the token never appears in the Job's pod-spec env (only in the Secret).
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Dict, List, Optional, Set
 
 from .base import DriverError, DriverRef, DriverStatus, NotFound, RunSnapshot
@@ -258,6 +259,24 @@ class K8sDriver(object):
                    name=ref.id, namespace=ns, body=patch)
         log.info("k8s scaled job %s desired=%d (parallelism+completions)",
                  ref.id, workers)
+
+    def extend_deadline(self, ref, duration_s, paused_s):
+        # type: (DriverRef, float, float) -> None
+        """Move the Job's hard deadline out by the time the run spent paused.
+
+        Optional capability (outside the six-method contract), called by the
+        lifecycle on pause and resume. The deadline is always recomputed from
+        the run's duration, so repeated calls never compound.
+        """
+        if not duration_s or duration_s <= 0:
+            return
+        ns = self._namespace_of(ref)
+        seconds = int(duration_s) + 300 + int(math.ceil(max(0.0, paused_s)))
+        patch = {"spec": {"activeDeadlineSeconds": seconds}}
+        self._call(self._batch_api().patch_namespaced_job,
+                   name=ref.id, namespace=ns, body=patch)
+        log.info("k8s job %s activeDeadlineSeconds=%d (paused %.0fs)",
+                 ref.id, seconds, paused_s)
 
     def stop(self, ref, grace_s):
         # type: (DriverRef, int) -> None

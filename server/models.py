@@ -248,8 +248,8 @@ class Run(Base):
     spec_snapshot_json: Mapped[Optional[Any]] = mapped_column(JSON_VARIANT, nullable=True)
     resolved_sha: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     bundle_id: Mapped[Optional[int]] = mapped_column(ForeignKey("bundles.id"), nullable=True)
-    # pending | preparing | provisioning | releasing | running | draining |
-    # completed | stopped | failed
+    # pending | preparing | provisioning | releasing | running | paused |
+    # draining | completed | stopped | failed
     state: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
     degraded: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     jwt_kid: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
@@ -260,6 +260,12 @@ class Run(Base):
     ended_at: Mapped[Optional[datetime.datetime]] = _ts_column(nullable=True)
     end_reason: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     totals_json: Mapped[Optional[Any]] = mapped_column(JSON_VARIANT, nullable=True)
+    # Operator pause: when the current pause began (null while not paused) and
+    # the seconds spent paused in earlier, finished pauses. A bounded run's end
+    # moves out by the total, so a pause does not eat into its duration.
+    paused_at: Mapped[Optional[datetime.datetime]] = _ts_column(nullable=True)
+    paused_s: Mapped[float] = mapped_column(Float, nullable=False, default=0.0,
+                                            server_default="0")
 
     spec: Mapped[Spec] = relationship(back_populates="runs")
     bundle: Mapped[Optional[Bundle]] = relationship(back_populates="runs")
