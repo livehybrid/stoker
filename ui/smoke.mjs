@@ -156,6 +156,7 @@ const ROUTES = {
         leases: [LEASE],
         spec_snapshot_json: { engine: 'eventgen', overrides: { index: 'main' } },
     },
+    '/packs/5/preview': { stanzas: [], sample_lines: {}, lint_status: 'ok', lint_errors: [] },
     '/runs/7/metrics': { samples: SAMPLES },
     '/runs/7/events': { events: [] },
     '/pack-builder/wordlists': [
@@ -206,6 +207,9 @@ function lookup(url) {
     }
     if (/^\/runs\/\d+$/.test(route)) {
         return ROUTES['/runs/7'];
+    }
+    if (/^\/specs\/\d+$/.test(route)) {
+        return SPEC;
     }
     if (route.endsWith('/leases')) {
         return [LEASE];
@@ -373,11 +377,17 @@ const go = async (pathname) => {
 
     await go('/runs');
     await check('runs', 'steady-2k');
+    await check('runs: row lifecycle actions', 'Force stop');
+
+    await go('/specs/new?cloneRun=7');
+    await check('clone run: wizard', 'Clone run #7');
 
     await go('/runs/7');
     await check('run detail: totals', 'Events');
     await check('run detail: lease roster', 'worker-a');
     await check('run detail: tabs', 'Spec snapshot');
+    await check('run detail: pause action', 'Pause');
+    await check('run detail: clone action', 'Clone');
 
     /*
      * The charts are Splunk Line components, and this is the assertion that

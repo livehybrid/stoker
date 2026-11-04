@@ -59,7 +59,7 @@ appears in any GET body).
 - **packs**: id, name, source_path, description, tags_json, engines_json, sourcetypes_json, stanza_count, est_bytes_per_event (float), declared_per_day_gb (float, null), verified (bool), lint_status (ok/error/unknown), lint_errors_json, repo_id (fk, null for a locally-registered pack), indexed_sha (repo head SHA when git-synced, null for a local pack), created_at.
 - **bundles**: id, pack_id (fk, null), digest (unique, sha256 of the tarball), size_bytes, path, created_at. Immutable, content-addressed.
 - **specs**: id, name, pack_id (fk), ref (default local), target_id (fk), engine (`eventgen` | `rawreplay`, default eventgen), overrides_json (index/sourcetype/source/host, values may contain `{slot}`), rate_mode (eps/per_day_gb/count_interval, default eps), rate_value (float, null), interval_s (null), workers (int, default 1), duration_s (null=unbounded), fleet (default swarm-local), strict_release (bool), driver_opts_json, created_at.
-- **runs**: id, spec_id (fk), spec_snapshot_json (frozen, non-secret only), resolved_sha, bundle_id (fk), state (pending/preparing/provisioning/releasing/running/draining/completed/stopped/failed), degraded (bool), jwt_kid, driver_ref_json, started_by, created_at, t0 (null until release), ended_at, end_reason, totals_json.
+- **runs**: id, spec_id (fk), spec_snapshot_json (frozen, non-secret only), resolved_sha, bundle_id (fk), state (pending/preparing/provisioning/releasing/running/paused/draining/completed/stopped/failed), degraded (bool), jwt_kid, driver_ref_json, started_by, created_at, t0 (null until release), ended_at, end_reason, totals_json, paused_at (start of the current pause, null when not paused), paused_s (seconds in earlier pauses).
 - **worker_leases**: id, run_id (fk), slot (int), share_json (one key: eps|per_day_gb|count), lease_id (unique str), holder (str null), node (str null), state (free/claimed/ready/running/lost/done), last_heartbeat_at, effective_t0, restarts (int), final_log_tail_json. Unique (run_id, slot). The lease is the unit of fencing identity.
 - **metric_samples**: id, run_id, slot, ts, and the heartbeat counters (events_total, bytes_total, eps, bps, hec_2xx, hec_4xx, hec_5xx, hec_timeouts, retries, queue_depth, lag_s, rss_mb, cpu_pct). Appended per successful heartbeat; rolled up and pruned by the maintenance loop.
 - **run_events**: id, run_id, ts, actor (system/operator/agent), kind, detail_json. Append-only audit trail; every state transition writes one.
@@ -72,8 +72,23 @@ appears in any GET body).
 
 State machine: `pending -> preparing -> provisioning -> releasing -> running ->
 draining -> {completed | stopped}`, with `failed` reachable from
-provisioning/auto-abort/boot-reconcile. Terminal states are
+provisioning/auto-abort/boot-reconcile, and `running <-> paused` on an operator
+pause/resume (a paused run can still be stopped). Terminal states are
 `{completed, stopped, failed}`. Every transition appends a `run_event`.
+
+**Pause**: while `paused` every heartbeat answers `pause` and workers hold
+output with their leases still renewed. A bounded run's end moves out by the
+time spent paused: the supervisor's duration check uses `t0 + duration_s +
+paused`, heartbeats carry the running total as `paused_s` for the worker's own
+deadline, and the k8s driver's `activeDeadlineSeconds` is pushed out (by a 24 h
+headroom while paused, then exactly on resume). Engine-paced runs
+(`count_interval`) cannot be paused. On resume the worker re-anchors its pacing
+at now, so the paused interval is not replayed, and a live metrics engine is
+restarted onto the current wall-clock grid.
+
+**Forced stop totals**: a forced stop marks leases `done` without a final
+report, so each slot's latest heartbeat counters are folded into `totals_json`
+first; otherwise the run would show no events or volume.
 
 - **Provision** (`lifecycle.provision_run`, called by `POST /api/specs/{id}/run` after the route's submit gates): force workers=1 for a replay engine; freeze `spec_snapshot_json` (non-secret, target embedded by id); resolve the bundle (build from the pack dir if absent, reuse the content-addressed digest otherwise); create the run row (pending) to allocate its id; transition to preparing; apportion shares across `workers` slots by largest-remainder and seed the `worker_leases` rows (all `free`); mint the per-run JWT (store `jwt_kid` on the run); `driver.create(RunSnapshot, workers)` and store the `DriverRef`; transition to provisioning. A failed `driver.create` fails the run loudly (never a silent hang).
 - **Claim / ready / release** (`lifecycle.claim_lease` / `mark_ready` / `evaluate_release`): agents claim free leases (lowest free slot, honouring `hint_slot`); a claim records the holder, sets the lease `claimed`, stamps `last_heartbeat_at` and `effective_t0` (run t0 on first claim, now on re-issue). When every non-lost lease is `ready` (or the supervisor forces a partial release on timeout), `t0 = now + RELEASE_DELAY_S` (2 s) and the run moves provisioning -> releasing, then -> running on the first post-T0 heartbeat.
@@ -196,7 +211,7 @@ on heartbeat (200) and 409 on ready/final.
 
 - `POST /api/agent/runs/{run_id}/claim` `{holder, hint_slot?, protocol_version}` -> the spec slice (`run_id`, `slot`, `total_workers`, `lease_id`, `engine`, `bundle{url,sha256}`, `share{<one key>}`, `duration_s`, `hec{url,index,sourcetype,gzip,ack}`, `overrides`, `telemetry{interval_s}`, `released`, `effective_t0`). Issues the lowest free lease (honouring `hint_slot`), records holder, state `claimed`, stamps the heartbeat clock and `effective_t0`. `share` carries exactly one key matching `rate_mode`. `overrides.host` etc. have `{slot}` substituted. A re-claim of a still-held lease by the same holder is idempotent.
 - `POST /api/agent/runs/{run_id}/ready` `{slot, lease_id}` -> `{}`. Marks the lease ready; may trigger release evaluation. 409 when `lease_id` is not the slot holder.
-- `POST /api/agent/runs/{run_id}/heartbeat` `{slot, lease_id, protocol_version, ...counters..., state}` -> a command: `continue` normally; `release` with `t0` once T0 is set; `retarget` with `share` when the stored slot share changed (scale/rescale); `drain` when draining/stopping or the protocol version is unsupported; `superseded` when this lease_id is no longer the slot holder. May carry a fresh `jwt` when the token is near expiry. A successful heartbeat renews the lease and appends the counters to `metric_samples`.
+- `POST /api/agent/runs/{run_id}/heartbeat` `{slot, lease_id, protocol_version, ...counters..., state}` -> a command: `continue` normally; `release` with `t0` once T0 is set; `retarget` with `share` when the stored slot share changed (scale/rescale); `pause` while the operator has the run paused; `drain` when draining/stopping or the protocol version is unsupported; `superseded` when this lease_id is no longer the slot holder. May carry a fresh `jwt` when the token is near expiry. A successful heartbeat renews the lease and appends the counters to `metric_samples`.
 - `POST /api/agent/runs/{run_id}/final` `{slot, summary, log_tail}` -> `{}`. Stores `final_log_tail`, folds `summary` into `runs.totals_json`, marks the lease done; when all leases are done/lost the run reaches its terminal state.
 - `GET /api/agent/bundles/{digest}.tgz` -> the tarball bytes (JWT-checked; the run must reference that bundle by `bundle_id` or `resolved_sha`). 404 unknown/missing, 401 bad token, 403 when the run does not reference the bundle.
 
@@ -247,7 +262,9 @@ trusted-proxy header, or an API token (`Authorization: Bearer stk_...`).
 - `GET /api/runs/{id}/metrics?res=5s&window=15m` -> samples within the window (raw samples ordered by ts/slot; `res` is echoed for the UI).
 - `GET /api/runs/{id}/logs?slot=&tail=` -> recent worker log lines from the driver (falls back to a lease's stored `final_log_tail` for a finished run whose workload is gone). `tail` clamped to [1, 5000].
 - `GET /api/runs/{id}/events` -> the append-only audit trail.
-- `POST /api/runs/{id}/stop {force?}` -> drain (or immediate destroy when `force`).
+- `POST /api/runs/{id}/stop {force?}` -> drain (or immediate destroy when `force`). Works on a paused run.
+- `POST /api/runs/{id}/pause` -> hold output (`409 not_running` unless running; `409 pause_unsupported` for a `count_interval` run).
+- `POST /api/runs/{id}/resume` -> resume output and bank the paused time (`409 not_paused` unless paused). Scale and rescale answer `409 run_paused` while paused.
 - `POST /api/runs/{id}/scale {workers}` -> re-apportion + push `retarget` (`409 replay_single_worker` for a replay run; `422` when workers<1).
 - `POST /api/runs/{id}/rescale {rate_value}` -> re-apportion the same worker count + push `retarget` (`422` when rate_value<=0).
 
