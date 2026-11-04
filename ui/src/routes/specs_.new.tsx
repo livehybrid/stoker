@@ -6,6 +6,7 @@ import { api } from "../lib/api";
 import type {
   PackOut,
   RateMode,
+  RunDetail,
   SpecCreate,
   SpecOut,
   SpecUpdate,
@@ -33,11 +34,14 @@ import Switch from "@splunk/react-ui/Switch";
 import CollapsiblePanel from "@splunk/react-ui/CollapsiblePanel";
 
 // Search params: ?edit=<id> reopens a saved spec for editing; ?clone=<id>
-// prefills a new spec from an existing one; ?pack=<id> pre-selects a pack (the
+// prefills a new spec from an existing one; ?cloneRun=<id> prefills a new spec
+// from the settings a run was launched with (its frozen snapshot, which may
+// differ from the spec as it is now); ?pack=<id> pre-selects a pack (the
 // "New job from pack" deep-link from the Packs page). Absent = a fresh spec.
 interface WizardSearch {
   edit?: number;
   clone?: number;
+  cloneRun?: number;
   pack?: number;
 }
 
@@ -125,6 +129,46 @@ function formFromSpec(spec: SpecOut): FormState {
   };
 }
 
+// Overlay a run's frozen snapshot on the form built from its spec, so a clone
+// reproduces what that run actually did. The pack comes from the spec (the
+// snapshot does not carry it). A backfill run's snapshot holds the delivery
+// cap and a duration backstop instead of the spec's own rate and duration, so
+// those stay as the spec has them.
+function formFromRunSnapshot(base: FormState, run: RunDetail): FormState {
+  const snap = (run.spec_snapshot_json ?? {}) as Record<string, unknown>;
+  const ov = (snap.overrides ?? {}) as Record<string, unknown>;
+  const target = (snap.target ?? {}) as Record<string, unknown>;
+  const num = (v: unknown) => (typeof v === "number" ? String(v) : "");
+  const next: FormState = {
+    ...base,
+    name: `${str(snap.name) || base.name} (copy of run #${run.id})`,
+    target_id: typeof target.id === "number" ? target.id : base.target_id,
+    extra_pack_ids: Array.isArray(snap.extra_pack_ids)
+      ? (snap.extra_pack_ids as number[])
+      : base.extra_pack_ids,
+    engine: str(snap.engine) || base.engine,
+    interval_s: num(snap.interval_s),
+    workers: typeof snap.workers === "number" ? String(snap.workers) : base.workers,
+    fleet: str(snap.fleet) || base.fleet,
+    strict_release: !!snap.strict_release,
+    eventgen_impl: str(snap.eventgen_impl) || base.eventgen_impl,
+    fast_envelope: snap.fast_envelope !== false,
+    rate_shape: str(snap.rate_shape) || base.rate_shape,
+    overrides: {
+      index: str(ov.index),
+      sourcetype: str(ov.sourcetype),
+      source: str(ov.source),
+      host: str(ov.host),
+    },
+  };
+  if (snap.backfill == null) {
+    if (typeof snap.rate_mode === "string") next.rate_mode = snap.rate_mode as RateMode;
+    next.rate_value = num(snap.rate_value);
+    next.duration_s = num(snap.duration_s);
+  }
+  return next;
+}
+
 function str(v: unknown): string {
   return typeof v === "string" ? v : v != null ? String(v) : "";
 }
@@ -150,9 +194,21 @@ function collectOverrides(
 function JobWizard() {
   const navigate = useNavigate();
   const toast = useToast();
-  const { edit, clone, pack } = Route.useSearch();
+  const { edit, clone, cloneRun, pack } = Route.useSearch();
   const editing = typeof edit === "number";
-  const loadId = editing ? edit : typeof clone === "number" ? clone : null;
+  const fromRun = !editing && typeof cloneRun === "number";
+  const runQ = useQuery({
+    queryKey: ["run", cloneRun],
+    queryFn: () => api.runs.get(cloneRun as number),
+    enabled: fromRun,
+  });
+  const loadId = editing
+    ? edit
+    : typeof clone === "number"
+      ? clone
+      : fromRun
+        ? (runQ.data?.spec_id ?? null)
+        : null;
 
   const packsQ = useQuery({
     queryKey: ["wizard-packs"],
@@ -178,11 +234,13 @@ function JobWizard() {
   const prefilled = useRef(false);
   useEffect(() => {
     if (loadId == null || prefilled.current || !specQ.data) return;
-    const next = formFromSpec(specQ.data);
-    if (!editing) next.name = `${next.name} (copy)`;
+    if (fromRun && !runQ.data) return;
+    let next = formFromSpec(specQ.data);
+    if (fromRun && runQ.data) next = formFromRunSnapshot(next, runQ.data);
+    else if (!editing) next.name = `${next.name} (copy)`;
     setForm(next);
     prefilled.current = true;
-  }, [loadId, editing, specQ.data]);
+  }, [loadId, editing, fromRun, specQ.data, runQ.data]);
 
   // Fresh-spec deep-link: ?pack=<id> from the Packs page pre-selects that pack
   // (once, only when not editing/cloning and no pack chosen yet).
@@ -558,7 +616,12 @@ function JobWizard() {
   }
 
   // Loading / error shells for the reference data the wizard depends on.
-  if (packsQ.isPending || targetsQ.isPending || (loadId != null && specQ.isPending)) {
+  if (
+    packsQ.isPending ||
+    targetsQ.isPending ||
+    (fromRun && runQ.isPending) ||
+    (loadId != null && specQ.isPending)
+  ) {
     return (
       <Stack $gap="large">
         <PageHeader title={editing ? "Edit spec" : "New spec"} />
@@ -568,6 +631,9 @@ function JobWizard() {
       </Stack>
     );
   }
+  if (fromRun && runQ.isError) {
+    return <ErrorState error={runQ.error} onRetry={() => runQ.refetch()} />;
+  }
   if (packsQ.isError) {
     return <ErrorState error={packsQ.error} onRetry={() => packsQ.refetch()} />;
   }
@@ -575,7 +641,13 @@ function JobWizard() {
     return <ErrorState error={targetsQ.error} onRetry={() => targetsQ.refetch()} />;
   }
 
-  const title = editing ? "Edit spec" : clone != null ? "Clone spec" : "New spec";
+  const title = editing
+    ? "Edit spec"
+    : fromRun
+      ? `Clone run #${cloneRun}`
+      : clone != null
+        ? "Clone spec"
+        : "New spec";
 
   return (
     <Stack $gap="large">
@@ -1040,8 +1112,10 @@ export const Route = createFileRoute("/specs_/new")({
     const out: WizardSearch = {};
     const edit = Number(search.edit);
     const clone = Number(search.clone);
+    const cloneRun = Number(search.cloneRun);
     if (search.edit != null && Number.isFinite(edit)) out.edit = edit;
     if (search.clone != null && Number.isFinite(clone)) out.clone = clone;
+    if (search.cloneRun != null && Number.isFinite(cloneRun)) out.cloneRun = cloneRun;
     return out;
   },
   component: JobWizard,

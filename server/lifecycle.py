@@ -12,6 +12,7 @@ State machine (contract section "Run lifecycle"):
 
     pending -> preparing -> provisioning -> releasing -> running
             -> draining -> {completed | stopped}
+    running <-> paused (operator pause/resume; paused -> draining on stop)
     (failed reachable from provisioning and any auto-abort)
 
 Every transition appends a ``run_events`` row via :func:`append_event`.
@@ -68,12 +69,18 @@ STATE_PREPARING = "preparing"
 STATE_PROVISIONING = "provisioning"
 STATE_RELEASING = "releasing"
 STATE_RUNNING = "running"
+STATE_PAUSED = "paused"
 STATE_DRAINING = "draining"
 STATE_COMPLETED = "completed"
 STATE_STOPPED = "stopped"
 STATE_FAILED = "failed"
 
 TERMINAL_STATES = frozenset((STATE_COMPLETED, STATE_STOPPED, STATE_FAILED))
+
+# Headroom given to a driver's hard deadline while a run is paused. The pause
+# has no known end, so the deadline is pushed out by this much on pause and set
+# exactly on resume; a pause longer than this lets the driver end the fleet.
+PAUSE_DEADLINE_HEADROOM_S = 86400.0
 
 # Lease states.
 LEASE_FREE = "free"
@@ -525,6 +532,7 @@ def stop_run(db, run, driver, force=False, actor="operator"):
     """
     if run.state in TERMINAL_STATES:
         return run
+    _end_pause(run)
     transition_run(db, run, STATE_DRAINING,
                    {"force": bool(force)}, actor=actor,
                    end_reason="operator-stop")
@@ -546,13 +554,94 @@ def stop_run(db, run, driver, force=False, actor="operator"):
     if force:
         # Forced stop: finalise every lease now so the run completes immediately.
         # A live worker's lease becomes done (it drained); a never-claimed free
-        # slot becomes lost (no worker to finalise it).
+        # slot becomes lost (no worker to finalise it). A done lease is counted
+        # only through totals_json, and these workers never send a final, so
+        # fold each one's latest heartbeat counters in first. Without this a
+        # force-stopped run showed no events and no volume at all.
+        _fold_heartbeat_totals(db, run)
         for lease in get_run_leases(db, run):
             if lease.state in (LEASE_CLAIMED, LEASE_READY, LEASE_RUNNING):
                 lease.state = LEASE_DONE
             elif lease.state == LEASE_FREE:
                 lease.state = LEASE_LOST
         maybe_complete_run(db, run)
+    return run
+
+
+def paused_seconds(run, now=None):
+    # type: (Run, Optional[datetime.datetime]) -> float
+    """Seconds the run has spent paused, including a pause still under way."""
+    total = float(run.paused_s or 0.0)
+    if run.paused_at is not None:
+        total += max(0.0, _seconds_between(run.paused_at, now or utcnow()))
+    return total
+
+
+def _end_pause(run, now=None):
+    # type: (Run, Optional[datetime.datetime]) -> float
+    """Close a pause under way: bank its seconds into ``paused_s``.
+
+    Returns the length of the pause just closed (0 when not paused).
+    """
+    if run.paused_at is None:
+        return 0.0
+    length = max(0.0, _seconds_between(run.paused_at, now or utcnow()))
+    run.paused_s = float(run.paused_s or 0.0) + length
+    run.paused_at = None
+    return length
+
+
+def _extend_driver_deadline(db, run, driver, paused_s):
+    # type: (Session, Run, Optional[ExecutionDriver], float) -> None
+    """Push the driver's hard workload deadline out by ``paused_s``.
+
+    Optional driver capability (only k8s has a hard deadline today); a driver
+    without ``extend_deadline`` is skipped. Failure is recorded, not raised: the
+    pause itself is control-plane state and must not hinge on the driver.
+    """
+    duration_s = (run.spec_snapshot_json or {}).get("duration_s")
+    ref = driver_ref_of(run)
+    extend = getattr(driver, "extend_deadline", None)
+    if not duration_s or ref is None or extend is None:
+        return
+    try:
+        extend(ref, float(duration_s), float(paused_s))
+    except Exception as exc:
+        log.warning("run %s driver.extend_deadline failed: %s", run.id, exc)
+        append_event(db, run, "driver_error",
+                     {"op": "extend_deadline", "error": str(exc)})
+
+
+def pause_run(db, run, driver, actor="operator"):
+    # type: (Session, Run, Optional[ExecutionDriver], str) -> Run
+    """Pause a running run: workers hold output until resumed.
+
+    The run moves to ``paused`` and every heartbeat answers ``pause``. Workers
+    keep heartbeating, so leases stay renewed. A bounded run's end moves out by
+    the time spent paused (see :func:`paused_seconds`). Only a ``running`` run
+    can be paused; anything else raises ``ValueError``.
+    """
+    if run.state != STATE_RUNNING:
+        raise ValueError("only a running run can be paused (this one is %s)" % run.state)
+    now = utcnow()
+    run.paused_at = now
+    transition_run(db, run, STATE_PAUSED, actor=actor)
+    _extend_driver_deadline(db, run, driver,
+                            paused_seconds(run, now) + PAUSE_DEADLINE_HEADROOM_S)
+    return run
+
+
+def resume_run(db, run, driver, actor="operator"):
+    # type: (Session, Run, Optional[ExecutionDriver], str) -> Run
+    """Resume a paused run; its end moves out by the time it was paused."""
+    if run.state != STATE_PAUSED:
+        raise ValueError("only a paused run can be resumed (this one is %s)" % run.state)
+    length = _end_pause(run)
+    transition_run(db, run, STATE_RUNNING,
+                   {"paused_for_s": round(length, 3),
+                    "paused_total_s": round(float(run.paused_s or 0.0), 3)},
+                   actor=actor)
+    _extend_driver_deadline(db, run, driver, float(run.paused_s or 0.0))
     return run
 
 
@@ -732,8 +821,8 @@ def supervisor_tick(db, drivers, boot_time):
     """
     now = utcnow()
     active_states = (
-        STATE_PROVISIONING, STATE_RELEASING, STATE_RUNNING, STATE_DRAINING,
-        STATE_PREPARING,
+        STATE_PROVISIONING, STATE_RELEASING, STATE_RUNNING, STATE_PAUSED,
+        STATE_DRAINING, STATE_PREPARING,
     )
     stmt = select(Run).where(Run.state.in_(active_states))
     runs = list(db.execute(stmt).scalars().all())
@@ -827,9 +916,10 @@ def _check_duration(db, run, now):
     # type: (Session, Run, datetime.datetime) -> None
     """Begin draining a run that has reached its bounded duration.
 
-    Duration is measured from the run's T0 (the pacing anchor). Unbounded runs
-    (no ``duration_s``) never end on their own; they finish on stop or when all
-    workers finalise.
+    Duration is measured from the run's T0 (the pacing anchor), plus the time
+    the run has spent paused, so a pause does not eat into it. A paused run is
+    never ended here. Unbounded runs (no ``duration_s``) never end on their own;
+    they finish on stop or when all workers finalise.
     """
     if run.state not in (STATE_RUNNING, STATE_RELEASING):
         return
@@ -839,7 +929,8 @@ def _check_duration(db, run, now):
     duration_s = snap.get("duration_s")
     if not duration_s:
         return
-    end_at = _as_aware(run.t0) + datetime.timedelta(seconds=float(duration_s))
+    end_at = _as_aware(run.t0) + datetime.timedelta(
+        seconds=float(duration_s) + paused_seconds(run, now))
     if now >= end_at:
         transition_run(db, run, STATE_DRAINING,
                        {"reason": "duration-complete", "duration_s": duration_s},
@@ -1265,8 +1356,8 @@ def reconcile_on_boot(db, drivers):
     Writes a ``run_event`` (or a loud audit log for a run-less stray) per action.
     """
     active_states = (
-        STATE_PROVISIONING, STATE_RELEASING, STATE_RUNNING, STATE_DRAINING,
-        STATE_PREPARING, STATE_PENDING,
+        STATE_PROVISIONING, STATE_RELEASING, STATE_RUNNING, STATE_PAUSED,
+        STATE_DRAINING, STATE_PREPARING, STATE_PENDING,
     )
     runs = list(db.execute(select(Run).where(Run.state.in_(active_states))).scalars().all())
     for run in runs:
@@ -1746,6 +1837,14 @@ def record_heartbeat(db, run, slot, lease_id, payload, settings=None):
 
     command = _heartbeat_command(db, run, lease, protocol_version, now)
 
+    # A bounded run's end moves out by the time it has been paused. The worker
+    # enforces its own deadline too, so tell it how far (a worker that predates
+    # the field ignores it).
+    paused = paused_seconds(run, now)
+    if paused > 0 and command.get("command") not in ("superseded", "drain"):
+        command = dict(command)
+        command["paused_s"] = round(paused, 3)
+
     # Rolling JWT refresh: attach a fresh token when the presented one is close
     # to expiry. Never attached to a superseded/terminal path (handled above).
     fresh = maybe_refresh_jwt(run, bearer, settings=settings)
@@ -1799,6 +1898,13 @@ def _heartbeat_command(db, run, lease, protocol_version, now):
             # Once the whole fleet is running, promote the run to running.
             _maybe_mark_running(db, run)
         return cmd_release(run.t0)
+
+    # Pause: the operator paused the run. Repeated on every heartbeat so a
+    # worker that joins or reconnects mid-pause holds too.
+    if run.state == STATE_PAUSED:
+        if lease.state == LEASE_READY and run.t0 is not None:
+            lease.state = LEASE_RUNNING
+        return cmd_pause()
 
     # Retarget: a scale/rescale changed this slot's share; push it once.
     share = lease.share_json or {}
@@ -1968,7 +2074,8 @@ def maybe_complete_run(db, run):
     # run to running) does not wedge the run in releasing forever. Before release
     # (pending/preparing/provisioning) a lost or free lease is normal churn, so
     # the run must not terminate on it; the release gate owns that path.
-    if run.state not in (STATE_RUNNING, STATE_RELEASING, STATE_DRAINING):
+    if run.state not in (STATE_RUNNING, STATE_RELEASING, STATE_PAUSED,
+                         STATE_DRAINING):
         return False
     leases = get_run_leases(db, run)
     if not leases:
@@ -2767,6 +2874,22 @@ def live_totals(db, runs):
     return out
 
 
+def _fold_heartbeat_totals(db, run):
+    # type: (Session, Run) -> None
+    """Fold the latest heartbeat counters of every not-done slot into totals.
+
+    For a lease about to be marked ``done`` without a final report (a forced
+    stop), so its work stays counted once :func:`live_totals` stops adding its
+    heartbeats. Counters only; non-numeric keys are left alone.
+    """
+    live = live_totals(db, [run])[run.id]
+    totals = dict(run.totals_json or {})
+    for name in _LIVE_TOTAL_KEYS:
+        if name in live:
+            totals[name] = live[name]
+    run.totals_json = totals
+
+
 def maybe_refresh_jwt(run, current_token, settings=None):
     # type: (Run, Optional[str], Optional[Settings]) -> Optional[str]
     """Return a fresh JWT when the presented token is within 20% of expiry.
@@ -2802,6 +2925,11 @@ def cmd_superseded():
 def cmd_drain():
     # type: () -> Dict[str, Any]
     return {"command": "drain"}
+
+
+def cmd_pause():
+    # type: () -> Dict[str, Any]
+    return {"command": "pause"}
 
 
 def cmd_release(t0):
@@ -3096,7 +3224,7 @@ def _coerce_float(value):
 __all__ = [
     # states
     "STATE_PENDING", "STATE_PREPARING", "STATE_PROVISIONING", "STATE_RELEASING",
-    "STATE_RUNNING", "STATE_DRAINING", "STATE_COMPLETED", "STATE_STOPPED",
+    "STATE_RUNNING", "STATE_PAUSED", "STATE_DRAINING", "STATE_COMPLETED", "STATE_STOPPED",
     "STATE_FAILED", "TERMINAL_STATES", "delivered_events",
     "LEASE_FREE", "LEASE_CLAIMED", "LEASE_READY", "LEASE_RUNNING", "LEASE_LOST",
     "LEASE_DONE",
@@ -3107,7 +3235,8 @@ __all__ = [
     # engine policy
     "SINGLE_WORKER_ENGINES", "effective_workers",
     # domain (stubbed)
-    "provision_run", "stop_run", "scale_run", "rescale_run", "supervisor_tick",
+    "provision_run", "stop_run", "pause_run", "resume_run", "paused_seconds",
+    "scale_run", "rescale_run", "supervisor_tick",
     "reconcile_on_boot", "claim_lease", "mark_ready", "record_heartbeat",
     "record_final", "evaluate_release", "maybe_complete_run",
     # helpers (implemented)
@@ -3121,7 +3250,7 @@ __all__ = [
     "build_spec_snapshot",
     "build_run_snapshot", "counters_from_payload", "build_metric_sample",
     "fold_totals", "maybe_refresh_jwt", "cmd_continue", "cmd_superseded",
-    "cmd_drain", "cmd_release", "cmd_retarget", "seed_fleets",
+    "cmd_drain", "cmd_pause", "cmd_release", "cmd_retarget", "seed_fleets",
     "seed_builtin_packs", "get_run_driver",
     "resolve_fleet_driver", "driver_ref_of",
 ]

@@ -49,7 +49,7 @@ from .models import MetricSample, Run, WorkerLease, utcnow
 log = logging.getLogger("stoker.metrics")
 
 # Active run states an aggregate is worth emitting for (a live fleet exists).
-_ACTIVE_STATES = ("provisioning", "releasing", "running", "draining")
+_ACTIVE_STATES = ("provisioning", "releasing", "running", "paused", "draining")
 # Lease states that count as "live" for a per-run aggregate (a worker holding
 # the slot and reporting counters); lost/done/free carry no fresh telemetry.
 _LIVE_LEASE_STATES = ("claimed", "ready", "running")

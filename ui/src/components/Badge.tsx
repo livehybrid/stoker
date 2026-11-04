@@ -51,6 +51,7 @@ export function toneForState(state: string | null | undefined): Tone {
   if (
     s === "amber" ||
     s === "draining" ||
+    s === "paused" ||
     s === "releasing" ||
     s === "preparing" ||
     s === "provisioning" ||

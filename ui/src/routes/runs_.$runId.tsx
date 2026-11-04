@@ -14,6 +14,7 @@ import {
   endReasonLabel,
   endReasonTone,
   fmtDateTime,
+  fmtDurationS,
   isTerminal,
 } from "../features/runs/format";
 import {
@@ -26,6 +27,7 @@ import { RateChart } from "../features/runs/RateChart";
 import { HecChart } from "../features/runs/HecChart";
 import { LeaseTable } from "../features/runs/LeaseTable";
 import { RunControls } from "../features/runs/RunControls";
+import { RunActions } from "../features/runs/RunActions";
 import { WarningBanners } from "../features/runs/WarningBanners";
 import { TotalsStrip } from "../features/runs/TotalsStrip";
 import { SpecSnapshotPanel } from "../features/runs/SpecSnapshotPanel";
@@ -149,6 +151,18 @@ function RunDetailPage() {
                 <span>ended {fmtDateTime(data.ended_at)}</span>
               </>
             )}
+            {data.paused_at && (
+              <>
+                <Muted>·</Muted>
+                <span>paused since {fmtDateTime(data.paused_at)}</span>
+              </>
+            )}
+            {(data.paused_s ?? 0) > 0 && (
+              <>
+                <Muted>·</Muted>
+                <span>earlier pauses {fmtDurationS(data.paused_s)}</span>
+              </>
+            )}
           </Inline>
         }
         actions={
@@ -160,6 +174,7 @@ function RunDetailPage() {
                 {endReasonLabel(data.end_reason)}
               </Badge>
             )}
+            <RunActions run={data} rateMode={rateMode} />
             {terminal && (
               <Button variant="danger" onClick={() => setDeleting(true)}>
                 Delete
@@ -223,8 +238,9 @@ function RunDetailPage() {
         />
         {terminal && (
           <Muted>
-            This run is {data.state}; controls are disabled. Use Re-run on the runs
-            list to launch its spec again.
+            This run is {data.state}; controls are disabled. Use Clone above to
+            start a new spec from its settings, or Re-run on the runs list to
+            launch its spec again.
           </Muted>
         )}
       </Card>

@@ -396,6 +396,8 @@ export const runs = {
     request<RunOut>("POST", `/runs/${id}/scale`, { body }),
   rescale: (id: number, body: RescaleRequest) =>
     request<RunOut>("POST", `/runs/${id}/rescale`, { body }),
+  pause: (id: number) => request<RunOut>("POST", `/runs/${id}/pause`),
+  resume: (id: number) => request<RunOut>("POST", `/runs/${id}/resume`),
 };
 
 // --------------------------------------------------------------------------- //

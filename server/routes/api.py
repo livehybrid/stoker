@@ -1718,6 +1718,57 @@ def stop_run_endpoint(run_id: int, body: StopRequest, request: Request, db: Sess
     return run
 
 
+@router.post("/runs/{run_id}/pause", response_model=RunOut)
+def pause_run_endpoint(run_id: int, request: Request, db: Session = Depends(get_db)):
+    # type: (...) -> Any
+    """Pause a running run: workers hold output; a bounded run's end moves out."""
+    run = _load_active_run(db, run_id)
+    if run.state != lifecycle.STATE_RUNNING:
+        raise HTTPException(status_code=409, detail={
+            "error": "not_running",
+            "detail": "only a running run can be paused (run %s is %s)" % (run_id, run.state),
+        })
+    if (run.spec_snapshot_json or {}).get("rate_mode") == "count_interval":
+        # count_interval (and cadence replay) is paced by the engine, which
+        # stamps and spaces events itself; holding its output would shift every
+        # later event into the past, so these runs cannot be paused.
+        raise HTTPException(status_code=409, detail={
+            "error": "pause_unsupported",
+            "detail": ("run %s is engine-paced (count_interval); only rate-paced "
+                       "runs (eps, per_day_gb) can be paused" % run_id),
+        })
+    run = lifecycle.pause_run(db, run, _resolve_driver_quiet(db, run), actor=_actor(request))
+    db.commit()
+    db.refresh(run)
+    return run
+
+
+@router.post("/runs/{run_id}/resume", response_model=RunOut)
+def resume_run_endpoint(run_id: int, request: Request, db: Session = Depends(get_db)):
+    # type: (...) -> Any
+    """Resume a paused run."""
+    run = _load_active_run(db, run_id)
+    if run.state != lifecycle.STATE_PAUSED:
+        raise HTTPException(status_code=409, detail={
+            "error": "not_paused",
+            "detail": "run %s is %s, not paused" % (run_id, run.state),
+        })
+    run = lifecycle.resume_run(db, run, _resolve_driver_quiet(db, run), actor=_actor(request))
+    db.commit()
+    db.refresh(run)
+    return run
+
+
+def _reject_if_paused(run):
+    # type: (Run) -> None
+    """Scale and rescale wait for a resume: a paused fleet is not delivering."""
+    if run.state == lifecycle.STATE_PAUSED:
+        raise HTTPException(status_code=409, detail={
+            "error": "run_paused",
+            "detail": "run %s is paused; resume it before changing its size or rate" % run.id,
+        })
+
+
 @router.post("/runs/{run_id}/scale", response_model=RunOut)
 def scale_run_endpoint(run_id: int, body: ScaleRequest, request: Request, db: Session = Depends(get_db)):
     # type: (...) -> Any
@@ -1725,6 +1776,7 @@ def scale_run_endpoint(run_id: int, body: ScaleRequest, request: Request, db: Se
     if body.workers < 1:
         raise HTTPException(status_code=422, detail="workers must be >= 1")
     run = _load_active_run(db, run_id)
+    _reject_if_paused(run)
     # Replay (rawreplay/Piston) is single-worker: scaling would duplicate the
     # dataset stream N times, so reject a grow with the same 409 the submit guard
     # uses (lifecycle.scale_run also clamps defensively).
@@ -1779,6 +1831,7 @@ def rescale_run_endpoint(run_id: int, body: RescaleRequest, request: Request, db
     # type: (...) -> Any
     """Change total rate at the same worker count; push ``retarget`` shares."""
     run = _load_active_run(db, run_id)
+    _reject_if_paused(run)
     if body.rate_value <= 0:
         raise HTTPException(status_code=422, detail="rate_value must be > 0")
     # Same per-worker ceiling the submit guard applies: a rescale raises the rate
@@ -2152,7 +2205,8 @@ def _active_gb_day_for_target(db, target_id):
     """
     active_states = (
         lifecycle.STATE_PENDING, lifecycle.STATE_PREPARING, lifecycle.STATE_PROVISIONING,
-        lifecycle.STATE_RELEASING, lifecycle.STATE_RUNNING, lifecycle.STATE_DRAINING,
+        lifecycle.STATE_RELEASING, lifecycle.STATE_RUNNING, lifecycle.STATE_PAUSED,
+        lifecycle.STATE_DRAINING,
     )
     stmt = (
         select(Run)

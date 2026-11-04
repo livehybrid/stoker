@@ -31,10 +31,11 @@ const Count = styled.span`
 `;
 
 
-// Run controls (section 10.3): Stop, Force stop, Scale ± (workers) and Rescale
-// rate. Each wires straight to its endpoint; all disable on a terminal run and
-// while a mutation is in flight. A successful action invalidates the run so the
-// 5 s poll reflects the new state immediately.
+// Run controls (section 10.3): Scale ± (workers) and Rescale rate. Lifecycle
+// actions (pause, resume, stop, force stop, clone) live in RunActions in the
+// page header. Each wires straight to its endpoint; all disable on a terminal
+// or paused run and while a mutation is in flight. A successful action
+// invalidates the run so the 5 s poll reflects the new state immediately.
 
 function errText(err: unknown, fallback: string): string {
   return err instanceof ApiError ? err.message : fallback;
@@ -61,15 +62,6 @@ export function RunControls({
     qc.invalidateQueries({ queryKey: ["run", id] });
     qc.invalidateQueries({ queryKey: ["runs"] });
   };
-
-  const stop = useMutation({
-    mutationFn: (force: boolean) => api.runs.stop(id, { force }),
-    onSuccess: (_r, force) => {
-      toast.success(force ? "Force stop issued" : "Drain started");
-      invalidate();
-    },
-    onError: (err) => toast.error(errText(err, "Stop failed")),
-  });
 
   const scale = useMutation({
     mutationFn: (next: number) => api.runs.scale(id, { workers: next }),
@@ -99,49 +91,22 @@ export function RunControls({
     setRateInput(rateValue != null ? String(rateValue) : "");
   }, [rateValue]);
 
-  const busy = stop.isPending || scale.isPending || rescale.isPending;
+  // Scale and rescale wait for a resume (the server answers 409 while paused).
+  const locked = terminal || run.state === "paused";
+  const busy = scale.isPending || rescale.isPending;
   const parsedRate = Number(rateInput);
   const rateValid = rateInput !== "" && Number.isFinite(parsedRate) && parsedRate > 0;
   const rateChanged = rateValid && parsedRate !== rateValue;
 
   return (
     <Controls>
-      {/* Stop / force stop */}
-      <Group>
-        <Label>Lifecycle</Label>
-        <Inline>
-          <Button
-            variant="secondary"
-            disabled={terminal || busy}
-            onClick={() => stop.mutate(false)}
-          >
-            Stop
-          </Button>
-          <Button
-            variant="danger"
-            disabled={terminal || busy}
-            onClick={() => {
-              if (
-                window.confirm(
-                  "Force stop destroys the fleet immediately (no drain). Continue?",
-                )
-              ) {
-                stop.mutate(true);
-              }
-            }}
-          >
-            Force stop
-          </Button>
-        </Inline>
-      </Group>
-
       {/* Scale workers */}
       <Group>
         <Label>Workers ({workers})</Label>
         <Inline>
           <Button
             variant="secondary"
-            disabled={terminal || busy || workers <= 1}
+            disabled={locked || busy || workers <= 1}
             onClick={() => scale.mutate(workers - 1)}
             title="Scale down one worker"
           >
@@ -150,7 +115,7 @@ export function RunControls({
           <Count>{workers}</Count>
           <Button
             variant="secondary"
-            disabled={terminal || busy}
+            disabled={locked || busy}
             onClick={() => scale.mutate(workers + 1)}
             title="Scale up one worker"
           >
@@ -169,11 +134,11 @@ export function RunControls({
               value={rateInput}
               onChange={(_e, { value }) => setRateInput(value)}
               inline
-              disabled={terminal || busy}
+              disabled={locked || busy}
             />
             <Button
               variant="primary"
-              disabled={terminal || busy || !rateChanged}
+              disabled={locked || busy || !rateChanged}
               onClick={() => rescale.mutate(parsedRate)}
             >
               Rescale
