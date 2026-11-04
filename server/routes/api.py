@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 from fastapi import (APIRouter, Depends, File, Form, HTTPException, Query,
                      Request, Response, UploadFile)
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -595,7 +596,13 @@ def publish_pack_to_source(pack_id: int, db: Session = Depends(get_db)):
 
 
 @router.delete("/packs/{pack_id}", status_code=204)
-def delete_pack(pack_id: int, db: Session = Depends(get_db)):
+def delete_pack(
+    pack_id: int,
+    remote: bool = Query(default=False, description=(
+        "also remove the pack's archive from the pack source (STOKER_PACK_SOURCE); "
+        "needs STOKER_PACK_SOURCE_WRITE=1")),
+    db: Session = Depends(get_db),
+):
     # type: (...) -> Any
     """Delete a locally-registered pack (guarded when referenced by a spec).
 
@@ -611,6 +618,20 @@ def delete_pack(pack_id: int, db: Session = Depends(get_db)):
     is data this API never owned, so the row is deleted but the directory is
     left untouched (and a builtin pack simply re-registers at next boot).
     Already-built bundles are content-addressed and shared, so they stay.
+
+    A builtin pack (one that lives under ``STOKER_BUILTIN_PACKS_DIR``) is
+    refused too: it ships with the image and is re-registered at every boot,
+    so a delete would only appear to work.
+
+    ``?remote=true`` also removes ``<name>.tar.gz`` from the pack source.
+    Without it a pack deleted here that is in the bucket comes straight back
+    on the next boot, because the boot sync imports whatever is missing. The
+    remote delete runs after the guards and BEFORE the local one, and a remote
+    failure (502) leaves the local pack in place, so the two cannot drift
+    apart in the direction that resurrects it. A source that is unset or
+    read-only is a 409: configuration, not a transient failure. The response
+    is then 200 with ``{"remote_key", "remote_existed"}`` so the page can say
+    whether the archive was actually there.
     """
     pack = db.get(Pack, pack_id)
     if pack is None:
@@ -631,10 +652,49 @@ def delete_pack(pack_id: int, db: Session = Depends(get_db)):
             status_code=409,
             detail="pack %s is referenced by one or more specs; delete those first" % pack_id,
         )
+    if _is_builtin_pack(pack):
+        raise HTTPException(
+            status_code=409,
+            detail=("pack %s ships with the image and is re-registered at every "
+                    "boot, so it cannot be deleted" % pack_id),
+        )
+    result = None
+    if remote:
+        info = packsource.describe()
+        if not info["configured"]:
+            raise HTTPException(
+                status_code=409,
+                detail="no pack source is configured (set STOKER_PACK_SOURCE)")
+        if info.get("error"):
+            raise HTTPException(status_code=409, detail=info["error"])
+        if not info["writable"]:
+            raise HTTPException(
+                status_code=409,
+                detail="the pack source is read-only (set STOKER_PACK_SOURCE_WRITE=1)")
+        try:
+            key, existed = packsource.unpublish_pack(pack)
+        except packsource.PackSourceError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="%s; the local pack was kept" % exc)
+        result = {"remote_key": key, "remote_existed": existed}
     _remove_uploaded_pack_dir(pack.source_path)
     db.delete(pack)
     db.commit()
+    if result is not None:
+        return JSONResponse(status_code=200, content=result)
     return Response(status_code=204)
+
+
+def _is_builtin_pack(pack):
+    # type: (Pack) -> bool
+    """True when the pack's directory is inside ``STOKER_BUILTIN_PACKS_DIR``."""
+    root = (get_settings().builtin_packs_dir or "").strip()
+    if not root or not pack.source_path or pack.repo_id is not None:
+        return False
+    root = os.path.realpath(root)
+    real = os.path.realpath(pack.source_path)
+    return real == root or real.startswith(root + os.sep)
 
 
 async def _read_upload_capped(file, max_bytes):
@@ -710,7 +770,14 @@ def list_packs(
     if filter_repo is not None:
         stmt = stmt.where(Pack.repo_id == filter_repo)
     stmt = stmt.order_by(Pack.id)
-    return list(db.execute(stmt).scalars().all())
+    return [_pack_out(p) for p in db.execute(stmt).scalars().all()]
+
+
+def _pack_out(pack):
+    # type: (Pack) -> PackOut
+    """A pack as the API shows it, flagged builtin so the UI can hide Delete."""
+    return PackOut.model_validate(pack).model_copy(
+        update={"builtin": _is_builtin_pack(pack)})
 
 
 @router.get("/packs/{pack_id}", response_model=PackOut)
@@ -719,7 +786,7 @@ def get_pack(pack_id: int, db: Session = Depends(get_db)):
     pack = db.get(Pack, pack_id)
     if pack is None:
         raise HTTPException(status_code=404, detail="unknown pack")
-    return pack
+    return _pack_out(pack)
 
 
 @router.get("/packs/{pack_id}/export")
@@ -1593,6 +1660,46 @@ def run_events(run_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="unknown run")
     stmt = select(RunEvent).where(RunEvent.run_id == run_id).order_by(RunEvent.ts, RunEvent.id)
     return list(db.execute(stmt).scalars().all())
+
+
+@router.delete("/runs/{run_id}", status_code=204)
+def delete_run(run_id: int, request: Request, db: Session = Depends(get_db)):
+    # type: (...) -> Any
+    """Delete a finished run and everything it recorded.
+
+    For clearing failed, duplicate and test runs out of the list. Only a
+    terminal run (completed, stopped, failed) can go: deleting a live one
+    would orphan its workers' leases mid-flight, so that is a 409 and the
+    operator stops it first. Leases, metric samples and events cascade with
+    the row. The spec and the bundle are left alone: other runs share them.
+
+    A terminal run whose fleet the reaper has not destroyed yet still has a
+    workload behind it, and once the row is gone nothing would ever find it
+    again, so the fleet is destroyed here first (best effort; boot
+    reconciliation's stray sweep is the backstop, as it is for the reaper).
+    """
+    run = db.get(Run, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="unknown run")
+    if run.state not in lifecycle.TERMINAL_STATES:
+        raise HTTPException(
+            status_code=409,
+            detail="run %s is %s; stop it before deleting it" % (run_id, run.state),
+        )
+    driver = _resolve_driver_quiet(db, run)
+    ref = lifecycle.driver_ref_of(run)
+    if driver is not None and ref is not None and not db.execute(
+            select(RunEvent.id).where(RunEvent.run_id == run.id,
+                                      RunEvent.kind == "fleet_destroyed").limit(1)
+    ).first():
+        try:
+            driver.destroy(ref)
+        except Exception as exc:  # noqa: BLE001 - the delete must still go ahead
+            log.warning("run %s: destroy before delete failed: %s", run_id, exc)
+    log.info("run %s (%s) deleted by %s", run_id, run.state, _actor(request))
+    db.delete(run)
+    db.commit()
+    return Response(status_code=204)
 
 
 @router.post("/runs/{run_id}/stop", response_model=RunOut)

@@ -29,6 +29,7 @@ import type {
   WordlistInfo,
   PackPreview,
   PackPreviewRun,
+  PackDeleteResult,
   PackPublishResult,
   PackSourceInfo,
   ConfigImportReport,
@@ -259,9 +260,15 @@ export const packs = {
     return request<PackOut>("POST", "/packs/upload", { form });
   },
   // Delete a locally-registered pack (an uploaded pack's extracted directory
-  // is removed server-side). 409 when a spec references it or it came from a
-  // repo (delete the repo instead).
-  delete: (id: number) => request<void>("DELETE", `/packs/${id}`),
+  // is removed server-side). 409 when a spec references it, it came from a
+  // repo (delete the repo instead) or it is builtin. `remote` also removes its
+  // archive from the pack source first (409 when that is read-only, 502 when
+  // the delete fails, in which case the local pack is kept); the response then
+  // says whether the archive was actually in the bucket.
+  delete: (id: number, remote = false) =>
+    request<PackDeleteResult | undefined>("DELETE", `/packs/${id}`, {
+      query: remote ? { remote: true } : undefined,
+    }),
   // URL of the pack export (.tar.gz) — the archive `upload` accepts on another
   // instance. Used as a plain <a download> href rather than fetched: the
   // browser streams the file straight to disk and the session cookie rides
@@ -370,6 +377,9 @@ export const specs = {
 export const runs = {
   list: () => request<RunOut[]>("GET", "/runs"),
   get: (id: number) => request<RunDetail>("GET", `/runs/${id}`),
+  // Delete a finished run with its leases, samples and events. 409 while it
+  // is still live: stop it first.
+  delete: (id: number) => request<void>("DELETE", `/runs/${id}`),
   metrics: (id: number, res = "5s", window = "15m") =>
     request<MetricsOut>("GET", `/runs/${id}/metrics`, {
       query: { res, window },

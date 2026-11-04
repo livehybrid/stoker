@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 
 import { api } from "../lib/api";
@@ -33,6 +33,7 @@ import { TotalsStrip } from "../features/runs/TotalsStrip";
 import { SpecSnapshotPanel } from "../features/runs/SpecSnapshotPanel";
 import { EventLogPanel } from "../features/runs/EventLogPanel";
 import { LogTailPanel } from "../features/runs/LogTailPanel";
+import { DeleteRunsModal } from "../features/runs/DeleteRunsModal";
 import { Inline, Muted, Stack } from "../components/text";
 import TabBar from "@splunk/react-ui/TabBar";
 
@@ -47,6 +48,8 @@ function RunDetailPage() {
   const { runId } = Route.useParams();
   const id = Number(runId);
   const [tab, setTab] = useState<Tab>("snapshot");
+  const [deleting, setDeleting] = useState(false);
+  const navigate = useNavigate();
 
   // First fetch decides polling; subsequent renders read the live state. We keep
   // polling on until we KNOW the run is terminal (so a run mid-drain still ticks).
@@ -172,11 +175,24 @@ function RunDetailPage() {
               </Badge>
             )}
             <RunActions run={data} rateMode={rateMode} />
+            {terminal && (
+              <Button variant="danger" onClick={() => setDeleting(true)}>
+                Delete
+              </Button>
+            )}
             <Link to="/runs">
               <Button variant="ghost">All runs</Button>
             </Link>
           </Inline>
         }
+      />
+      <DeleteRunsModal
+        ids={[data.id]}
+        open={deleting}
+        onClose={() => setDeleting(false)}
+        onDeleted={(gone) => {
+          if (gone.length) navigate({ to: "/runs" });
+        }}
       />
 
       <WarningBanners run={data} leases={leases} peakLagS={lagPeak} />

@@ -114,6 +114,11 @@ class Store:
         # type: (str, bytes, str, Optional[Dict[str, str]]) -> None
         raise NotImplementedError
 
+    def delete(self, key):
+        # type: (str) -> bool
+        """Remove ``key``. True when it existed, False when there was nothing."""
+        raise NotImplementedError
+
 
 class DirectoryStore(Store):
     """A local directory. Useful for a mounted volume, and for the tests."""
@@ -141,6 +146,14 @@ class DirectoryStore(Store):
         with open(tmp, "wb") as fh:
             fh.write(data)
         os.replace(tmp, os.path.join(self.path, key))
+
+    def delete(self, key):
+        # type: (str) -> bool
+        try:
+            os.remove(os.path.join(self.path, key))
+        except FileNotFoundError:
+            return False
+        return True
 
 
 class S3Store(Store):
@@ -210,6 +223,21 @@ class S3Store(Store):
         self.client.put_object(Bucket=self.bucket, Key=self._key(key), Body=data,
                                ContentType=content_type,
                                **(_sse_args() if sse is None else sse))
+
+    def delete(self, key):
+        # type: (str) -> bool
+        # DeleteObject succeeds on a missing key, so ask first: the caller
+        # reports "was not in the bucket" differently from "removed".
+        full = self._key(key)
+        try:
+            self.client.head_object(Bucket=self.bucket, Key=full)
+        except Exception as exc:  # noqa: BLE001 - botocore's ClientError
+            code = str(getattr(exc, "response", {}).get("Error", {}).get("Code", ""))
+            if code in ("404", "NoSuchKey", "NotFound"):
+                return False
+            raise
+        self.client.delete_object(Bucket=self.bucket, Key=full)
+        return True
 
 
 def _sse_args(env=None, sse_env=SSE_ENV, key_env=SSE_KEY_ENV):
@@ -414,6 +442,35 @@ def publish_pack(pack, settings, store=None, env=None):
         return None
     log.info("published pack %r to the pack source as %s", pack.name, key)
     return key
+
+
+def unpublish_pack(pack, store=None, env=None):
+    # type: (Pack, Optional[Store], Optional[Dict[str, str]]) -> Tuple[str, bool]
+    """Remove a pack's archive from the configured source.
+
+    Returns ``(key, existed)``. Unlike :func:`publish_pack` this RAISES
+    (:class:`PackSourceError`) when the source is unset, read-only or refuses
+    the delete: the caller deletes the local copy only after this succeeds, so
+    a failure must stop it. Otherwise the pack is gone locally, still in the
+    bucket, and quietly re-imported at the next boot.
+    """
+    if store is None:
+        if not writes_enabled(env):
+            raise PackSourceError(
+                "the pack source is read-only (set %s=1)" % WRITE_ENV)
+        store = store_from_env(env)
+    if store is None:
+        raise PackSourceError("no pack source is configured (set %s)" % SOURCE_ENV)
+    key = archive_name(pack.name)
+    try:
+        existed = store.delete(key)
+    except PackSourceError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - any client error, reported
+        raise PackSourceError("could not delete %s from the pack source: %s" % (key, exc))
+    log.info("removed pack %r from the pack source (%s, existed=%s)",
+             pack.name, key, existed)
+    return key, existed
 
 
 # --------------------------------------------------------------------------- #
