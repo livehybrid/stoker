@@ -509,6 +509,25 @@ class SpecOut(BaseModel):
     fast_envelope: Optional[bool] = None
     rate_shape: Optional[str] = None
     created_at: datetime.datetime
+    # Filled by GET /specs only (the list), so a batch of specs can be checked
+    # at a glance for which have run and how the latest run ended. Other routes
+    # leave the defaults.
+    run_count: int = 0
+    last_run: Optional["SpecLastRun"] = None
+
+
+class SpecLastRun(BaseModel):
+    """The most recent run of a spec, as the specs list shows it."""
+
+    id: int
+    state: str
+    created_at: datetime.datetime
+    t0: Optional[datetime.datetime] = None
+    ended_at: Optional[datetime.datetime] = None
+    end_reason: Optional[str] = None
+
+
+SpecOut.model_rebuild()
 
 
 class SpecEstimate(BaseModel):

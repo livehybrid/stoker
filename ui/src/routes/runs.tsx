@@ -76,7 +76,10 @@ function Runs() {
 
   // --- Filters --------------------------------------------------------------
   const [stateFilter, setStateFilter] = useState(ALL);
-  const [specFilter, setSpecFilter] = useState(ALL);
+  const { spec: specParam } = Route.useSearch();
+  const [specFilter, setSpecFilter] = useState(
+    specParam != null ? String(specParam) : ALL,
+  );
   const [targetFilter, setTargetFilter] = useState(ALL);
   const [dateFilter, setDateFilter] = useState(""); // yyyy-mm-dd, "" = any
 
@@ -366,6 +369,17 @@ function Runs() {
   );
 }
 
+// ?spec=<id> opens the list filtered to one spec (the Runs count on the Specs
+// page links here). The filter stays editable once the page is open.
+interface RunsSearch {
+  spec?: number;
+}
+
 export const Route = createFileRoute("/runs")({
+  validateSearch: (search: Record<string, unknown>): RunsSearch => {
+    const raw = search.spec;
+    const n = typeof raw === "number" ? raw : Number(raw);
+    return Number.isFinite(n) && n > 0 ? { spec: n } : {};
+  },
   component: Runs,
 });

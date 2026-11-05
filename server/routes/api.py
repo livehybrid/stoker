@@ -28,7 +28,7 @@ import httpx
 from fastapi import (APIRouter, Depends, File, Form, HTTPException, Query,
                      Request, Response, UploadFile)
 from fastapi.responses import JSONResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .. import (bundles, catrust, crypto, gitsync, lifecycle, packexport, packrename,
@@ -77,6 +77,7 @@ from ..schemas import (
     ScaleRequest,
     SpecCreate,
     SpecEstimate,
+    SpecLastRun,
     SpecOut,
     SpecUpdate,
     StopRequest,
@@ -1088,7 +1089,38 @@ def create_spec(body: SpecCreate, db: Session = Depends(get_db)):
 @router.get("/specs", response_model=List[SpecOut])
 def list_specs(db: Session = Depends(get_db)):
     # type: (...) -> Any
-    return list(db.execute(select(Spec).order_by(Spec.id)).scalars().all())
+    """Every spec, each with how many runs it has and its latest run."""
+    specs = list(db.execute(select(Spec).order_by(Spec.id)).scalars().all())
+    return _with_run_summary(db, specs)
+
+
+def _with_run_summary(db, specs):
+    # type: (Session, List[Spec]) -> List[SpecOut]
+    """``SpecOut`` for each spec with ``run_count`` and ``last_run`` filled.
+
+    Two queries however many specs (a count per spec, then the newest run per
+    spec), not one per row. Run ids only increase, so the highest id is the
+    most recently launched run.
+    """
+    ids = [s.id for s in specs]
+    if not ids:
+        return []
+    counts = dict(db.execute(
+        select(Run.spec_id, func.count(Run.id))
+        .where(Run.spec_id.in_(ids)).group_by(Run.spec_id)).all())
+    newest = select(Run.spec_id, func.max(Run.id).label("rid")) \
+        .where(Run.spec_id.in_(ids)).group_by(Run.spec_id).subquery()
+    latest = {r.spec_id: r for r in db.execute(
+        select(Run).join(newest, Run.id == newest.c.rid)).scalars().all()}
+    out = []
+    for spec in specs:
+        item = SpecOut.model_validate(spec)
+        item.run_count = int(counts.get(spec.id, 0))
+        run = latest.get(spec.id)
+        if run is not None:
+            item.last_run = SpecLastRun.model_validate(run, from_attributes=True)
+        out.append(item)
+    return out
 
 
 @router.get("/specs/{spec_id}", response_model=SpecOut)
@@ -1097,7 +1129,7 @@ def get_spec(spec_id: int, db: Session = Depends(get_db)):
     spec = db.get(Spec, spec_id)
     if spec is None:
         raise HTTPException(status_code=404, detail="unknown spec")
-    return spec
+    return _with_run_summary(db, [spec])[0]
 
 
 @router.get("/specs/{spec_id}/export")
@@ -1270,7 +1302,7 @@ def update_spec(spec_id: int, body: SpecUpdate, db: Session = Depends(get_db)):
         setattr(spec, column_aliases.get(key, key), value)
     db.commit()
     db.refresh(spec)
-    return spec
+    return _with_run_summary(db, [spec])[0]
 
 
 @router.delete("/specs/{spec_id}", status_code=204)
