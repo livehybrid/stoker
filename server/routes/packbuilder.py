@@ -40,7 +40,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .. import bundles, packbuilder, packsource, packupload, pseudonymkeys
+from .. import bundles, packbuilder, packrename, packsource, packupload, pseudonymkeys
 from ..packbuilder import pseudonym
 from ..config import get_settings
 from ..db import get_db
@@ -360,6 +360,7 @@ def update_pack(pack_id: int, body: BuildRequest, request: Request,
                 db: Session = Depends(get_db)):
     # type: (int, BuildRequest, Request, Session) -> Any
     pack = _builder_pack(db, pack_id)
+    old_name = pack.name
     cfg = _validated(body.config)
     if _name_taken(db, cfg["name"], except_id=pack.id):
         raise HTTPException(status_code=409, detail={
@@ -389,5 +390,10 @@ def update_pack(pack_id: int, body: BuildRequest, request: Request,
     db.commit()
     db.refresh(pack)
     log.info("pack builder rebuilt %s (id=%s) lint=%s", pack.name, pack.id, pack.lint_status)
-    packsource.publish_pack(pack, get_settings())
+    if pack.name != old_name:
+        # A save that renames the pack must also move its bucket copy, or the
+        # archive under the old name is imported again at the next boot.
+        packrename.swap_remote(pack, old_name, get_settings())
+    else:
+        packsource.publish_pack(pack, get_settings())
     return pack

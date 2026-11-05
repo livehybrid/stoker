@@ -124,6 +124,16 @@ export interface PackOut {
 }
 
 // DELETE /api/packs/{id}?remote=true
+// PATCH /api/packs/{id}. `warning` is set when the pack source could not
+// follow the rename: the old archive is still there under the old name.
+export interface PackRenameOut extends PackOut {
+  old_name: string;
+  remote_key: string | null;
+  old_remote_key: string | null;
+  old_remote_removed: boolean;
+  warning: string | null;
+}
+
 export interface PackDeleteResult {
   remote_key: string;
   remote_existed: boolean;

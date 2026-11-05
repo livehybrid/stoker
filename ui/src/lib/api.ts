@@ -30,6 +30,7 @@ import type {
   PackPreview,
   PackPreviewRun,
   PackDeleteResult,
+  PackRenameOut,
   PackPublishResult,
   PackSourceInfo,
   ConfigImportReport,
@@ -265,6 +266,10 @@ export const packs = {
   // archive from the pack source first (409 when that is read-only, 502 when
   // the delete fails, in which case the local pack is kept); the response then
   // says whether the archive was actually in the bucket.
+  // Rename a local pack. Its id (and so every spec and run) is unchanged; the
+  // server also rewrites pack.yaml and moves the pack-source archive.
+  rename: (id: number, name: string) =>
+    request<PackRenameOut>("PATCH", `/packs/${id}`, { body: { name } }),
   delete: (id: number, remote = false) =>
     request<PackDeleteResult | undefined>("DELETE", `/packs/${id}`, {
       query: remote ? { remote: true } : undefined,

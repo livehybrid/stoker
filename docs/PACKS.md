@@ -682,6 +682,17 @@ curl -H "Authorization: Bearer stk_..." \
   mount a volume there so uploads survive a control-plane restart. An uploaded
   pack can be removed again with `DELETE /api/packs/{id}` (refused while a
   spec references it).
+- **Renaming**: a local pack (uploaded, built, imported from the pack source
+  or registered from a directory) has a **Rename** button on its card
+  (`PATCH /api/packs/{id}` with `{"name": ...}`). The pack keeps its id, so
+  specs and past runs follow it unchanged. For a pack under `PACK_UPLOAD_DIR`
+  the `name` in `pack.yaml` (and `stoker-builder.json`) is rewritten so a
+  download carries the new name. With a writable pack source the archive is
+  republished under the new name and the old key removed, so the boot sync
+  does not bring the old name back as a second pack; if the bucket cannot
+  follow, the rename stands and the response's `warning` says what is left.
+  Repo packs take their name from the repo and builtin packs from the image,
+  so neither can be renamed here.
 - **Safety**: the archive is treated as untrusted input. Extraction refuses
   path-traversal members, symlinks/hardlinks and device nodes, and caps the
   member count, per-file and total uncompressed bytes (streaming-enforced, so

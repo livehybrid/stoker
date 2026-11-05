@@ -31,8 +31,8 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .. import (bundles, catrust, crypto, gitsync, lifecycle, packexport, packsource,
-                packupload, preview)
+from .. import (bundles, catrust, crypto, gitsync, lifecycle, packexport, packrename,
+                packsource, packupload, preview)
 from ..config import get_settings
 from ..db import get_db
 from ..drivers.base import DriverError
@@ -60,6 +60,8 @@ from ..schemas import (
     PackPreview,
     PackPreviewRun,
     PackPublishResult,
+    PackRename,
+    PackRenameOut,
     PackSourceInfo,
     RepoCreate,
     RepoCreated,
@@ -684,6 +686,66 @@ def delete_pack(
     if result is not None:
         return JSONResponse(status_code=200, content=result)
     return Response(status_code=204)
+
+
+@router.patch("/packs/{pack_id}", response_model=PackRenameOut)
+def rename_pack(pack_id: int, body: PackRename, db: Session = Depends(get_db)):
+    # type: (...) -> Any
+    """Rename a pack. Its id, specs, runs and bundles are unchanged.
+
+    Refused (409) for a repo pack (its name comes from the repo and returns on
+    the next sync) and a builtin (re-registered from the image at boot), and
+    when another pack already has the name. For a pack whose directory is in
+    ``PACK_UPLOAD_DIR`` the name in ``pack.yaml`` and ``stoker-builder.json``
+    is rewritten too, so a download or a bucket import carries the new name.
+
+    When the pack source is writable the archive is republished under the new
+    name and the old key removed (new first, so the pack is never missing
+    from the bucket). A bucket that cannot follow does not undo the rename;
+    the response's ``warning`` says what is left behind.
+    """
+    pack = db.get(Pack, pack_id)
+    if pack is None:
+        raise HTTPException(status_code=404, detail="unknown pack")
+    if pack.repo_id is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=("pack %s was indexed from repo %s and takes its name from "
+                    "there; rename it in the repo" % (pack_id, pack.repo_id)))
+    if _is_builtin_pack(pack):
+        raise HTTPException(
+            status_code=409,
+            detail=("pack %s ships with the image and is re-registered under its "
+                    "own name at every boot, so it cannot be renamed" % pack_id))
+    try:
+        name = packrename.clean_name(body.name)
+    except packrename.RenameError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    old_name = pack.name
+    if name == old_name:
+        return PackRenameOut(**_pack_out(pack).model_dump(), old_name=old_name)
+    clash = db.execute(
+        select(Pack.id).where(Pack.name == name, Pack.id != pack.id).limit(1)
+    ).scalars().first()
+    if clash is not None:
+        raise HTTPException(
+            status_code=409, detail="a pack named %r already exists (id %s)" % (name, clash))
+
+    settings = get_settings()
+    if packrename.owns_directory(pack, settings.pack_upload_dir):
+        try:
+            packrename.rewrite_pack_yaml(pack.source_path, name)
+            packrename.rewrite_builder_config(pack.source_path, name)
+        except (OSError, ValueError) as exc:
+            db.rollback()
+            raise HTTPException(
+                status_code=500, detail="could not rewrite the pack's files: %s" % exc)
+    pack.name = name
+    db.commit()
+    db.refresh(pack)
+    log.info("renamed pack %s: %r -> %r", pack.id, old_name, name)
+    remote = packrename.swap_remote(pack, old_name, settings)
+    return PackRenameOut(**_pack_out(pack).model_dump(), old_name=old_name, **remote)
 
 
 def _is_builtin_pack(pack):
