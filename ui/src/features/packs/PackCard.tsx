@@ -11,6 +11,7 @@ import { useToast } from "../../components/Toast";
 import { formatBytes, formatGbDay, shortSha } from "../format";
 import { packIsMetrics } from "../metrics/config";
 import { Modal } from "../ui/Modal";
+import { RenamePackModal } from "./RenamePackModal";
 import {
   Between, Callout, Inline, Label, Mono, Muted, Panel, PanelFooter, Stack, Stat, StatRow,
   Strong, Tags, TitleBlock,
@@ -24,7 +25,8 @@ import {
 // "Upload pack" accepts, so a pack built here can move between instances; Push
 // sends that same archive to the configured pack source (s3:// or a directory),
 // and appears only when one is configured for writing.
-// Local packs (uploaded / registered / built here — no repo) also get Delete;
+// Local packs (uploaded / registered / built here — no repo) also get Rename
+// and Delete;
 // a repo-indexed pack's lifecycle belongs to its repo, and a builtin pack
 // re-registers at every boot, so no delete appears for those (the server
 // refuses both anyway). When the pack source is writable the delete dialog
@@ -53,6 +55,7 @@ export function PackCard({ pack, onPreview }: Props) {
   const isLocal = pack.repo_id === null || pack.repo_id === undefined;
   const canDelete = isLocal && !pack.builtin;
   const [confirming, setConfirming] = useState(false);
+  const [renaming, setRenaming] = useState(false);
   const [alsoRemote, setAlsoRemote] = useState(false);
 
   // Whether pushing is possible at all. Deployment environment variables, so it
@@ -180,6 +183,11 @@ export function PackCard({ pack, onPreview }: Props) {
         </Muted>
         <Inline>
           {canDelete && (
+            <Button variant="secondary" onClick={() => setRenaming(true)}>
+              Rename
+            </Button>
+          )}
+          {canDelete && (
             <Button
               variant="danger"
               onClick={openDelete}
@@ -235,6 +243,7 @@ export function PackCard({ pack, onPreview }: Props) {
           </Link>
         </Inline>
       </PanelFooter>
+      <RenamePackModal pack={pack} open={renaming} onClose={() => setRenaming(false)} />
       <Modal
         open={confirming}
         onClose={() => !del.isPending && setConfirming(false)}

@@ -223,6 +223,27 @@ class PackOut(BaseModel):
     builtin: bool = False
 
 
+class PackRename(BaseModel):
+    """``PATCH /api/packs/{id}``: the pack's new name."""
+
+    name: str
+
+
+class PackRenameOut(PackOut):
+    """The renamed pack, plus what happened to its copy in the pack source.
+
+    ``warning`` is set when the bucket could not follow (read-only source, a
+    refused write or delete): the rename stands, but the old archive is
+    still there and comes back under the old name at the next boot.
+    """
+
+    old_name: str
+    remote_key: Optional[str] = None
+    old_remote_key: Optional[str] = None
+    old_remote_removed: bool = False
+    warning: Optional[str] = None
+
+
 class PackPreview(BaseModel):
     """Stanza names plus the first sample lines, for the operator preview."""
 
