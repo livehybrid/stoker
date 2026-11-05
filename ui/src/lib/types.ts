@@ -386,6 +386,19 @@ export interface SpecOut {
   fast_envelope?: boolean | null;
   rate_shape?: string | null;
   created_at: string;
+  /** How many runs reference this spec (filled by the list and get routes). */
+  run_count?: number;
+  /** The most recently launched run of this spec, or null if it never ran. */
+  last_run?: SpecLastRun | null;
+}
+
+export interface SpecLastRun {
+  id: number;
+  state: string;
+  created_at: string;
+  t0?: string | null;
+  ended_at?: string | null;
+  end_reason?: string | null;
 }
 
 export interface SpecEstimate {

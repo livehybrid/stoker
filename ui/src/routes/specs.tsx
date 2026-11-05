@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api } from "../lib/api";
@@ -13,6 +13,8 @@ import { EmptyState, ErrorState, LoadingState } from "../components/States";
 import { useToast } from "../components/Toast";
 import { parseApiError } from "../features/specs/errors";
 import { formatDuration, formatRate } from "../features/specs/format";
+import { endReasonLabel, fmtDateTime, isTerminal } from "../features/runs/format";
+import { POLL_MS } from "../lib/queryClient";
 import { EndRow, Inline, Muted, Stack, Strong } from "../components/text";
 import { Modal } from "../features/ui/Modal";
 import styled from "styled-components";
@@ -61,6 +63,15 @@ function ConfirmDelete({
       <Muted>
         Delete <Strong>{spec.name}</Strong>? This cannot be undone. A spec that
         has runs cannot be deleted (the runs reference it).
+        {spec.run_count ? (
+          <>
+            {" "}This one has {spec.run_count} run{spec.run_count === 1 ? "" : "s"}:{" "}
+            <Link to="/runs" search={{ spec: spec.id }}>
+              delete them first
+            </Link>
+            .
+          </>
+        ) : null}
       </Muted>
     </Modal>
   );
@@ -72,7 +83,16 @@ function Specs() {
   const qc = useQueryClient();
   const { highlight } = Route.useSearch();
 
-  const specsQ = useQuery({ queryKey: ["specs"], queryFn: () => api.specs.list() });
+  const specsQ = useQuery({
+    queryKey: ["specs"],
+    queryFn: () => api.specs.list(),
+    // Keep the Last run column current while any spec's latest run is still
+    // going, so a batch of backfills can be watched finishing from here.
+    refetchInterval: (q) =>
+      (q.state.data ?? []).some((s) => s.last_run && !isTerminal(s.last_run.state))
+        ? POLL_MS
+        : false,
+  });
   const packsQ = useQuery({ queryKey: ["packs"], queryFn: () => api.packs.list() });
   const targetsQ = useQuery({
     queryKey: ["targets"],
@@ -186,6 +206,41 @@ function Specs() {
       ),
     },
     { key: "fleet", header: "Fleet", cell: (s) => s.fleet },
+    {
+      key: "runs",
+      header: "Runs",
+      align: "right",
+      cell: (s) =>
+        s.run_count ? (
+          <Link to="/runs" search={{ spec: s.id }} title="Show this spec's runs">
+            {s.run_count}
+          </Link>
+        ) : (
+          <Muted>0</Muted>
+        ),
+    },
+    {
+      key: "last_run",
+      header: "Last run",
+      cell: (s) => {
+        const r = s.last_run;
+        if (!r) return <Muted>never</Muted>;
+        const when = r.ended_at ?? r.t0 ?? r.created_at;
+        return (
+          <Inline>
+            <StatusBadge state={r.state} />
+            <Link
+              to="/runs/$runId"
+              params={{ runId: String(r.id) }}
+              title={r.end_reason ? endReasonLabel(r.end_reason) : undefined}
+            >
+              #{r.id}
+            </Link>
+            <Muted>{fmtDateTime(when)}</Muted>
+          </Inline>
+        );
+      },
+    },
     {
       key: "actions",
       header: "",
