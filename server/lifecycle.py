@@ -137,6 +137,30 @@ def effective_workers(engine, workers):
 DEFAULT_BACKFILL_CAP_EPS = 5000.0
 
 
+def backfill_density_eps(rate_mode, rate_value, bytes_per_event):
+    # type: (Optional[str], Optional[float], Optional[float]) -> Optional[float]
+    """How dense a backfill's history should be, in events per second.
+
+    The spec's own rate, whichever way it is stated: an eps spec as it is, and
+    a GB/day spec through the pack's bytes per event. A GB/day spec used to
+    fall through to the delivery cap here, so its history was written at the
+    cap's density AND delivered at the cap's rate: the sweep then advanced one
+    second of history per second of wall time (a July backfill took 31 days),
+    and every event in each one-second step shared that second. ``None`` when
+    the rate cannot be read as an event rate (count_interval, or a GB/day spec
+    whose bytes per event is unknown); the caller then falls back to the cap.
+    """
+    if not rate_value or rate_value <= 0:
+        return None
+    if rate_mode == "eps":
+        return float(rate_value)
+    if rate_mode == "per_day_gb":
+        from .engines.ceilings import gb_day_to_eps
+
+        return gb_day_to_eps(float(rate_value), bytes_per_event)
+    return None
+
+
 def plan_backfill(engine, series_count, live_eps, window_s, resolution_s, cap_eps, now,
                   settings=None, start_s=None, end_s=None):
     # type: (str, int, Optional[float], Optional[float], Optional[float], Optional[float], float, Optional[Any], Optional[float], Optional[float]) -> Dict[str, Any]
@@ -176,9 +200,10 @@ def plan_backfill(engine, series_count, live_eps, window_s, resolution_s, cap_ep
     (1.5x the delivery time + margin) so an eventgen backfill, which is bounded
     by the deadline rather than by engine exit, completes.
 
-    A spec with no eps (metrics, count_interval, per_day_gb) has no density to
-    read, so it falls back to the cap, which is the previous behaviour for those
-    modes.
+    ``live_eps`` is the spec's rate as events per second (see
+    :func:`backfill_density_eps`: a GB/day spec is converted through the
+    pack's bytes per event). A spec with none (metrics, count_interval, or a
+    GB/day spec whose bytes per event is unknown) falls back to the cap.
     """
     # Two ways to say which history to generate: the last N seconds, or an
     # explicit range ("January to April"). The range wins when both are given,
@@ -306,7 +331,8 @@ def provision_run(db, spec, driver, overrides=None, started_by=None, settings=No
 
             series = bundles.metrics_series_count(pack.builder_config_json)
             pack_res = (pack.builder_config_json or {}).get("resolution_s")
-        live_eps = spec.rate_value if spec.rate_mode == "eps" else None
+        live_eps = backfill_density_eps(spec.rate_mode, spec.rate_value,
+                                        backfill.get("bytes_per_event"))
         res = backfill.get("resolution_s") or pack_res
         plan = plan_backfill(spec.engine, series, live_eps, backfill.get("window_s"),
                              res, backfill.get("cap_eps"), time.time(),

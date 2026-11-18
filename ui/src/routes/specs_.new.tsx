@@ -23,7 +23,7 @@ import { useToast } from "../components/Toast";
 import { PackPicker, packMergeable } from "../features/specs/PackPicker";
 import { TargetPicker } from "../features/specs/TargetPicker";
 import { EstimatePanel } from "../features/specs/EstimatePanel";
-import { fleetCeilings, localEstimate } from "../features/specs/estimate";
+import { fleetCeilings, gbDayToEps, localEstimate } from "../features/specs/estimate";
 import { parseApiError } from "../features/specs/errors";
 import { packLooksReplay } from "../features/specs/replay";
 import { packIsMetrics } from "../features/metrics/config";
@@ -302,7 +302,16 @@ function JobWizard() {
     return names.includes(form.fleet) ? names : [form.fleet, ...names];
   }, [fleetsQ.data, form.fleet]);
 
-  const isReplay = packLooksReplay(selectedPack);
+  // The server reads a pack's `mode = replay` stanzas from its eventgen.conf;
+  // the name/tag guess is only for packs it says nothing about (rawreplay).
+  const replayStanzas = selectedPack?.replay_stanzas ?? [];
+  const isReplay = packLooksReplay(selectedPack) || replayStanzas.length > 0;
+  // A replay cannot be held to a past range, so a backfill leaves replay
+  // stanzas out; a pack that is nothing but replay has nothing to backfill.
+  const cannotBackfill =
+    replayStanzas.length > 0
+      ? replayStanzas.length >= (selectedPack?.stanza_count ?? 0)
+      : packLooksReplay(selectedPack);
   const isMetrics = packIsMetrics(selectedPack);
   const bytesPerEvent = selectedPack?.est_bytes_per_event ?? null;
 
@@ -332,7 +341,7 @@ function JobWizard() {
     hours: 3600, days: 86400, weeks: 604800, years: 31557600,
   };
   const backfillRange =
-    backfillOn && !isReplay && backfillMode === "range" && backfillFrom && backfillTo
+    backfillOn && !cannotBackfill && backfillMode === "range" && backfillFrom && backfillTo
       ? {
           start: Math.floor(new Date(backfillFrom).getTime() / 1000),
           end: Math.floor(new Date(backfillTo).getTime() / 1000),
@@ -344,7 +353,7 @@ function JobWizard() {
     Number.isFinite(backfillRange.end) &&
     backfillRange.end > backfillRange.start;
   const backfillWindowS =
-    backfillOn && !isReplay
+    backfillOn && !cannotBackfill
       ? backfillMode === "range"
         ? rangeValid
           ? backfillRange!.end - backfillRange!.start
@@ -362,10 +371,20 @@ function JobWizard() {
     // pushing them takes. Multiplying by the same number for both is what made
     // a backfill always take exactly as long as the window it covered.
     const deliverEps = Number(backfillCap) > 0 ? Number(backfillCap) : BACKFILL_CAP;
-    const densityEps =
-      !isMetrics && form.rate_mode === "eps" && Number(form.rate_value) > 0
-        ? Number(form.rate_value)
-        : BACKFILL_CAP;
+    // The spec's own rate as events per second, mirroring the server's
+    // backfill_density_eps: a GB/day spec converts through the pack's bytes per
+    // event. It used to fall back to the cap, so a GB/day backfill was written
+    // and delivered at the same rate and took as long as the period it covered.
+    const rateNum = Number(form.rate_value);
+    const specEps =
+      isMetrics || !(rateNum > 0)
+        ? null
+        : form.rate_mode === "eps"
+          ? rateNum
+          : form.rate_mode === "per_day_gb"
+            ? gbDayToEps(rateNum, bytesPerEvent)
+            : null;
+    const densityEps = specEps ?? deliverEps;
     let events: number;
     let series: number | null = null;
     if (isMetrics) {
@@ -380,6 +399,8 @@ function JobWizard() {
     return {
       events, series, bytes, deliverEps, densityEps,
       seconds: events / deliverEps,
+      // No faster than real time: the history is no denser than its delivery.
+      realTime: !isMetrics && deliverEps <= densityEps,
     };
   }, [
     backfillWindowS,
@@ -587,9 +608,13 @@ function JobWizard() {
             }
           : {};
       const run = await api.specs.run(specId, runBody);
+      const skipped = run.backfill_skipped_stanzas ?? [];
       toast.success(
         backfillWindowS != null
-          ? `Backfill run #${run.run_id} launched.`
+          ? `Backfill run #${run.run_id} launched.` +
+              (skipped.length
+                ? ` Left out (replay stanzas): ${skipped.join(", ")}.`
+                : "")
           : `Run #${run.run_id} launched.`,
       );
       navigate({ to: "/runs/$runId", params: { runId: String(run.run_id) } });
@@ -897,7 +922,7 @@ function JobWizard() {
       </Card>
 
       {/* Backfill (per-run): generate a window of history then finish. */}
-      {!isReplay && (
+      {!cannotBackfill && (
         <Card title="Backfill (optional)">
           <Inline>
             <Switch
@@ -911,6 +936,15 @@ function JobWizard() {
           </Inline>
           {backfillOn && (
             <Stack>
+              {replayStanzas.length > 0 && (
+                <Callout $tone="warning">
+                  Left out of a backfill:{" "}
+                  <Strong>{replayStanzas.join(", ")}</Strong>. These stanzas replay a
+                  recording, and a replay cannot be held to a past range: it would
+                  replay up to now and then carry on live. The rest of the pack is
+                  backfilled as usual.
+                </Callout>
+              )}
               <Inline>
                 <div style={{ display: backfillMode === "range" ? "none" : undefined }}>
                   <Field label="Amount">
@@ -937,7 +971,7 @@ function JobWizard() {
                 {backfillMode === "range" && (
                   <>
                     <div>
-                      <Field label="From">
+                      <Field label="From" hint="starts at 00:00 UTC on this date">
                         <TextInput
                           type="date"
                           value={backfillFrom}
@@ -948,6 +982,7 @@ function JobWizard() {
                     <div>
                       <Field
                         label="To"
+                        hint="up to 00:00 UTC on this date, which is not included"
                         error={
                           backfillFrom && backfillTo && !rangeValid
                             ? "must be after From"
@@ -1007,6 +1042,14 @@ function JobWizard() {
                   </div>
                 )}
               </Inline>
+              {rangeValid && (
+                <Muted $small>
+                  Covers <Strong>{utcStamp(backfillRange!.start)}</Strong> to{" "}
+                  <Strong>{utcStamp(backfillRange!.end - 1)}</Strong> UTC (
+                  {formatDuration(backfillRange!.end - backfillRange!.start)}). For a whole
+                  month, pick the first day of the next month as To.
+                </Muted>
+              )}
               {backfillEstimate && (
                 <Muted $small>
                   {"≈ "}
@@ -1042,7 +1085,22 @@ function JobWizard() {
                       <Strong>{formatVolume(backfillEstimate.bytes)}</Strong>
                     </>
                   )}
+                  {!isMetrics && (
+                    <>
+                      {" · history "}
+                      <Strong>{Math.round(backfillEstimate.densityEps).toLocaleString()} eps</Strong>
+                    </>
+                  )}
                 </Muted>
+              )}
+              {backfillEstimate?.realTime && (
+                <Callout $tone="warning">
+                  The history is {Math.round(backfillEstimate.densityEps).toLocaleString()} events a
+                  second and it is delivered at{" "}
+                  {backfillEstimate.deliverEps.toLocaleString()}, so this backfill runs no faster
+                  than real time: it takes as long as the period it covers. Raise Deliver at
+                  (adding workers if the fleet&apos;s limits refuse it) to land it sooner.
+                </Callout>
               )}
               <Callout $tone="warning">
                 Re-running a backfill appends duplicate points; mstats will
@@ -1105,6 +1163,11 @@ function JobWizard() {
       </StickyBar>
     </Stack>
   );
+}
+
+/** An epoch second as "2026-07-31 23:59:59", in UTC: what a backfill range means. */
+function utcStamp(epochS: number): string {
+  return new Date(epochS * 1000).toISOString().replace("T", " ").slice(0, 19);
 }
 
 export const Route = createFileRoute("/specs_/new")({

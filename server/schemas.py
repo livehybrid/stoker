@@ -221,6 +221,9 @@ class PackOut(BaseModel):
     # Lives under STOKER_BUILTIN_PACKS_DIR: ships with the image and cannot be
     # deleted (it re-registers at boot). Computed, not stored.
     builtin: bool = False
+    # Its ``mode = replay`` stanzas, read from eventgen.conf. A backfill
+    # leaves these out: a replay cannot be held to a past range. Computed.
+    replay_stanzas: List[str] = Field(default_factory=list)
 
 
 class PackRename(BaseModel):
@@ -595,13 +598,21 @@ class BackfillEstimate(BaseModel):
     seconds: float                                   # est. delivery time at deliver_eps
     cap_eps: float                                   # the ceiling
     deliver_eps: float                               # actual delivery rate (spec eps, clamped)
+    density_eps: Optional[float] = None              # how dense the history is
     series: Optional[int] = None                     # metrics only
     warning: str
+    # Replay stanzas the backfill leaves out (see RunCreated).
+    skipped_stanzas: List[str] = Field(default_factory=list)
+    # Why the estimate is less certain than it looks, when it is.
+    detail: Optional[str] = None
 
 
 class RunCreated(BaseModel):
     run_id: int
     state: str
+    # A backfill run's replay stanzas, switched off for the run because a
+    # replay cannot be held to a past range. Empty otherwise.
+    backfill_skipped_stanzas: List[str] = Field(default_factory=list)
 
 
 class LeaseOut(BaseModel):

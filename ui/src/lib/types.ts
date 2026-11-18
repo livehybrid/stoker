@@ -121,6 +121,8 @@ export interface PackOut {
   // Ships with the image (STOKER_BUILTIN_PACKS_DIR) and re-registers at boot,
   // so it cannot be deleted.
   builtin?: boolean;
+  // Its `mode = replay` stanzas; a backfill leaves these out.
+  replay_stanzas?: string[];
 }
 
 // DELETE /api/packs/{id}?remote=true
@@ -442,11 +444,16 @@ export interface BackfillEstimate {
   deliver_eps: number;
   series?: number | null;
   warning: string;
+  skipped_stanzas?: string[];
+  density_eps?: number | null;
+  detail?: string | null;
 }
 
 export interface RunCreated {
   run_id: number;
   state: string;
+  // A backfill run's replay stanzas, switched off for the run.
+  backfill_skipped_stanzas?: string[];
 }
 
 export interface LeaseOut {
