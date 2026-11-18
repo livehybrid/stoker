@@ -241,6 +241,23 @@ class TestBackfill:
         for section in ("sample1.csv", "sample2.csv"):
             assert conf.has_option(section, "disabled") is False
 
+    def test_a_sweep_density_replaces_a_declared_per_day_volume(self, tmp_path):
+        # Left in, perDayVolume makes the engine generate by the pack's own
+        # volume (count forced to 1) and ignore the density entirely.
+        text = BASE_CONF.replace("[sample2.csv]\n", "[sample2.csv]\nperDayVolume = 50\n"
+                                 "generator = perdayvolumegenerator\nrater = perdayvolume\n")
+        src = write_base_conf(tmp_path, text)
+        dst = str(tmp_path / "pdv.conf")
+        rewrite_file(src, dst, "eps", 100, 1.0, "/bundle/samples",
+                     backfill_window_s=3600, backfill_mode="sweep",
+                     backfill_density_eps=1666.0)
+        conf = load_conf(dst)
+        for key in ("perDayVolume", "generator", "rater"):
+            assert conf.has_option("sample2.csv", key) is False, key
+        total = sum(conf.getint(s, "count") / conf.getint(s, "interval")
+                    for s in ("sample1.csv", "sample2.csv"))
+        assert total == pytest.approx(1666.0, rel=0.01)
+
     def test_a_live_run_leaves_replay_stanzas_alone(self, tmp_path):
         src = write_base_conf(tmp_path, BASE_CONF)
         dst = str(tmp_path / "live-replay.conf")

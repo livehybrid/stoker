@@ -445,6 +445,8 @@ export interface BackfillEstimate {
   series?: number | null;
   warning: string;
   skipped_stanzas?: string[];
+  density_eps?: number | null;
+  detail?: string | null;
 }
 
 export interface RunCreated {

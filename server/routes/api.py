@@ -1232,7 +1232,8 @@ def backfill_estimate(spec_id: int, body: BackfillEstimateRequest,
     if pack is not None and pack.builder_config_json is not None:
         series = bundles.metrics_series_count(pack.builder_config_json)
         pack_res = (pack.builder_config_json or {}).get("resolution_s")
-    live_eps = spec.rate_value if spec.rate_mode == "eps" else None
+    bpe = _spec_bytes_per_event(db, spec, pack)
+    live_eps = lifecycle.backfill_density_eps(spec.rate_mode, spec.rate_value, bpe)
     res = body.resolution_s or pack_res
     try:
         plan = lifecycle.plan_backfill(spec.engine, series, live_eps, body.window_s,
@@ -1242,7 +1243,6 @@ def backfill_estimate(spec_id: int, body: BackfillEstimateRequest,
     except ValueError as exc:
         raise HTTPException(status_code=422, detail={
             "error": "bad_backfill_window", "detail": str(exc)})
-    bpe = _spec_bytes_per_event(db, spec, pack)
     skipped = []  # type: List[str]
     if pack is not None and spec.engine != "metrics":
         skipped = _backfill_replay_check(spec, pack)
@@ -1257,6 +1257,12 @@ def backfill_estimate(spec_id: int, body: BackfillEstimateRequest,
         series=series if spec.engine == "metrics" else None,
         warning=("Re-running a backfill appends duplicate points; mstats will "
                  "double-count. Run once, or clear the window first."),
+        density_eps=round(plan["density_eps"], 3),
+        detail=(None if live_eps is not None or spec.engine == "metrics"
+                or spec.rate_mode == "count_interval" else
+                "this pack's bytes per event is unknown, so the GB/day rate cannot "
+                "be turned into a density: the history is written at the delivery "
+                "rate instead"),
     )
 
 
@@ -1604,7 +1610,9 @@ def run_spec(spec_id: int, body: RunLaunch, request: Request, db: Session = Depe
                     "start_s": body.backfill_start_s,
                     "end_s": body.backfill_end_s,
                     "resolution_s": body.backfill_resolution_s,
-                    "cap_eps": body.backfill_cap_eps}
+                    "cap_eps": body.backfill_cap_eps,
+                    # How a GB/day spec's rate becomes the history's density.
+                    "bytes_per_event": bytes_per_event}
         # A backfill does NOT deliver at the spec's rate, so the ceiling check
         # above (which uses spec.rate_value) says nothing about it. Check the
         # rate it will actually send at, which is what lets the delivery cap be

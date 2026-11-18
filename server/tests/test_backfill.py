@@ -472,3 +472,65 @@ def test_a_backfill_of_a_replay_only_pack_is_refused(
     assert run.status_code == 422, run.text
     assert run.json()["detail"]["error"] == "backfill_replay_only"
     assert db_session.execute(select(Run)).scalars().all() == []
+
+
+# ---- a GB/day spec's backfill density ----
+
+def test_a_gb_per_day_rate_becomes_the_backfill_density():
+    from server.engines.ceilings import gb_day_to_eps
+
+    # 100 GB/day of 696-byte events is the 1,663 eps an operator would type.
+    assert lifecycle.backfill_density_eps("per_day_gb", 100.0, 696) == pytest.approx(
+        gb_day_to_eps(100.0, 696))
+    assert lifecycle.backfill_density_eps("per_day_gb", 100.0, 696) == pytest.approx(1663.0, abs=1)
+    assert lifecycle.backfill_density_eps("eps", 1666.0, 696) == 1666.0
+    # Not readable as an event rate: the planner falls back to the cap.
+    assert lifecycle.backfill_density_eps("per_day_gb", 100.0, None) is None
+    assert lifecycle.backfill_density_eps("count_interval", 5.0, 696) is None
+
+
+def test_a_gb_per_day_backfill_is_not_written_at_the_delivery_rate(
+        client, db_session, settings, make_pack, fake_driver):
+    """It used to be: the history at the cap's density, delivered at the cap,
+    so the sweep moved one second of history per second and every event in
+    each one-second step shared that second."""
+    from server.engines.ceilings import gb_day_to_eps
+
+    target = _helpers.make_target(db_session, settings=settings)
+    pack = _helpers.make_pack(db_session, make_pack(bytes_per_event=120))
+    spec = _helpers.make_spec(db_session, pack, target, engine="eventgen",
+                              rate_mode="per_day_gb", rate_value=10.0, workers=1,
+                              fleet="fake-local")
+    db_session.commit()
+    bpe = pack.est_bytes_per_event
+    assert bpe, "the test pack declares its bytes per event"
+    want = gb_day_to_eps(10.0, bpe)
+
+    est = client.post("/api/specs/%d/backfill_estimate" % spec.id, json={"window_s": 600})
+    assert est.status_code == 200, est.text
+    body = est.json()
+    assert body["density_eps"] == pytest.approx(want, rel=1e-3)
+    assert body["events"] == pytest.approx(600 * want, rel=1e-3)
+    assert body["deliver_eps"] == lifecycle.DEFAULT_BACKFILL_CAP_EPS
+    assert body["seconds"] < 600  # faster than the period it covers
+    assert body.get("detail") is None
+
+    run = client.post("/api/specs/%d/run" % spec.id, json={"backfill_window_s": 600})
+    assert run.status_code in (200, 201), run.text
+    snap = db_session.get(Run, run.json()["run_id"]).spec_snapshot_json
+    assert snap["backfill"]["density_eps"] == pytest.approx(want, rel=1e-3)
+    assert snap["rate_value"] == lifecycle.DEFAULT_BACKFILL_CAP_EPS
+
+
+def test_a_gb_per_day_backfill_says_when_it_cannot_read_the_density(
+        client, db_session, settings, make_pack, fake_driver):
+    target = _helpers.make_target(db_session, settings=settings)
+    pack = _helpers.make_pack(db_session, make_pack())
+    pack.est_bytes_per_event = None
+    spec = _helpers.make_spec(db_session, pack, target, engine="eventgen",
+                              rate_mode="per_day_gb", rate_value=10.0, workers=1,
+                              fleet="fake-local")
+    db_session.commit()
+    body = client.post("/api/specs/%d/backfill_estimate" % spec.id, json={"window_s": 600}).json()
+    assert body["density_eps"] == lifecycle.DEFAULT_BACKFILL_CAP_EPS
+    assert "bytes per event is unknown" in body["detail"]

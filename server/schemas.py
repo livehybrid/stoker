@@ -598,10 +598,13 @@ class BackfillEstimate(BaseModel):
     seconds: float                                   # est. delivery time at deliver_eps
     cap_eps: float                                   # the ceiling
     deliver_eps: float                               # actual delivery rate (spec eps, clamped)
+    density_eps: Optional[float] = None              # how dense the history is
     series: Optional[int] = None                     # metrics only
     warning: str
     # Replay stanzas the backfill leaves out (see RunCreated).
     skipped_stanzas: List[str] = Field(default_factory=list)
+    # Why the estimate is less certain than it looks, when it is.
+    detail: Optional[str] = None
 
 
 class RunCreated(BaseModel):

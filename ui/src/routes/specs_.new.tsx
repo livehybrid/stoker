@@ -23,7 +23,7 @@ import { useToast } from "../components/Toast";
 import { PackPicker, packMergeable } from "../features/specs/PackPicker";
 import { TargetPicker } from "../features/specs/TargetPicker";
 import { EstimatePanel } from "../features/specs/EstimatePanel";
-import { fleetCeilings, localEstimate } from "../features/specs/estimate";
+import { fleetCeilings, gbDayToEps, localEstimate } from "../features/specs/estimate";
 import { parseApiError } from "../features/specs/errors";
 import { packLooksReplay } from "../features/specs/replay";
 import { packIsMetrics } from "../features/metrics/config";
@@ -371,10 +371,20 @@ function JobWizard() {
     // pushing them takes. Multiplying by the same number for both is what made
     // a backfill always take exactly as long as the window it covered.
     const deliverEps = Number(backfillCap) > 0 ? Number(backfillCap) : BACKFILL_CAP;
-    const densityEps =
-      !isMetrics && form.rate_mode === "eps" && Number(form.rate_value) > 0
-        ? Number(form.rate_value)
-        : BACKFILL_CAP;
+    // The spec's own rate as events per second, mirroring the server's
+    // backfill_density_eps: a GB/day spec converts through the pack's bytes per
+    // event. It used to fall back to the cap, so a GB/day backfill was written
+    // and delivered at the same rate and took as long as the period it covered.
+    const rateNum = Number(form.rate_value);
+    const specEps =
+      isMetrics || !(rateNum > 0)
+        ? null
+        : form.rate_mode === "eps"
+          ? rateNum
+          : form.rate_mode === "per_day_gb"
+            ? gbDayToEps(rateNum, bytesPerEvent)
+            : null;
+    const densityEps = specEps ?? deliverEps;
     let events: number;
     let series: number | null = null;
     if (isMetrics) {
@@ -389,6 +399,8 @@ function JobWizard() {
     return {
       events, series, bytes, deliverEps, densityEps,
       seconds: events / deliverEps,
+      // No faster than real time: the history is no denser than its delivery.
+      realTime: !isMetrics && deliverEps <= densityEps,
     };
   }, [
     backfillWindowS,
@@ -1073,7 +1085,22 @@ function JobWizard() {
                       <Strong>{formatVolume(backfillEstimate.bytes)}</Strong>
                     </>
                   )}
+                  {!isMetrics && (
+                    <>
+                      {" · history "}
+                      <Strong>{Math.round(backfillEstimate.densityEps).toLocaleString()} eps</Strong>
+                    </>
+                  )}
                 </Muted>
+              )}
+              {backfillEstimate?.realTime && (
+                <Callout $tone="warning">
+                  The history is {Math.round(backfillEstimate.densityEps).toLocaleString()} events a
+                  second and it is delivered at{" "}
+                  {backfillEstimate.deliverEps.toLocaleString()}, so this backfill runs no faster
+                  than real time: it takes as long as the period it covers. Raise Deliver at
+                  (adding workers if the fleet&apos;s limits refuse it) to land it sooner.
+                </Callout>
               )}
               <Callout $tone="warning">
                 Re-running a backfill appends duplicate points; mstats will
