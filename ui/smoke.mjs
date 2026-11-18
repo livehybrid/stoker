@@ -70,6 +70,8 @@ const PACK = {
     repo_id: 2,
     kind: 'eventgen',
     stanza_count: 4,
+    // One stanza replays a recording, so a backfill must leave it out.
+    replay_stanzas: ['recorded.log'],
     description: 'Apache access logs',
     created_at: now,
     lint_ok: true,
@@ -381,6 +383,24 @@ const go = async (pathname) => {
 
     await go('/specs/new?cloneRun=7');
     await check('clone run: wizard', 'Clone run #7');
+    // The backfill card names the replay stanzas a backfill leaves out.
+    {
+        // The innermost element carrying the switch's label, once the pack has
+        // loaded and the card has rendered.
+        const findToggle = () =>
+            Array.from(window.document.querySelectorAll('*'))
+                .filter((n) => (n.textContent || '').includes('Backfill historical data'))
+                .pop();
+        await waitFor('backfill: the card renders', () => Boolean(findToggle()));
+        const toggle = findToggle();
+        if (!toggle) {
+            problems.push('backfill: no switch to turn a backfill on');
+        } else {
+            toggle.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+            await check('backfill: replay stanzas are named as left out', 'Left out of a backfill');
+            await check('backfill: which ones', 'recorded.log');
+        }
+    }
 
     await go('/runs/7');
     await check('run detail: totals', 'Events');

@@ -395,3 +395,80 @@ def test_no_window_and_no_range_is_refused():
     with pytest.raises(ValueError) as exc:
         lifecycle.plan_backfill("eventgen", 0, 40.0, None, None, None, 1000.0)
     assert "needs a window" in str(exc.value)
+
+
+# ---- replay stanzas: never in a backfill ----
+
+def _pack_with_replay(make_pack, replay_only=False):
+    """A tiny eventgen pack plus a ``mode = replay`` stanza (or only that)."""
+    import os
+
+    pack_dir = make_pack(name="mixed-replay")
+    conf = os.path.join(pack_dir, "default", "eventgen.conf")
+    with open(conf, encoding="utf-8") as handle:
+        text = handle.read()
+    replay = (
+        "\n[recorded.log]\nmode = replay\ntimeMultiple = 1\n"
+        "token.0.token = \\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\n"
+        "token.0.replacementType = replaytimestamp\n"
+        "token.0.replacement = %Y-%m-%dT%H:%M:%S\n"
+    )
+    with open(conf, "w", encoding="utf-8") as handle:
+        handle.write(replay if replay_only else text + replay)
+    with open(os.path.join(pack_dir, "samples", "recorded.log"), "w", encoding="utf-8") as handle:
+        handle.write("".join("2026-01-01T00:00:%02d recorded line %d\n" % (i, i) for i in range(5)))
+    return pack_dir
+
+
+def test_a_pack_says_which_of_its_stanzas_replay(client, db_session, settings, make_pack):
+    pack = _helpers.make_pack(db_session, _pack_with_replay(make_pack))
+    plain = _helpers.make_pack(db_session, make_pack(name="plain"))
+    db_session.commit()
+    assert client.get("/api/packs/%d" % pack.id).json()["replay_stanzas"] == ["recorded.log"]
+    assert client.get("/api/packs/%d" % plain.id).json()["replay_stanzas"] == []
+
+
+def test_a_backfill_leaves_replay_stanzas_out_and_says_so(
+        client, db_session, settings, make_pack, fake_driver):
+    target = _helpers.make_target(db_session, settings=settings)
+    pack = _helpers.make_pack(db_session, _pack_with_replay(make_pack))
+    spec = _helpers.make_spec(db_session, pack, target, engine="eventgen",
+                              rate_mode="eps", rate_value=100.0, workers=1,
+                              fleet="fake-local")
+    db_session.commit()
+    est = client.post("/api/specs/%d/backfill_estimate" % spec.id,
+                      json={"start_s": 1782864000, "end_s": 1785542400})
+    assert est.status_code == 200, est.text
+    assert est.json()["skipped_stanzas"] == ["recorded.log"]
+
+    run = client.post("/api/specs/%d/run" % spec.id,
+                      json={"backfill_start_s": 1782864000, "backfill_end_s": 1785542400})
+    assert run.status_code in (200, 201), run.text
+    assert run.json()["backfill_skipped_stanzas"] == ["recorded.log"]
+
+
+def test_a_live_run_of_the_same_pack_skips_nothing(
+        client, db_session, settings, make_pack, fake_driver):
+    target = _helpers.make_target(db_session, settings=settings)
+    pack = _helpers.make_pack(db_session, _pack_with_replay(make_pack))
+    spec = _helpers.make_spec(db_session, pack, target, engine="eventgen",
+                              rate_mode="eps", rate_value=100.0, workers=1,
+                              fleet="fake-local")
+    db_session.commit()
+    run = client.post("/api/specs/%d/run" % spec.id, json={})
+    assert run.status_code in (200, 201), run.text
+    assert run.json()["backfill_skipped_stanzas"] == []
+
+
+def test_a_backfill_of_a_replay_only_pack_is_refused(
+        client, db_session, settings, make_pack, fake_driver):
+    target = _helpers.make_target(db_session, settings=settings)
+    pack = _helpers.make_pack(db_session, _pack_with_replay(make_pack, replay_only=True))
+    spec = _helpers.make_spec(db_session, pack, target, engine="eventgen",
+                              rate_mode="eps", rate_value=100.0, workers=1,
+                              fleet="fake-local")
+    db_session.commit()
+    run = client.post("/api/specs/%d/run" % spec.id, json={"backfill_window_s": 600})
+    assert run.status_code == 422, run.text
+    assert run.json()["detail"]["error"] == "backfill_replay_only"
+    assert db_session.execute(select(Run)).scalars().all() == []

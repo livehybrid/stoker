@@ -22,7 +22,7 @@ import os
 import secrets
 import shutil
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from fastapi import (APIRouter, Depends, File, Form, HTTPException, Query,
@@ -840,7 +840,8 @@ def _pack_out(pack):
     # type: (Pack) -> PackOut
     """A pack as the API shows it, flagged builtin so the UI can hide Delete."""
     return PackOut.model_validate(pack).model_copy(
-        update={"builtin": _is_builtin_pack(pack)})
+        update={"builtin": _is_builtin_pack(pack),
+                "replay_stanzas": _pack_replay_stanzas(pack.source_path)})
 
 
 @router.get("/packs/{pack_id}", response_model=PackOut)
@@ -1242,8 +1243,12 @@ def backfill_estimate(spec_id: int, body: BackfillEstimateRequest,
         raise HTTPException(status_code=422, detail={
             "error": "bad_backfill_window", "detail": str(exc)})
     bpe = _spec_bytes_per_event(db, spec, pack)
+    skipped = []  # type: List[str]
+    if pack is not None and spec.engine != "metrics":
+        skipped = _backfill_replay_check(spec, pack)
     return BackfillEstimate(
         engine=spec.engine,
+        skipped_stanzas=skipped,
         events=plan["events"],
         bytes=int(plan["events"] * bpe) if bpe else None,
         seconds=round(plan["seconds"], 1),
@@ -1591,7 +1596,10 @@ def run_spec(spec_id: int, body: RunLaunch, request: Request, db: Session = Depe
     backfill = None
     _has_range = (body.backfill_start_s is not None
                   and body.backfill_end_s is not None)
+    backfill_skipped = []  # type: List[str]
     if (body.backfill_window_s and body.backfill_window_s > 0) or _has_range:
+        if spec.engine != "metrics":
+            backfill_skipped = _backfill_replay_check(spec, pack)
         backfill = {"window_s": body.backfill_window_s,
                     "start_s": body.backfill_start_s,
                     "end_s": body.backfill_end_s,
@@ -1661,7 +1669,11 @@ def run_spec(spec_id: int, body: RunLaunch, request: Request, db: Session = Depe
     db.commit()
     db.refresh(run)
     log.info("provisioned run %s from spec %s (state=%s)", run.id, spec_id, run.state)
-    return RunCreated(run_id=run.id, state=run.state)
+    if backfill_skipped:
+        log.info("backfill run %s leaves out replay stanza(s) %s", run.id,
+                 ", ".join(backfill_skipped))
+    return RunCreated(run_id=run.id, state=run.state,
+                      backfill_skipped_stanzas=backfill_skipped)
 
 
 # --------------------------------------------------------------------------- #
@@ -2363,6 +2375,43 @@ def _is_replay_run(spec, pack):
     return _pack_has_replay(pack.source_path)
 
 
+def _pack_stanza_modes(pack_dir):
+    # type: (Optional[str]) -> List[Tuple[str, str]]
+    """Each stanza of the pack's eventgen.conf with its ``mode``, in order.
+
+    Empty for a pack with no eventgen.conf (metrics, rawreplay) or one that
+    does not parse. The engines skip a ``disabled`` stanza, so it is left out.
+    """
+    if not pack_dir:
+        return []
+    conf_path = os.path.join(pack_dir, bundles.CONF_RELPATH)
+    if not os.path.isfile(conf_path):
+        return []
+    parser = configparser.RawConfigParser(
+        delimiters=("=",), strict=False, allow_no_value=True, interpolation=None)
+    parser.optionxform = str
+    try:
+        parser.read(conf_path, encoding="utf-8")
+    except configparser.Error:
+        return []
+    out = []  # type: List[Tuple[str, str]]
+    for section in parser.sections():
+        if section.lower() in ("global", "default"):
+            continue
+        disabled = (parser.get(section, "disabled", fallback="false") or "").strip().lower()
+        if disabled in ("1", "true", "yes", "on"):
+            continue
+        mode = (parser.get(section, "mode", fallback="sample") or "sample").strip()
+        out.append((section, mode))
+    return out
+
+
+def _pack_replay_stanzas(pack_dir):
+    # type: (Optional[str]) -> List[str]
+    """The pack's ``mode = replay`` stanzas, by name."""
+    return [name for name, mode in _pack_stanza_modes(pack_dir) if mode == "replay"]
+
+
 def _pack_has_replay(pack_dir):
     # type: (str) -> bool
     """True when the pack's eventgen.conf declares any ``mode = replay`` stanza.
@@ -2370,23 +2419,35 @@ def _pack_has_replay(pack_dir):
     Replay is engine-paced; the control plane guarantees a single worker for it,
     so a multi-worker spec against a replay pack is rejected at submit.
     """
-    conf_path = os.path.join(pack_dir, bundles.CONF_RELPATH)
-    if not os.path.isfile(conf_path):
-        return False
-    parser = configparser.RawConfigParser(
-        delimiters=("=",), strict=False, allow_no_value=True, interpolation=None)
-    parser.optionxform = str
-    try:
-        parser.read(conf_path, encoding="utf-8")
-    except configparser.Error:
-        return False
-    for section in parser.sections():
-        if section.lower() in ("global", "default"):
-            continue
-        mode = (parser.get(section, "mode", fallback="sample") or "sample").strip()
-        if mode == "replay":
-            return True
-    return False
+    return bool(_pack_replay_stanzas(pack_dir))
+
+
+def _backfill_replay_check(spec, pack):
+    # type: (Spec, Pack) -> List[str]
+    """Which stanzas a backfill of this spec leaves out, or refuse it.
+
+    A replay stanza cannot be held to a past range: the engine replays its
+    recording backwards from now and then carries on live, so a "July"
+    backfill used to write today's events too. The worker switches replay
+    stanzas off for a backfill; this says which, and refuses a backfill that
+    would leave nothing to run (or a Piston replay, which has no backfill).
+    """
+    if (spec.engine or "").strip() == bundles.RAWREPLAY_ENGINE \
+            or bundles.is_rawreplay_pack(pack.source_path):
+        raise HTTPException(status_code=422, detail={
+            "error": "backfill_not_supported",
+            "detail": ("a rawreplay run replays a recorded dataset and cannot "
+                       "backfill a period of history")})
+    stanzas = _pack_stanza_modes(pack.source_path)
+    replay = [name for name, mode in stanzas if mode == "replay"]
+    if stanzas and len(replay) == len(stanzas):
+        raise HTTPException(status_code=422, detail={
+            "error": "backfill_replay_only",
+            "stanzas": replay,
+            "detail": ("every stanza in this pack replays a recording, and a "
+                       "replay cannot be held to a past range, so there is "
+                       "nothing to backfill")})
+    return replay
 
 
 def _preview_sample_lines(pack_dir, stanzas, limit=10):

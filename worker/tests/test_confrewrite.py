@@ -227,6 +227,27 @@ class TestBackfill:
         assert conf.getint("sample1.csv", "count") == 25
         assert conf.getint("sample2.csv", "count") == 75
 
+    @pytest.mark.parametrize("mode", ["sweep", "window"])
+    def test_replay_stanzas_are_switched_off_for_a_backfill(self, tmp_path, mode):
+        # A replay stanza cannot be held to a past range, so it would write
+        # present-time events into a historical backfill. It is disabled.
+        src = write_base_conf(tmp_path, BASE_CONF)
+        dst = str(tmp_path / "bf-replay.conf")
+        rewrite_file(src, dst, "eps", 100, 1.0, "/bundle/samples",
+                     backfill_window_s=3600, backfill_end_offset_s=7200,
+                     backfill_mode=mode, backfill_density_eps=4.0)
+        conf = load_conf(dst)
+        assert conf.get("replay.csv", "disabled") == "true"
+        for section in ("sample1.csv", "sample2.csv"):
+            assert conf.has_option(section, "disabled") is False
+
+    def test_a_live_run_leaves_replay_stanzas_alone(self, tmp_path):
+        src = write_base_conf(tmp_path, BASE_CONF)
+        dst = str(tmp_path / "live-replay.conf")
+        rewrite_file(src, dst, "eps", 100, 1.0, "/bundle/samples")
+        conf = load_conf(dst)
+        assert conf.has_option("replay.csv", "disabled") is False
+
     def test_window_mode_sets_no_engine_backfill_keys(self, tmp_path):
         # The Python fallback cannot sweep, so it must not be told to: its
         # native backfill rater is non-functional in the vendored tree.

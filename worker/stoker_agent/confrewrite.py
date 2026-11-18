@@ -100,6 +100,12 @@ def _is_replay(parser, section):
         return False
 
 
+def replay_sections(parser):
+    # type: (configparser.RawConfigParser) -> List[str]
+    """The stanzas that replay a recording rather than generate from samples."""
+    return [s for s in sample_sections(parser) if _is_replay(parser, s)]
+
+
 def sample_sections(parser):
     # type: (configparser.RawConfigParser) -> List[str]
     return [s for s in parser.sections() if s.lower() not in GLOBAL_SECTIONS]
@@ -261,6 +267,13 @@ def rewrite(parser, rate_mode, share_value, overdrive, sample_dir,
                 parser.set(section, "earliest", "-%ds" % back_to_start)
                 parser.set(section, "latest",
                            "now" if back_to_end == 0 else "-%ds" % back_to_end)
+        # A replay stanza cannot be confined to the range: neither engine can
+        # end a replay at a past date (firebox replays backwards from now to
+        # the start of the range, then carries on live), so left as it is it
+        # wrote present-time events into a "July" backfill. It is switched off
+        # for the run instead; the control plane says which were left out.
+        for section in replay_sections(parser):
+            parser.set(section, "disabled", "true")
 
     return parser
 
