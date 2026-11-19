@@ -356,6 +356,21 @@ def provision_run(db, spec, driver, overrides=None, started_by=None, settings=No
                                    duration_s=eff_duration_s, backfill=backfill_block)
     if workers != spec.workers:
         snapshot["workers"] = workers
+    if backfill_block is not None:
+        # Kept in the snapshot, not the worker's slice: the planned total is
+        # what the run's progress and finish estimate count against, and the
+        # request (as the operator gave it: a trailing window stays a trailing
+        # window) is what a clone of this run, or of its spec, starts from.
+        snapshot["backfill_plan"] = {
+            "events": plan["events"],
+            "request": {
+                "window_s": None if backfill.get("start_s") is not None else backfill.get("window_s"),
+                "start_s": backfill.get("start_s"),
+                "end_s": backfill.get("end_s"),
+                "cap_eps": backfill.get("cap_eps"),
+                "resolution_s": backfill.get("resolution_s"),
+            },
+        }
     # Identity rotation under `pass` scope puts the worker's slot in the
     # identity, which is what keeps two workers from minting the same one. The
     # worker count is therefore part of the arithmetic, and changing it mid-run

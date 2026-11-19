@@ -702,6 +702,37 @@ class MetricsOut(BaseModel):
     samples: List[MetricSampleOut] = Field(default_factory=list)
 
 
+class ProgressPoint(BaseModel):
+    ts: int  # epoch milliseconds
+    done: int
+
+
+class RunProgressOut(BaseModel):
+    """How far a bounded run has got and when it should finish.
+
+    ``kind``: ``backfill`` (events done against events planned, finish from
+    the actual rate), ``duration`` (a live run that ends on the clock) or
+    ``unbounded`` (nothing to estimate).
+    """
+
+    run_id: int
+    state: str
+    kind: str
+    started_at: Optional[datetime.datetime] = None
+    target_eps: Optional[float] = None
+    rate_window_s: float
+    planned_events: Optional[int] = None
+    done_events: Optional[int] = None
+    remaining_events: Optional[int] = None
+    fraction: Optional[float] = None
+    recent_eps: Optional[float] = None
+    stale: bool = False
+    eta_s: Optional[float] = None
+    expected_end: Optional[datetime.datetime] = None
+    target_end: Optional[datetime.datetime] = None
+    series: List[ProgressPoint] = Field(default_factory=list)
+
+
 class RunLogsOut(BaseModel):
     run_id: int
     slot: Optional[int] = None

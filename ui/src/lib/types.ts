@@ -543,6 +543,31 @@ export interface MetricsOut {
   samples: MetricSampleOut[];
 }
 
+/** GET /runs/{id}/progress: how far a bounded run has got, and its finish. */
+export interface RunProgress {
+  run_id: number;
+  state: string;
+  /** backfill: events against plan; duration: ends on the clock; unbounded. */
+  kind: "backfill" | "duration" | "unbounded";
+  started_at: string | null;
+  target_eps: number | null;
+  rate_window_s: number;
+  planned_events: number | null;
+  done_events: number | null;
+  remaining_events: number | null;
+  fraction: number | null;
+  /** The fleet's actual throughput over the trailing rate window. */
+  recent_eps: number | null;
+  /** Running, but no heartbeat recently: nothing to project from. */
+  stale: boolean;
+  eta_s: number | null;
+  /** At the actual rate. */
+  expected_end: string | null;
+  /** At the target rate, for comparison. */
+  target_end: string | null;
+  series: { ts: number; done: number }[];
+}
+
 export interface RunLogsOut {
   run_id: number;
   slot?: number | null;

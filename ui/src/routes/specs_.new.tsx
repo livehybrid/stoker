@@ -169,6 +169,64 @@ function formFromRunSnapshot(base: FormState, run: RunDetail): FormState {
   return next;
 }
 
+// A run's backfill, as the wizard's backfill fields. Runs launched since the
+// request was recorded carry it as given (a trailing window stays a trailing
+// window, a blank cap stays the deployment default); an older run only has
+// the planned range and the rate it delivered at, so those are used.
+interface BackfillPrefill {
+  runId: number;
+  mode: "last" | "range";
+  amount: string;
+  unit: "hours" | "days" | "weeks" | "years";
+  from: string;
+  to: string;
+  cap: string;
+  res: string;
+}
+
+const PREFILL_UNITS: [BackfillPrefill["unit"], number][] = [
+  ["years", 31557600],
+  ["weeks", 604800],
+  ["days", 86400],
+  ["hours", 3600],
+];
+
+function utcDate(epochS: number): string {
+  return new Date(epochS * 1000).toISOString().slice(0, 10);
+}
+
+function backfillFromRun(run: RunDetail): BackfillPrefill | null {
+  const snap = (run.spec_snapshot_json ?? {}) as Record<string, unknown>;
+  const bf = snap.backfill as Record<string, unknown> | null | undefined;
+  if (!bf) return null;
+  const plan = (snap.backfill_plan ?? {}) as Record<string, unknown>;
+  const req = (plan.request ?? null) as Record<string, unknown> | null;
+  const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  const out: BackfillPrefill = {
+    runId: run.id, mode: "range", amount: "24", unit: "hours",
+    from: "", to: "", cap: "", res: "",
+  };
+  const windowS = req ? n(req.window_s) : null;
+  if (windowS && windowS > 0) {
+    out.mode = "last";
+    const [unit, size] =
+      PREFILL_UNITS.find(([, size]) => windowS % size === 0) ?? ["hours", 3600];
+    out.unit = unit;
+    out.amount = String(Math.round((windowS / size) * 100) / 100);
+  } else {
+    const start = n(req?.start_s) ?? n(bf.start_s);
+    const end = n(req?.end_s) ?? n(bf.end_s);
+    if (start == null || end == null) return null;
+    out.from = utcDate(start);
+    out.to = utcDate(end);
+  }
+  const cap = req ? n(req.cap_eps) : n(snap.rate_value);
+  out.cap = cap && cap > 0 ? String(cap) : "";
+  const res = req ? n(req.resolution_s) : n(bf.resolution_s);
+  out.res = res && res > 0 ? String(res) : "";
+  return out;
+}
+
 function str(v: unknown): string {
   return typeof v === "string" ? v : v != null ? String(v) : "";
 }
@@ -226,6 +284,16 @@ function JobWizard() {
     queryKey: ["spec", loadId],
     queryFn: () => api.specs.get(loadId as number),
     enabled: loadId != null,
+  });
+
+  // Cloning a spec carries over how it was last launched: its latest run's
+  // backfill, if that run was one. (A run clone uses the run itself.)
+  const cloningSpec = !editing && typeof clone === "number";
+  const lastRunId = cloningSpec ? (specQ.data?.last_run?.id ?? null) : null;
+  const lastRunQ = useQuery({
+    queryKey: ["run", lastRunId],
+    queryFn: () => api.runs.get(lastRunId as number),
+    enabled: lastRunId != null,
   });
 
   const [form, setForm] = useState<FormState>(emptyForm);
@@ -324,7 +392,8 @@ function JobWizard() {
   });
 
   // Backfill is a per-run option (not stored on the spec): generate the last
-  // `window` of history then finish. Replay packs cannot backfill.
+  // `window` of history then finish. Replay packs cannot backfill. A clone
+  // prefills it from the run it copies (a spec clone: the spec's latest run).
   const [backfillOn, setBackfillOn] = useState(false);
   // "last N" is the common case; a range answers "January to April", which a
   // duration anchored to now cannot express at all.
@@ -337,6 +406,24 @@ function JobWizard() {
   const [backfillRes, setBackfillRes] = useState(""); // metrics coarse step; blank = pack default
   // Blank = the deployment's default (STOKER_BACKFILL_CAP_EPS, else 5000).
   const [backfillCap, setBackfillCap] = useState("");
+  const [backfillCarriedFrom, setBackfillFromRun] = useState<number | null>(null);
+  const backfillPrefilled = useRef(false);
+  const backfillSource = fromRun ? runQ.data : cloningSpec ? lastRunQ.data : undefined;
+  useEffect(() => {
+    if (backfillPrefilled.current || !backfillSource) return;
+    backfillPrefilled.current = true;
+    const bf = backfillFromRun(backfillSource);
+    if (!bf) return;
+    setBackfillOn(true);
+    setBackfillMode(bf.mode);
+    setBackfillAmount(bf.amount);
+    setBackfillUnit(bf.unit);
+    setBackfillFrom(bf.from);
+    setBackfillTo(bf.to);
+    setBackfillCap(bf.cap);
+    setBackfillRes(bf.res);
+    setBackfillFromRun(bf.runId);
+  }, [backfillSource]);
   const BACKFILL_UNIT_S: Record<string, number> = {
     hours: 3600, days: 86400, weeks: 604800, years: 31557600,
   };
@@ -936,6 +1023,12 @@ function JobWizard() {
           </Inline>
           {backfillOn && (
             <Stack>
+              {backfillCarriedFrom != null && (
+                <Muted>
+                  Carried over from run #{backfillCarriedFrom}. Check the range before
+                  launching: running it again writes that history again.
+                </Muted>
+              )}
               {replayStanzas.length > 0 && (
                 <Callout $tone="warning">
                   Left out of a backfill:{" "}

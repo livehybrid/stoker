@@ -33,6 +33,7 @@ import { TotalsStrip } from "../features/runs/TotalsStrip";
 import { SpecSnapshotPanel } from "../features/runs/SpecSnapshotPanel";
 import { EventLogPanel } from "../features/runs/EventLogPanel";
 import { LogTailPanel } from "../features/runs/LogTailPanel";
+import { ProgressPanel } from "../features/runs/ProgressPanel";
 import { DeleteRunsModal } from "../features/runs/DeleteRunsModal";
 import { Inline, Muted, Stack } from "../components/text";
 import TabBar from "@splunk/react-ui/TabBar";
@@ -82,6 +83,15 @@ function RunDetailPage() {
     refetchInterval: terminal ? false : POLL_MS,
     // Only fetch metrics once the run is known to exist (a 404 run short-circuits
     // to the error view below and never needs its metrics).
+    enabled: run.isSuccess,
+  });
+
+  // Progress reads the run's whole heartbeat history, so it polls more
+  // slowly than the live charts; a minute-scale estimate does not need 5 s.
+  const progress = useQuery({
+    queryKey: ["run", id, "progress"],
+    queryFn: () => api.runs.progress(id),
+    refetchInterval: terminal ? false : 30_000,
     enabled: run.isSuccess,
   });
 
@@ -200,6 +210,19 @@ function RunDetailPage() {
       <Card title="Totals">
         <TotalsStrip run={data} />
       </Card>
+
+      {progress.data && progress.data.kind !== "unbounded" && (
+        <Card
+          title={progress.data.kind === "backfill" ? "Backfill progress" : "Progress"}
+          actions={
+            progress.data.kind === "backfill" ? (
+              <Muted $small>finish estimated from the actual rate, not the target</Muted>
+            ) : undefined
+          }
+        >
+          <ProgressPanel progress={progress.data} />
+        </Card>
+      )}
 
       <Card
         title="Throughput"

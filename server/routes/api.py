@@ -31,7 +31,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .. import (bundles, catrust, crypto, gitsync, lifecycle, packexport, packrename,
+from .. import (bundles, catrust, crypto, gitsync, lifecycle, packexport, packrename, progress,
                 packsource, packupload, preview)
 from ..config import get_settings
 from ..db import get_db
@@ -73,6 +73,7 @@ from ..schemas import (
     RunEventOut,
     RunLaunch,
     RunLogsOut,
+    RunProgressOut,
     RunOut,
     ScaleRequest,
     SpecCreate,
@@ -1741,6 +1742,20 @@ def run_metrics(
         window=window,
         samples=[MetricSampleOut.model_validate(s) for s in samples],
     )
+
+
+@router.get("/runs/{run_id}/progress", response_model=RunProgressOut)
+def run_progress(
+    run_id: int,
+    points: int = Query(default=progress.DEFAULT_POINTS),
+    db: Session = Depends(get_db),
+):
+    # type: (...) -> Any
+    """Progress and estimated finish, with a burn-down series of ``points``."""
+    run = db.get(Run, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="unknown run")
+    return progress.run_progress(db, run, points=max(2, min(int(points), 1000)))
 
 
 @router.get("/runs/{run_id}/logs", response_model=RunLogsOut)

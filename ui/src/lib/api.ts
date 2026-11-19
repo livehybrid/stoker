@@ -47,6 +47,7 @@ import type {
   RunEventOut,
   RunLaunch,
   RunLogsOut,
+  RunProgress,
   RunOut,
   ScaleRequest,
   SetupRequest,
@@ -389,6 +390,8 @@ export const runs = {
     request<MetricsOut>("GET", `/runs/${id}/metrics`, {
       query: { res, window },
     }),
+  progress: (id: number, points = 120) =>
+    request<RunProgress>("GET", `/runs/${id}/progress`, { query: { points } }),
   logs: (id: number, opts: { slot?: number; tail?: number } = {}) =>
     request<RunLogsOut>("GET", `/runs/${id}/logs`, {
       query: { slot: opts.slot, tail: opts.tail },

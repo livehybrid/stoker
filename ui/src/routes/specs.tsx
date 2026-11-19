@@ -152,8 +152,16 @@ function Specs() {
 
   const columns: Column<SpecOut>[] = [
     {
+      key: "id",
+      header: "#",
+      align: "right",
+      sortValue: (s) => s.id,
+      cell: (s) => <Muted>{s.id}</Muted>,
+    },
+    {
       key: "name",
       header: "Name",
+      sortValue: (s) => s.name,
       cell: (s) => (
         <Inline>
           <Strong>{s.name}</Strong>
@@ -164,6 +172,7 @@ function Specs() {
     {
       key: "pack",
       header: "Pack",
+      sortValue: (s) => packById.get(s.pack_id)?.name ?? null,
       cell: (s) => {
         const p = packById.get(s.pack_id);
         return p ? (
@@ -176,6 +185,7 @@ function Specs() {
     {
       key: "target",
       header: "Target",
+      sortValue: (s) => targetById.get(s.target_id)?.name ?? null,
       cell: (s) => {
         const t = targetById.get(s.target_id);
         return t ? (
@@ -197,19 +207,28 @@ function Specs() {
         </span>
       ),
     },
-    { key: "workers", header: "Workers", cell: (s) => s.workers },
+    {
+      key: "workers",
+      header: "Workers",
+      align: "right",
+      sortValue: (s) => s.workers,
+      cell: (s) => s.workers,
+    },
     {
       key: "duration",
       header: "Duration",
+      // Unbounded sorts as the longest.
+      sortValue: (s) => s.duration_s ?? Number.MAX_SAFE_INTEGER,
       cell: (s) => (
         <Muted>{formatDuration(s.duration_s)}</Muted>
       ),
     },
-    { key: "fleet", header: "Fleet", cell: (s) => s.fleet },
+    { key: "fleet", header: "Fleet", sortValue: (s) => s.fleet, cell: (s) => s.fleet },
     {
       key: "runs",
       header: "Runs",
       align: "right",
+      sortValue: (s) => s.run_count ?? 0,
       cell: (s) =>
         s.run_count ? (
           <Link to="/runs" search={{ spec: s.id }} title="Show this spec's runs">
@@ -222,6 +241,12 @@ function Specs() {
     {
       key: "last_run",
       header: "Last run",
+      // By when it last ran; never-run specs go to the bottom.
+      sortValue: (s) => {
+        const r = s.last_run;
+        const when = r ? (r.ended_at ?? r.t0 ?? r.created_at) : null;
+        return when ? Date.parse(when) : null;
+      },
       cell: (s) => {
         const r = s.last_run;
         if (!r) return <Muted>never</Muted>;
@@ -307,6 +332,7 @@ function Specs() {
             columns={columns}
             rows={specsQ.data ?? []}
             rowKey={(s) => s.id}
+            defaultSort={{ key: "id", dir: "desc" }}
             empty={
               <EmptyState
                 title="No specs yet"
