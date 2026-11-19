@@ -260,6 +260,7 @@ trusted-proxy header, or an API token (`Authorization: Bearer stk_...`).
 **Runs**
 - `GET /api/runs`, `GET /api/runs/{id}` (state, snapshot, totals, lease roster, event log).
 - `GET /api/runs/{id}/metrics?res=5s&window=15m` -> samples within the window (raw samples ordered by ts/slot; `res` is echoed for the UI).
+- `GET /api/runs/{id}/progress?points=120` -> progress of a bounded run. `kind=backfill`: `planned_events` (from the snapshot's `backfill_plan`, or window x density for older runs), `done_events`, `recent_eps` (fleet throughput over the trailing 300 s), `eta_s` / `expected_end` at that actual rate, `target_end` at the delivery target, and a down-sampled `series` of cumulative events for the burn-down. `kind=duration`: a live run's clock end (start + duration + paused time). `kind=unbounded`: nothing to estimate.
 - `GET /api/runs/{id}/logs?slot=&tail=` -> recent worker log lines from the driver (falls back to a lease's stored `final_log_tail` for a finished run whose workload is gone). `tail` clamped to [1, 5000].
 - `GET /api/runs/{id}/events` -> the append-only audit trail.
 - `POST /api/runs/{id}/stop {force?}` -> drain (or immediate destroy when `force`). Works on a paused run.

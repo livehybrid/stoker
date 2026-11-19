@@ -158,6 +158,28 @@ const ROUTES = {
         leases: [LEASE],
         spec_snapshot_json: { engine: 'eventgen', overrides: { index: 'main' } },
     },
+    // A backfill run of July: a clone of it carries the range over.
+    '/runs/8': {
+        ...RUN,
+        id: 8,
+        leases: [LEASE],
+        spec_snapshot_json: {
+            engine: 'eventgen', rate_mode: 'eps', rate_value: 200000,
+            backfill: { start_s: 1782864000, end_s: 1785542400, resolution_s: null, density_eps: 1666 },
+            backfill_plan: { events: 4461148800,
+                             request: { window_s: null, start_s: 1782864000, end_s: 1785542400,
+                                        cap_eps: 200000, resolution_s: null } },
+        },
+    },
+    '/runs/7/progress': {
+        run_id: 7, state: 'running', kind: 'backfill', started_at: now,
+        target_eps: 200000, rate_window_s: 300,
+        planned_events: 4461148800, done_events: 1200000000, remaining_events: 3261148800,
+        fraction: 0.269, recent_eps: 180000, stale: false, eta_s: 18117,
+        expected_end: new Date(Date.parse(now) + 18117000).toISOString(),
+        target_end: new Date(Date.parse(now) + 16305000).toISOString(),
+        series: [0, 60, 120, 180].map((d, i) => ({ ts: Date.parse(now) + d * 1000, done: 300000000 * (i + 1) })),
+    },
     '/packs/5/preview': { stanzas: [], sample_lines: {}, lint_status: 'ok', lint_errors: [] },
     '/runs/7/metrics': { samples: SAMPLES },
     '/runs/7/events': { events: [] },
@@ -402,8 +424,24 @@ const go = async (pathname) => {
         }
     }
 
+    // Leave the wizard first: it prefills once per visit.
+    await go('/runs');
+    await go('/specs/new?cloneRun=8');
+    await check('clone backfill run: settings carried over', 'Carried over from run #8');
+    {
+        const dates = Array.from(window.document.querySelectorAll('input')).map((i) => i.value);
+        if (!dates.includes('2026-07-01') || !dates.includes('2026-08-01')) {
+            problems.push(`clone backfill run: range not carried over (saw ${JSON.stringify(dates)})`);
+        } else {
+            console.log('  ok  clone backfill run: range 2026-07-01 to 2026-08-01');
+        }
+    }
+
     await go('/runs/7');
     await check('run detail: totals', 'Events');
+    await check('run detail: backfill progress', 'Backfill progress');
+    await check('run detail: estimated finish', 'estimated finish');
+    await check('run detail: actual rate against target', '90% of the 200,000 target');
     await check('run detail: lease roster', 'worker-a');
     await check('run detail: tabs', 'Spec snapshot');
     await check('run detail: pause action', 'Pause');
@@ -426,9 +464,23 @@ const go = async (pathname) => {
         );
     await waitFor('run detail: chart series', () => svgText().includes('Actual ev/s'));
     await waitFor('run detail: chart overlay axis', () => svgText().includes('Bytes/s'));
+    await waitFor('run detail: burn-down drew', () => svgText().includes('Events left'));
+    await waitFor('run detail: burn-down projection', () => svgText().includes('Projected at the actual rate'));
 
     await go('/specs');
     await check('specs', 'steady-2k');
+    {
+        // Newest first by spec number, and the headers can be sorted.
+        const sortable = window.document.querySelectorAll('[aria-sort]').length;
+        if (!sortable) problems.push('specs: no sortable column headers');
+        else console.log(`  ok  specs: ${sortable} sortable headers`);
+        const desc = window.document.querySelector('[aria-sort="descending"]');
+        if (!desc || !(desc.textContent || '').includes('#')) {
+            problems.push('specs: not sorted by spec number, newest first');
+        } else {
+            console.log('  ok  specs: sorted by number, newest first');
+        }
+    }
 
     await go('/packs');
     await check('packs', 'apache-access');
